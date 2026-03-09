@@ -990,41 +990,74 @@ async function executeOpenAiCompatible(
     headers.authorization = `Bearer ${apiKey}`;
   }
 
-  const response = await fetch(`${baseUrl}/chat/completions`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      model: modelId,
-      messages: toOpenAiMessages(
-        request.conversation,
-        request.promptStack,
-        request.content,
-        request.purpose,
-      ),
-    }),
-  });
+  let messages: unknown[] = toOpenAiMessages(
+    request.conversation,
+    request.promptStack,
+    request.content,
+    request.purpose,
+  );
 
-  if (!response.ok) {
-    throw new Error(`Provider responded with ${response.status}.`);
+  for (let turn = 0; turn < 10; turn++) {
+    const body: Record<string, unknown> = { model: modelId, messages };
+
+    if (request.tools?.length) {
+      body.tools = request.tools.map((t) => ({
+        type: "function",
+        function: {
+          name: t.name,
+          description: t.description,
+          parameters: t.inputSchema,
+        },
+      }));
+    }
+
+    const response = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Provider responded with ${response.status}.`);
+    }
+
+    const payload = (await response.json()) as {
+      choices?: Array<{
+        message?: {
+          content?: unknown;
+          tool_calls?: Array<{ id: string; function: { name: string; arguments: string } }>;
+        };
+      }>;
+    };
+
+    const message = payload.choices?.[0]?.message;
+    const toolCalls = message?.tool_calls;
+
+    if (!toolCalls?.length || !request.onToolCall) {
+      const content = extractTextContent(message?.content);
+      if (!content.trim()) {
+        throw new Error("Provider returned an empty completion.");
+      }
+      return { content, modelId };
+    }
+
+    // Execute the first tool call and loop back with result.
+    const toolCall = toolCalls[0];
+    let toolInput: Record<string, unknown> = {};
+    try {
+      toolInput = JSON.parse(toolCall.function.arguments) as Record<string, unknown>;
+    } catch {
+      // Leave input empty on parse failure.
+    }
+    const toolResult = await request.onToolCall(toolCall.function.name, toolInput);
+    messages = [
+      ...messages,
+      { role: "assistant", content: null, tool_calls: toolCalls },
+      { role: "tool", tool_call_id: toolCall.id, content: toolResult },
+    ];
   }
 
-  const payload = (await response.json()) as {
-    choices?: Array<{
-      message?: {
-        content?: unknown;
-      };
-    }>;
-  };
-  const content = extractTextContent(payload.choices?.[0]?.message?.content);
-
-  if (!content.trim()) {
-    throw new Error("Provider returned an empty completion.");
-  }
-
-  return {
-    content,
-    modelId,
-  };
+  throw new Error("Tool call limit reached (10 turns) without a final response.");
 }
 
 async function streamOpenAiCompatible(
@@ -1033,6 +1066,13 @@ async function streamOpenAiCompatible(
   request: ProviderExecutionRequest,
   handlers: ProviderStreamHandlers,
 ): Promise<ProviderExecutionResult> {
+  // When tools are enabled, use the non-streaming path so the tool loop works cleanly.
+  if (request.tools?.length && request.onToolCall) {
+    handlers.onStatus?.("Running with tool access...");
+    const result = await executeOpenAiCompatible(provider, secrets, request);
+    return result;
+  }
+
   const baseUrl = resolveOpenAiBaseUrl(provider);
   if (!baseUrl) {
     throw new Error("OpenAI-compatible providers require a base URL.");
@@ -1138,38 +1178,65 @@ async function executeAnthropic(
     throw new Error("No model is assigned or discovered for this provider.");
   }
 
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
+  const systemPrompt = `${request.promptStack.shared}\n\n${request.promptStack.role}`;
+  const maxTokens = request.tools?.length ? 4096 : 1200;
+  let messages: unknown[] = toAnthropicMessages(request.conversation, request.content);
+
+  for (let turn = 0; turn < 10; turn++) {
+    const body: Record<string, unknown> = {
       model: modelId,
-      system: `${request.promptStack.shared}\n\n${request.promptStack.role}`,
-      max_tokens: 1200,
-      messages: toAnthropicMessages(request.conversation, request.content),
-    }),
-  });
+      system: systemPrompt,
+      max_tokens: maxTokens,
+      messages,
+    };
 
-  if (!response.ok) {
-    throw new Error(`Anthropic responded with ${response.status}.`);
+    if (request.tools?.length) {
+      body.tools = request.tools.map((t) => ({
+        name: t.name,
+        description: t.description,
+        input_schema: t.inputSchema,
+      }));
+    }
+
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Anthropic responded with ${response.status}.`);
+    }
+
+    const payload = (await response.json()) as {
+      content?: Array<{ type: string; text?: string; id?: string; name?: string; input?: Record<string, unknown> }>;
+      stop_reason?: string;
+    };
+
+    const toolUseBlock = payload.content?.find((b) => b.type === "tool_use");
+
+    if (!toolUseBlock || !request.onToolCall) {
+      const content = extractTextContent(payload.content);
+      if (!content.trim()) {
+        throw new Error("Anthropic returned an empty completion.");
+      }
+      return { content, modelId };
+    }
+
+    // Execute tool and loop back with result.
+    const toolResult = await request.onToolCall(toolUseBlock.name!, toolUseBlock.input ?? {});
+    messages = [
+      ...messages,
+      { role: "assistant", content: payload.content },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: toolUseBlock.id, content: toolResult }] },
+    ];
   }
 
-  const payload = (await response.json()) as {
-    content?: Array<{ text?: string }>;
-  };
-  const content = extractTextContent(payload.content);
-
-  if (!content.trim()) {
-    throw new Error("Anthropic returned an empty completion.");
-  }
-
-  return {
-    content,
-    modelId,
-  };
+  throw new Error("Tool call limit reached (10 turns) without a final response.");
 }
 
 async function streamAnthropic(
@@ -1178,6 +1245,14 @@ async function streamAnthropic(
   request: ProviderExecutionRequest,
   handlers: ProviderStreamHandlers,
 ): Promise<ProviderExecutionResult> {
+  // When tools are enabled, use the non-streaming path so the tool loop works
+  // cleanly. Status updates are still emitted around the call.
+  if (request.tools?.length && request.onToolCall) {
+    handlers.onStatus?.("Running with tool access...");
+    const result = await executeAnthropic(provider, secrets, request);
+    return result;
+  }
+
   const apiKey = secrets[provider.id]?.apiKey?.trim();
   if (!apiKey) {
     throw new Error("Anthropic providers require an API key.");

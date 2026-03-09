@@ -188,12 +188,24 @@ export interface ConversationSummary {
   messageCount: number;
 }
 
+export interface ToolDefinition {
+  name: string;
+  description: string;
+  inputSchema: {
+    type: "object";
+    properties: Record<string, { type: string; description: string }>;
+    required?: string[];
+  };
+}
+
 export interface ProviderExecutionRequest {
   modelId: string | null;
   promptStack: PromptStack;
   conversation: ChatMessage[];
   content: string;
   purpose?: "chat" | "route";
+  tools?: ToolDefinition[];
+  onToolCall?: (name: string, input: Record<string, unknown>) => Promise<string>;
 }
 
 export interface ProviderExecutionResult {

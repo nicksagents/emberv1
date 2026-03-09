@@ -39,6 +39,7 @@ import type {
 } from "@ember/core";
 import type { UiBlock } from "@ember/ui-schema";
 import { getPromptStack } from "@ember/prompts";
+import { ALL_TOOLS, handleToolCall } from "./tools.js";
 
 const host = process.env.EMBER_RUNTIME_HOST ?? "0.0.0.0";
 const port = Number(process.env.EMBER_RUNTIME_PORT ?? "3005");
@@ -645,6 +646,8 @@ async function buildExecution(
       promptStack: context.promptStack,
       conversation: request.conversation,
       content: request.content,
+      tools: ALL_TOOLS,
+      onToolCall: handleToolCall,
     });
 
     responseContent = execution.content;
@@ -681,6 +684,8 @@ async function buildExecution(
             promptStack: handoffCtx.promptStack,
             conversation: [],
             content: responseContent,
+            tools: ALL_TOOLS,
+            onToolCall: handleToolCall,
           });
           messages.push(
             buildReplyMessage(
@@ -1212,6 +1217,8 @@ app.post("/api/chat/stream", async (request, reply) => {
         promptStack: context.promptStack,
         conversation: body.conversation,
         content: body.content,
+        tools: ALL_TOOLS,
+        onToolCall: handleToolCall,
       },
       {
         onStatus(message) {
