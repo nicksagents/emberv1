@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "forceConsistentCasingInFileNames": true,
+    "jsx": "preserve",
+    "types": ["node"],
+    "baseUrl": ".",
+    "paths": {
+      "@ember/core": ["packages/core/src/index.ts"],
+      "@ember/core/client": ["packages/core/src/client.ts"],
+      "@ember/connectors": ["packages/connectors/src/index.ts"],
+      "@ember/prompts": ["packages/prompts/src/index.ts"],
+      "@ember/ui-schema": ["packages/ui-schema/src/index.ts"]
+    }
+  }
+}

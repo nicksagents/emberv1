@@ -1,0 +1,21 @@
+{
+  "name": "emberv1",
+  "private": true,
+  "packageManager": "pnpm@10.9.0",
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev:server": "pnpm --filter @ember/server dev",
+    "dev:web": "pnpm --filter @ember/web dev",
+    "doctor": "bash scripts/doctor.sh",
+    "start": "pnpm --filter @ember/cli dev start",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "tsup": "^8.3.5",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.2"
+  }
+}

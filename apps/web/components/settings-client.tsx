@@ -1,0 +1,1647 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+
+import type {
+  ConnectorType,
+  ConnectorTypeId,
+  Provider,
+  Role,
+  RoleAssignment,
+  RuntimeState,
+  Settings,
+} from "@ember/core/client";
+import { ROLES } from "@ember/core/client";
+
+import { clientApiPath } from "../lib/api";
+import { Surface } from "./surface";
+
+interface ProviderView extends Provider {
+  connectorType: ConnectorType | null;
+}
+
+interface ProviderEditorState {
+  name: string;
+  baseUrl: string;
+  defaultModelId: string;
+  apiKey: string;
+}
+
+interface ProviderPreset {
+  name: string;
+  description: string;
+  requiresKey: boolean;
+  keyPlaceholder?: string;
+  keyHelp?: string;
+  baseUrl?: string;
+  setupNote: string;
+}
+
+const PROVIDER_PRESETS: Record<ConnectorTypeId, ProviderPreset> = {
+  "codex-cli": {
+    name: "Codex CLI",
+    description: "Use your local Codex login and automatically pull the models on that account.",
+    requiresKey: false,
+    setupNote: "Model choices come from your local Codex CLI session on this machine.",
+  },
+  "claude-code-cli": {
+    name: "Claude Code CLI",
+    description: "Use your local Claude login and pull the models available to that subscription.",
+    requiresKey: false,
+    setupNote: "Model choices come from your local Claude CLI install and account metadata.",
+  },
+  "anthropic-api": {
+    name: "Anthropic API",
+    description: "Connect with an API key and fetch the available Claude models automatically.",
+    requiresKey: true,
+    keyPlaceholder: "sk-ant-...",
+    keyHelp: "The runtime pulls your available models from Anthropic after connect.",
+    setupNote: "No manual model entry. EMBER fetches the current model catalog for this key.",
+  },
+  "openai-compatible": {
+    name: "OpenAI-Compatible Endpoint",
+    description: "Connect OpenAI or a local model server and fetch models from the /models endpoint.",
+    requiresKey: false,
+    keyPlaceholder: "sk-... (optional for local)",
+    keyHelp: "Leave blank for local endpoints that do not require auth.",
+    baseUrl: "http://127.0.0.1:11434/v1",
+    setupNote: "EMBER calls /models on the endpoint so users do not need to type model ids manually.",
+  },
+};
+
+interface QuickPreset {
+  id: string;
+  label: string;
+  tagline: string;
+  iconBg: string;
+  typeId: ConnectorTypeId;
+  baseUrl?: string;
+  apiKeyPlaceholder?: string;
+  apiKeyRequired: boolean;
+  defaultModelSuggestion?: string;
+}
+
+function ProviderIcon({ id }: { id: string }) {
+  switch (id) {
+    case "claude-api":
+      // Anthropic logo: 5 vertical bars of varying heights
+      return (
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+          <rect x="2.5"  y="8"  width="2.6" height="8"  rx="1.3" fill="white" />
+          <rect x="6.8"  y="4"  width="2.6" height="16" rx="1.3" fill="white" />
+          <rect x="11.1" y="2"  width="2.6" height="20" rx="1.3" fill="white" />
+          <rect x="15.4" y="4"  width="2.6" height="16" rx="1.3" fill="white" />
+          <rect x="19.7" y="8"  width="2.6" height="8"  rx="1.3" fill="white" />
+        </svg>
+      );
+    case "gemini":
+      // Google Gemini: 4-pointed sparkle
+      return (
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+          <path
+            d="M12 2C11.4 6.5 9.2 9.2 6 12c3.2 2.8 5.4 5.5 6 10 .6-4.5 2.8-7.2 6-10-3.2-2.8-5.4-5.5-6-10z"
+            fill="white"
+          />
+        </svg>
+      );
+    case "kimi":
+      // Moonshot: crescent moon
+      return (
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+          <path
+            d="M21 12.79A9 9 0 1 1 11.21 3a7 7 0 1 0 9.79 9.79z"
+            fill="white"
+          />
+        </svg>
+      );
+    case "deepseek":
+      // DeepSeek: stylised whale / D shape
+      return (
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+          <path
+            d="M5 5h6a7 7 0 0 1 0 14H5V5zm3.5 3v8H11a3.5 3.5 0 0 0 0-7H8.5z M15.5 16.5a1.5 1.5 0 1 0 3 0 1.5 1.5 0 0 0-3 0z"
+            fill="white"
+          />
+        </svg>
+      );
+    case "codex":
+      // OpenAI Codex: terminal prompt / code brackets
+      return (
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+          <path d="M8 8 4 12l4 4" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          <path d="M16 8l4 4-4 4" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          <path d="M14 5l-4 14" stroke="white" strokeWidth="2" strokeLinecap="round" />
+        </svg>
+      );
+    case "local":
+      // Local: server/computer
+      return (
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+          <rect x="2" y="3" width="20" height="13" rx="2" stroke="white" strokeWidth="2" />
+          <path d="M8 21h8M12 16v5" stroke="white" strokeWidth="2" strokeLinecap="round" />
+          <circle cx="12" cy="9.5" r="2" fill="white" />
+        </svg>
+      );
+    default:
+      return null;
+  }
+}
+
+const QUICK_PRESETS: QuickPreset[] = [
+  {
+    id: "claude-api",
+    label: "Claude",
+    tagline: "Anthropic API",
+    iconBg: "#7b61ff",
+    typeId: "anthropic-api",
+    apiKeyPlaceholder: "sk-ant-...",
+    defaultModelSuggestion: "claude-sonnet-4-5",
+    apiKeyRequired: true,
+  },
+  {
+    id: "gemini",
+    label: "Gemini",
+    tagline: "Google AI",
+    iconBg: "#4285f4",
+    typeId: "openai-compatible",
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai/",
+    apiKeyPlaceholder: "AIza...",
+    defaultModelSuggestion: "gemini-2.0-flash",
+    apiKeyRequired: true,
+  },
+  {
+    id: "kimi",
+    label: "Kimi",
+    tagline: "Moonshot AI",
+    iconBg: "#0f2744",
+    typeId: "openai-compatible",
+    baseUrl: "https://api.moonshot.cn/v1",
+    apiKeyPlaceholder: "sk-...",
+    defaultModelSuggestion: "moonshot-v1-8k",
+    apiKeyRequired: true,
+  },
+  {
+    id: "deepseek",
+    label: "DeepSeek",
+    tagline: "DeepSeek AI",
+    iconBg: "#1248cc",
+    typeId: "openai-compatible",
+    baseUrl: "https://api.deepseek.com/v1",
+    apiKeyPlaceholder: "sk-...",
+    defaultModelSuggestion: "deepseek-chat",
+    apiKeyRequired: true,
+  },
+  {
+    id: "codex",
+    label: "Codex",
+    tagline: "CLI · browser login",
+    iconBg: "#10a37f",
+    typeId: "codex-cli",
+    apiKeyRequired: false,
+  },
+  {
+    id: "local",
+    label: "Local",
+    tagline: "Ollama · LM Studio",
+    iconBg: "#2d8a4e",
+    typeId: "openai-compatible",
+    baseUrl: "http://127.0.0.1:11434/v1",
+    apiKeyRequired: false,
+  },
+];
+
+const ROLE_DETAILS: Record<Role, { title: string; description: string }> = {
+  router: {
+    title: "Router",
+    description: "Chooses the best role when chat is running in auto mode.",
+  },
+  assistant: {
+    title: "Assistant",
+    description: "Handles direct answers, general help, and lightweight tasks.",
+  },
+  planner: {
+    title: "Planner",
+    description: "Breaks larger requests into steps and execution plans.",
+  },
+  coder: {
+    title: "Coder",
+    description: "Implements product, UI, and code changes across the workspace.",
+  },
+  auditor: {
+    title: "Auditor",
+    description: "Reviews work for bugs, regressions, and missing validation.",
+  },
+  janitor: {
+    title: "Janitor",
+    description: "Cleans up formatting, naming, and low-risk polish tasks.",
+  },
+};
+
+type SettingsPanelId = "general" | "providers" | "roles" | "prompts";
+
+const SETTINGS_PANELS: Array<{
+  id: SettingsPanelId;
+  label: string;
+  description: string;
+}> = [
+  {
+    id: "general",
+    label: "General",
+    description: "Profile and workspace defaults",
+  },
+  {
+    id: "providers",
+    label: "Providers",
+    description: "Connections and model discovery",
+  },
+  {
+    id: "roles",
+    label: "Roles",
+    description: "Provider and model routing",
+  },
+  {
+    id: "prompts",
+    label: "Prompts",
+    description: "System prompt overrides",
+  },
+];
+
+function scoreModel(modelId: string): number {
+  const normalized = modelId.toLowerCase();
+  let score = 0;
+
+  if (/latest|default|recommended/.test(normalized)) score += 300;
+  if (/opus/.test(normalized)) score += 220;
+  if (/sonnet/.test(normalized)) score += 210;
+  if (/codex/.test(normalized)) score += 205;
+  if (/gpt-5/.test(normalized)) score += 200;
+  if (/gpt-4\.1|gpt-4-1/.test(normalized)) score += 180;
+  if (/gpt-4o/.test(normalized)) score += 170;
+  if (/gpt-4/.test(normalized)) score += 160;
+  if (/claude/.test(normalized)) score += 150;
+  if (/qwen/.test(normalized)) score += 120;
+  if (/llama/.test(normalized)) score += 110;
+  if (/mistral|mixtral/.test(normalized)) score += 100;
+
+  const digitMatches = normalized.match(/\d+/g) ?? [];
+  for (const value of digitMatches) {
+    score += Number(value) / 100;
+  }
+
+  return score;
+}
+
+function normalizeModels(models: string[]): string[] {
+  return [...new Set(models.map((model) => model.trim()).filter(Boolean))].sort((left, right) => {
+    const scoreDifference = scoreModel(right) - scoreModel(left);
+    if (scoreDifference !== 0) {
+      return scoreDifference;
+    }
+
+    return right.localeCompare(left, undefined, {
+      numeric: true,
+      sensitivity: "base",
+    });
+  });
+}
+
+function getBestModel(models: string[]): string | null {
+  return normalizeModels(models)[0] ?? null;
+}
+
+function getProviderModels(
+  provider: Provider,
+  modelCatalog: Partial<Record<ConnectorTypeId, string[]>>,
+): string[] {
+  return normalizeModels([
+    ...provider.availableModels,
+    ...(provider.typeId === "codex-cli" || provider.typeId === "claude-code-cli"
+      ? modelCatalog[provider.typeId] ?? []
+      : []),
+    provider.config.defaultModelId ?? "",
+  ]);
+}
+
+function getStatusLabel(provider: Provider, modelCount: number): string {
+  if (provider.status === "connected") {
+    if (modelCount > 0 && provider.capabilities.canChat) {
+      return `${modelCount} discovered models`;
+    }
+
+    if (modelCount > 0 && !provider.capabilities.canChat) {
+      return `${modelCount} discovered models, role execution pending`;
+    }
+
+    return "Connected";
+  }
+
+  if (provider.status === "needs-auth") {
+    return "Authentication required";
+  }
+
+  if (provider.status === "missing") {
+    return "Local connector not installed";
+  }
+
+  if (provider.status === "error") {
+    return "Connection error";
+  }
+
+  return "Not checked yet";
+}
+
+function getProviderTypeLabel(provider: ProviderView): string {
+  return provider.connectorType?.name ?? PROVIDER_PRESETS[provider.typeId].name;
+}
+
+function getProviderAuthLabel(provider: Provider): string {
+  if (provider.typeId === "codex-cli" || provider.typeId === "claude-code-cli") {
+    return "Local CLI session";
+  }
+
+  return provider.capabilities.requiresBrowserAuth ? "Browser sign-in" : "API key / endpoint";
+}
+
+function getProviderSummary(provider: ProviderView, modelCount: number): string {
+  if (provider.status === "connected") {
+    if (modelCount > 0) {
+      return provider.capabilities.canChat
+        ? "Connected and ready to use."
+        : "Connected. Models found, but chat is not available yet.";
+    }
+
+    return "Connected. Refresh after authentication to discover models.";
+  }
+
+  if (provider.status === "needs-auth") {
+    return provider.capabilities.requiresBrowserAuth
+      ? "Finish sign-in to discover models."
+      : "Add credentials and refresh to discover models.";
+  }
+
+  if (provider.status === "missing") {
+    return "Install the required local connector on this machine.";
+  }
+
+  if (provider.status === "error") {
+    return "Connection check failed. Review the error below.";
+  }
+
+  return "Run a connection check to discover available models.";
+}
+
+function deriveProviderName(typeId: ConnectorTypeId, baseUrl: string): string {
+  if (typeId === "codex-cli") {
+    return "Codex CLI";
+  }
+
+  if (typeId === "claude-code-cli") {
+    return "Claude Code CLI";
+  }
+
+  if (typeId === "anthropic-api") {
+    return "Anthropic API";
+  }
+
+  try {
+    const url = new URL(baseUrl);
+    if (/^(localhost|127\.0\.0\.1|0\.0\.0\.0)$/i.test(url.hostname)) {
+      return "Local Model Server";
+    }
+    if (/openai\.com$/i.test(url.hostname)) return "OpenAI API";
+    if (/googleapis\.com$/i.test(url.hostname)) return "Gemini";
+    if (/moonshot\.cn$/i.test(url.hostname)) return "Kimi";
+    if (/deepseek\.com$/i.test(url.hostname)) return "DeepSeek";
+    return url.hostname;
+  } catch {
+    return "OpenAI-Compatible Endpoint";
+  }
+}
+
+function formatStartedAt(value: string | null): string {
+  if (!value) {
+    return "Not running";
+  }
+
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(new Date(value));
+  } catch {
+    return value;
+  }
+}
+
+function createProviderEditorState(provider: Provider): ProviderEditorState {
+  return {
+    name: provider.name,
+    baseUrl: provider.config.baseUrl ?? PROVIDER_PRESETS["openai-compatible"].baseUrl ?? "",
+    defaultModelId: provider.config.defaultModelId ?? "",
+    apiKey: "",
+  };
+}
+
+export function SettingsClient({
+  initialSettings,
+  runtime,
+  initialProviders,
+  connectorTypes,
+  modelCatalog,
+  initialAssignments,
+}: {
+  initialSettings: Settings;
+  runtime: RuntimeState;
+  initialProviders: ProviderView[];
+  connectorTypes: ConnectorType[];
+  modelCatalog: Partial<Record<ConnectorTypeId, string[]>>;
+  initialAssignments: RoleAssignment[];
+}) {
+  const [settings, setSettings] = useState(initialSettings);
+  const [providers, setProviders] = useState(initialProviders);
+  const [assignments, setAssignments] = useState(initialAssignments);
+  const [savingWorkspace, setSavingWorkspace] = useState(false);
+  const [busyProviderId, setBusyProviderId] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ tone: "success" | "danger"; message: string } | null>(
+    null,
+  );
+
+  const [showAddProvider, setShowAddProvider] = useState(false);
+  const [selectedProviderType, setSelectedProviderType] = useState<ConnectorTypeId | null>(null);
+  const [providerName, setProviderName] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [baseUrl, setBaseUrl] = useState(PROVIDER_PRESETS["openai-compatible"].baseUrl ?? "");
+  const [defaultModelId, setDefaultModelId] = useState("");
+  const [creatingProvider, setCreatingProvider] = useState(false);
+  const [editingProviderId, setEditingProviderId] = useState<string | null>(null);
+  const [providerEditor, setProviderEditor] = useState<ProviderEditorState | null>(null);
+  const [activePanel, setActivePanel] = useState<SettingsPanelId>("general");
+  const [selectedQuickPresetId, setSelectedQuickPresetId] = useState<string | null>(null);
+
+  const providerMap = useMemo(
+    () => new Map(providers.map((provider) => [provider.id, provider])),
+    [providers],
+  );
+
+  const providerModelsMap = useMemo(
+    () =>
+      new Map(
+        providers.map((provider) => [provider.id, getProviderModels(provider, modelCatalog)]),
+      ),
+    [modelCatalog, providers],
+  );
+
+  const connectedProviders = useMemo(
+    () => providers.filter((provider) => provider.status === "connected"),
+    [providers],
+  );
+
+  const roleReadyProviders = useMemo(
+    () =>
+      providers.filter((provider) => {
+        const models = providerModelsMap.get(provider.id) ?? [];
+        return provider.status === "connected" && provider.capabilities.canChat && models.length > 0;
+      }),
+    [providerModelsMap, providers],
+  );
+
+  const orderedProviders = useMemo(() => {
+    const statusWeight: Record<Provider["status"], number> = {
+      connected: 0,
+      "needs-auth": 1,
+      idle: 2,
+      error: 3,
+      missing: 4,
+    };
+
+    return [...providers].sort((left, right) => {
+      const statusDifference = statusWeight[left.status] - statusWeight[right.status];
+      if (statusDifference !== 0) {
+        return statusDifference;
+      }
+
+      const leftModels = providerModelsMap.get(left.id)?.length ?? 0;
+      const rightModels = providerModelsMap.get(right.id)?.length ?? 0;
+      if (rightModels !== leftModels) {
+        return rightModels - leftModels;
+      }
+
+      return left.name.localeCompare(right.name);
+    });
+  }, [providerModelsMap, providers]);
+
+  const selectedCliModels =
+    selectedProviderType &&
+    (selectedProviderType === "codex-cli" || selectedProviderType === "claude-code-cli")
+      ? normalizeModels(modelCatalog[selectedProviderType] ?? [])
+      : [];
+
+  const assignedRoleCount = assignments.filter(
+    (assignment) => assignment.providerId && assignment.modelId,
+  ).length;
+
+  useEffect(() => {
+    if (roleReadyProviders.length === 0) {
+      return;
+    }
+
+    setAssignments((current) =>
+      current.map((assignment) => {
+        if (assignment.providerId && assignment.modelId) {
+          return assignment;
+        }
+
+        const provider = assignment.providerId
+          ? providerMap.get(assignment.providerId) ?? roleReadyProviders[0]
+          : roleReadyProviders[0];
+        const models = provider ? providerModelsMap.get(provider.id) ?? [] : [];
+
+        if (!provider || models.length === 0) {
+          return assignment;
+        }
+
+        return {
+          ...assignment,
+          providerId: provider.id,
+          modelId: assignment.modelId ?? getBestModel(models),
+        };
+      }),
+    );
+  }, [providerMap, providerModelsMap, roleReadyProviders]);
+
+  function resetProviderBuilder() {
+    setShowAddProvider(false);
+    setSelectedProviderType(null);
+    setSelectedQuickPresetId(null);
+    setProviderName("");
+    setApiKey("");
+    setBaseUrl(PROVIDER_PRESETS["openai-compatible"].baseUrl ?? "");
+    setDefaultModelId("");
+  }
+
+  function startEditingProvider(provider: Provider) {
+    setActivePanel("providers");
+    setEditingProviderId(provider.id);
+    setProviderEditor(createProviderEditorState(provider));
+  }
+
+  function stopEditingProvider() {
+    setEditingProviderId(null);
+    setProviderEditor(null);
+  }
+
+  function setRolePrompt(role: Role, value: string) {
+    setSettings((current) => ({
+      ...current,
+      systemPrompts: {
+        ...current.systemPrompts,
+        roles: {
+          ...current.systemPrompts.roles,
+          [role]: value,
+        },
+      },
+    }));
+  }
+
+  function updateRoleProvider(role: RoleAssignment["role"], providerId: string) {
+    const nextProviderId = providerId || null;
+    const provider = nextProviderId ? providerMap.get(nextProviderId) ?? null : null;
+    const models = provider ? providerModelsMap.get(provider.id) ?? [] : [];
+
+    setAssignments((current) =>
+      current.map((assignment) =>
+        assignment.role === role
+          ? {
+              ...assignment,
+              providerId: nextProviderId,
+              modelId: nextProviderId ? getBestModel(models) : null,
+            }
+          : assignment,
+      ),
+    );
+  }
+
+  function updateRoleModel(role: RoleAssignment["role"], modelId: string) {
+    setAssignments((current) =>
+      current.map((assignment) =>
+        assignment.role === role ? { ...assignment, modelId: modelId || null } : assignment,
+      ),
+    );
+  }
+
+  function autoAssignRoles() {
+    if (roleReadyProviders.length === 0) {
+      setNotice({
+        tone: "danger",
+        message: "No connected chat providers with discovered models are ready for role assignment.",
+      });
+      return;
+    }
+
+    const bestProvider = [...roleReadyProviders].sort((left, right) => {
+      const rightModelCount = providerModelsMap.get(right.id)?.length ?? 0;
+      const leftModelCount = providerModelsMap.get(left.id)?.length ?? 0;
+      if (rightModelCount !== leftModelCount) {
+        return rightModelCount - leftModelCount;
+      }
+
+      return scoreModel(getBestModel(providerModelsMap.get(right.id) ?? []) ?? "") -
+        scoreModel(getBestModel(providerModelsMap.get(left.id) ?? []) ?? "");
+    })[0];
+    const bestModel = getBestModel(providerModelsMap.get(bestProvider.id) ?? []);
+
+    setAssignments((current) =>
+      current.map((assignment) => ({
+        ...assignment,
+        providerId: bestProvider.id,
+        modelId: bestModel,
+      })),
+    );
+
+    setNotice({
+      tone: "success",
+      message: `Assigned all roles to ${bestProvider.name}${bestModel ? ` (${bestModel})` : ""}.`,
+    });
+  }
+
+  async function saveWorkspace() {
+    setSavingWorkspace(true);
+    setNotice(null);
+
+    try {
+      const [settingsResponse, rolesResponse] = await Promise.all([
+        fetch(clientApiPath("/settings"), {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ item: settings }),
+        }),
+        fetch(clientApiPath("/roles"), {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ items: assignments }),
+        }),
+      ]);
+
+      if (!settingsResponse.ok || !rolesResponse.ok) {
+        throw new Error("Saving settings failed.");
+      }
+
+      setNotice({ tone: "success", message: "Settings saved successfully." });
+    } catch (error) {
+      setNotice({
+        tone: "danger",
+        message: error instanceof Error ? error.message : "Save failed.",
+      });
+    } finally {
+      setSavingWorkspace(false);
+    }
+  }
+
+  async function mutateProvider(
+    id: string,
+    action: "connect" | "reconnect" | "recheck" | "delete",
+  ) {
+    setBusyProviderId(id);
+    setNotice(null);
+    const providerNameValue = providers.find((provider) => provider.id === id)?.name ?? "Provider";
+
+    try {
+      const method = action === "delete" ? "DELETE" : "POST";
+      const endpoint =
+        action === "delete"
+          ? clientApiPath(`/providers/${id}`)
+          : clientApiPath(`/providers/${id}/${action}`);
+      const response = await fetch(endpoint, { method });
+
+      if (!response.ok) {
+        throw new Error(`${action} failed with status ${response.status}.`);
+      }
+
+      if (action === "delete") {
+        setProviders((current) => current.filter((provider) => provider.id !== id));
+        setAssignments((current) =>
+          current.map((assignment) =>
+            assignment.providerId === id
+              ? { ...assignment, providerId: null, modelId: null }
+              : assignment,
+          ),
+        );
+        setNotice({ tone: "success", message: `${providerNameValue} removed.` });
+        return;
+      }
+
+      const payload = (await response.json()) as { item: Provider };
+      setProviders((current) =>
+        current.map((provider) =>
+          provider.id === id
+            ? { ...provider, ...payload.item, connectorType: provider.connectorType }
+            : provider,
+        ),
+      );
+
+      const discoveredCount = payload.item.availableModels.length;
+      const actionLabel = action === "recheck" ? "refreshed" : "updated";
+      setNotice({
+        tone: "success",
+        message:
+          discoveredCount > 0
+            ? `${providerNameValue} ${actionLabel}. ${discoveredCount} models discovered.`
+            : `${providerNameValue} ${actionLabel}.`,
+      });
+    } catch (error) {
+      setNotice({
+        tone: "danger",
+        message: error instanceof Error ? error.message : "Provider action failed.",
+      });
+    } finally {
+      setBusyProviderId(null);
+    }
+  }
+
+  async function saveProviderEdits(provider: Provider) {
+    if (!providerEditor) {
+      return;
+    }
+
+    setBusyProviderId(provider.id);
+    setNotice(null);
+
+    try {
+      const config: Record<string, string> = {};
+      const secrets: Record<string, string> = {};
+
+      if (provider.typeId === "openai-compatible") {
+        config.baseUrl = providerEditor.baseUrl.trim();
+      }
+
+      if (providerEditor.defaultModelId.trim()) {
+        config.defaultModelId = providerEditor.defaultModelId.trim();
+      } else {
+        config.defaultModelId = "";
+      }
+
+      if (providerEditor.apiKey.trim()) {
+        secrets.apiKey = providerEditor.apiKey.trim();
+      }
+
+      const updateResponse = await fetch(clientApiPath(`/providers/${provider.id}`), {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: providerEditor.name.trim(),
+          config,
+          secrets,
+        }),
+      });
+
+      if (!updateResponse.ok) {
+        throw new Error(`Update failed with status ${updateResponse.status}.`);
+      }
+
+      let updatedProvider = ((await updateResponse.json()) as { item: Provider }).item;
+      const recheckResponse = await fetch(clientApiPath(`/providers/${provider.id}/recheck`), {
+        method: "POST",
+      });
+
+      if (recheckResponse.ok) {
+        updatedProvider = ((await recheckResponse.json()) as { item: Provider }).item;
+      }
+
+      setProviders((current) =>
+        current.map((candidate) =>
+          candidate.id === provider.id
+            ? {
+                ...candidate,
+                ...updatedProvider,
+                connectorType: candidate.connectorType,
+              }
+            : candidate,
+        ),
+      );
+
+      stopEditingProvider();
+      setNotice({
+        tone: "success",
+        message: `${updatedProvider.name} saved and refreshed.`,
+      });
+    } catch (error) {
+      setNotice({
+        tone: "danger",
+        message: error instanceof Error ? error.message : "Provider update failed.",
+      });
+    } finally {
+      setBusyProviderId(null);
+    }
+  }
+
+  async function createPresetProvider() {
+    if (!selectedProviderType) {
+      return;
+    }
+
+    setCreatingProvider(true);
+    setNotice(null);
+
+    try {
+      const config: Record<string, string> = {};
+      const secrets: Record<string, string> = {};
+
+      if (
+        (selectedProviderType === "codex-cli" || selectedProviderType === "claude-code-cli") &&
+        defaultModelId.trim()
+      ) {
+        config.defaultModelId = defaultModelId.trim();
+      }
+
+      if (selectedProviderType === "openai-compatible") {
+        config.baseUrl = baseUrl.trim();
+        if (defaultModelId.trim()) {
+          config.defaultModelId = defaultModelId.trim();
+        }
+        if (apiKey.trim()) {
+          secrets.apiKey = apiKey.trim();
+        }
+      }
+
+      if (selectedProviderType === "anthropic-api") {
+        if (defaultModelId.trim()) {
+          config.defaultModelId = defaultModelId.trim();
+        }
+        if (apiKey.trim()) {
+          secrets.apiKey = apiKey.trim();
+        }
+      }
+
+      const providerNameValue =
+        providerName.trim() ||
+        (selectedProviderType === "openai-compatible"
+          ? deriveProviderName(selectedProviderType, baseUrl.trim())
+          : PROVIDER_PRESETS[selectedProviderType].name);
+
+      const response = await fetch(clientApiPath("/providers"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: providerNameValue,
+          typeId: selectedProviderType,
+          config,
+          secrets,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Create failed with status ${response.status}.`);
+      }
+
+      const payload = (await response.json()) as { item: Provider };
+      let createdProvider = payload.item;
+
+      const recheck = await fetch(clientApiPath(`/providers/${payload.item.id}/recheck`), {
+        method: "POST",
+      });
+      if (recheck.ok) {
+        const rechecked = (await recheck.json()) as { item: Provider };
+        createdProvider = rechecked.item;
+      }
+
+      setProviders((current) => [
+        {
+          ...createdProvider,
+          connectorType:
+            connectorTypes.find((connectorType) => connectorType.id === createdProvider.typeId) ??
+            null,
+        },
+        ...current,
+      ]);
+
+      resetProviderBuilder();
+
+      const discoveredCount = createdProvider.availableModels.length;
+      setNotice({
+        tone: "success",
+        message:
+          discoveredCount > 0
+            ? `${providerNameValue} connected. ${discoveredCount} models discovered automatically.`
+            : `${providerNameValue} added. Run a refresh after authentication to pull models.`,
+      });
+    } catch (error) {
+      setNotice({
+        tone: "danger",
+        message: error instanceof Error ? error.message : "Provider creation failed.",
+      });
+    } finally {
+      setCreatingProvider(false);
+    }
+  }
+
+  return (
+    <div className="settings-page">
+      <div className="topbar chat-topbar settings-topbar">
+        <div className="chat-topbar-inner">
+          <button
+            type="button"
+            className="icon-btn chat-topbar-toggle"
+            onClick={() => window.dispatchEvent(new CustomEvent("toggleSidebar"))}
+            aria-label="Toggle sidebar"
+          >
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <line x1="3" y1="12" x2="21" y2="12" />
+              <line x1="3" y1="6" x2="21" y2="6" />
+              <line x1="3" y1="18" x2="21" y2="18" />
+            </svg>
+          </button>
+          <div className="chat-topbar-copy">
+            <span className="topbar-title">Settings</span>
+          </div>
+          <div className="topbar-spacer" />
+        </div>
+      </div>
+
+      <div className="settings-shell settings-shell-minimal">
+        <div className="settings-page-head">
+          <div>
+            <h1>Settings</h1>
+            <p className="helper-copy">
+              Smaller, quieter controls for providers, routing, and prompts.
+            </p>
+          </div>
+          <button className="button primary" onClick={saveWorkspace} disabled={savingWorkspace}>
+            {savingWorkspace ? "Saving..." : "Save Changes"}
+          </button>
+        </div>
+
+        {notice ? <div className={`notice-strip ${notice.tone}`}>{notice.message}</div> : null}
+
+        <div className="settings-minimal-layout">
+          <nav className="settings-rail" aria-label="Settings sections">
+            {SETTINGS_PANELS.map((panel) => (
+              <button
+                key={panel.id}
+                type="button"
+                className={`settings-rail-item${activePanel === panel.id ? " active" : ""}`}
+                onClick={() => setActivePanel(panel.id)}
+              >
+                <span>{panel.label}</span>
+                <small>{panel.description}</small>
+              </button>
+            ))}
+          </nav>
+
+          <div className="settings-content">
+            {activePanel === "general" ? (
+              <Surface className="settings-pane">
+                <div className="settings-pane-head">
+                  <div>
+                    <h2>General</h2>
+                    <p className="helper-copy">
+                      Workspace identity, runtime status, and default operator information.
+                    </p>
+                  </div>
+                </div>
+
+                <section className="settings-block">
+                  <div className="settings-block-head">
+                    <h3>Profile</h3>
+                    <p className="helper-copy">How Ember should refer to you inside chat.</p>
+                  </div>
+                  <div className="settings-inline-grid">
+                    <label className="field">
+                      <span>Your name</span>
+                      <input
+                        value={settings.humanName}
+                        onChange={(event) =>
+                          setSettings((current) => ({ ...current, humanName: event.target.value }))
+                        }
+                        placeholder="How Ember should address you"
+                      />
+                    </label>
+                    <div className="settings-inline-note">
+                      <span className="section-label">Overview</span>
+                      <p>{connectedProviders.length} connected providers</p>
+                      <p>
+                        {assignedRoleCount}/{assignments.length} roles assigned
+                      </p>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="settings-block">
+                  <div className="settings-block-head">
+                    <h3>Workspace</h3>
+                    <p className="helper-copy">Current runtime and endpoint information.</p>
+                  </div>
+                  <dl className="settings-definition-grid">
+                    <div>
+                      <dt>Status</dt>
+                      <dd>{runtime.status}</dd>
+                    </div>
+                    <div>
+                      <dt>Started</dt>
+                      <dd>{formatStartedAt(runtime.startedAt)}</dd>
+                    </div>
+                    <div>
+                      <dt>Web URL</dt>
+                      <dd>{runtime.webUrl || settings.runtimeInfo.webUrl}</dd>
+                    </div>
+                    <div>
+                      <dt>API URL</dt>
+                      <dd>{runtime.apiUrl || settings.runtimeInfo.apiUrl}</dd>
+                    </div>
+                    <div className="wide">
+                      <dt>Workspace Root</dt>
+                      <dd>{settings.workspaceRoot}</dd>
+                    </div>
+                  </dl>
+                </section>
+
+                <section className="settings-block">
+                  <div className="settings-block-head">
+                    <h3>Model discovery</h3>
+                    <p className="helper-copy">
+                      These rules control how models appear in provider and role pickers.
+                    </p>
+                  </div>
+                  <div className="settings-rule-list">
+                    <div className="settings-rule-row">
+                      <strong>OpenAI-compatible endpoints</strong>
+                      <span>Fetch from the provider&apos;s <code>/models</code> endpoint.</span>
+                    </div>
+                    <div className="settings-rule-row">
+                      <strong>Codex CLI</strong>
+                      <span>Read models from the local Codex account metadata on this machine.</span>
+                    </div>
+                    <div className="settings-rule-row">
+                      <strong>Claude Code CLI</strong>
+                      <span>Read models from the local Claude subscription metadata on this machine.</span>
+                    </div>
+                  </div>
+                </section>
+              </Surface>
+            ) : null}
+
+            {activePanel === "providers" ? (
+              <Surface className="settings-pane">
+                <div className="settings-pane-head">
+                  <div>
+                    <h2>Providers</h2>
+                    <p className="helper-copy">
+                      Add, rename, refresh, and edit provider connections with minimal friction.
+                    </p>
+                  </div>
+                  <button
+                    className="button"
+                    onClick={() => {
+                      if (showAddProvider) {
+                        resetProviderBuilder();
+                        return;
+                      }
+                      setShowAddProvider(true);
+                      setSelectedQuickPresetId(null);
+                      setSelectedProviderType(null);
+                    }}
+                  >
+                    {showAddProvider ? "Close" : "Add Provider"}
+                  </button>
+                </div>
+
+                {showAddProvider ? (
+                  <section className="settings-block">
+                    <div className="settings-block-head">
+                      <h3>Choose a provider</h3>
+                      <p className="helper-copy">Select a provider to configure, then fill in the details.</p>
+                    </div>
+
+                    <div className="provider-quick-grid">
+                      {QUICK_PRESETS.map((preset) => {
+                        const isSelected = selectedQuickPresetId === preset.id;
+                        return (
+                          <button
+                            key={preset.id}
+                            type="button"
+                            className={`provider-quick-card${isSelected ? " selected" : ""}`}
+                            onClick={() => {
+                              setSelectedQuickPresetId(preset.id);
+                              setSelectedProviderType(preset.typeId);
+                              setBaseUrl(preset.baseUrl ?? PROVIDER_PRESETS["openai-compatible"].baseUrl ?? "");
+                              setDefaultModelId(preset.defaultModelSuggestion ?? "");
+                              setApiKey("");
+                              setProviderName(preset.label);
+                            }}
+                          >
+                            <span
+                              className="provider-quick-badge"
+                              style={{ background: preset.iconBg }}
+                            >
+                              <ProviderIcon id={preset.id} />
+                            </span>
+                            <strong className="provider-quick-label">{preset.label}</strong>
+                            <span className="provider-quick-tagline">{preset.tagline}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {selectedQuickPresetId && selectedProviderType ? (() => {
+                      const qp = QUICK_PRESETS.find((p) => p.id === selectedQuickPresetId)!;
+                      const isCli = selectedProviderType === "codex-cli" || selectedProviderType === "claude-code-cli";
+                      const isOpenAI = selectedProviderType === "openai-compatible";
+                      return (
+                        <div className="provider-quick-form">
+                          <label className="field">
+                            <span>Provider name</span>
+                            <input
+                              value={providerName}
+                              onChange={(event) => setProviderName(event.target.value)}
+                              placeholder={qp.label}
+                            />
+                          </label>
+
+                          {isOpenAI ? (
+                            <label className="field">
+                              <span>Endpoint URL</span>
+                              <input
+                                value={baseUrl}
+                                onChange={(event) => setBaseUrl(event.target.value)}
+                                placeholder="http://127.0.0.1:11434/v1"
+                              />
+                            </label>
+                          ) : null}
+
+                          {!isCli ? (
+                            <label className="field">
+                              <span>
+                                API key
+                                {!qp.apiKeyRequired ? <span className="field-optional"> (optional)</span> : null}
+                              </span>
+                              <input
+                                type="password"
+                                value={apiKey}
+                                onChange={(event) => setApiKey(event.target.value)}
+                                placeholder={qp.apiKeyPlaceholder ?? ""}
+                              />
+                            </label>
+                          ) : null}
+
+                          {isCli ? (
+                            <label className="field">
+                              <span>Preferred default model <span className="field-optional">(optional)</span></span>
+                              <select
+                                value={defaultModelId}
+                                onChange={(event) => setDefaultModelId(event.target.value)}
+                              >
+                                <option value="">Use connector default</option>
+                                {selectedCliModels.map((model) => (
+                                  <option key={model} value={model}>
+                                    {model}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                          ) : (
+                            <label className="field">
+                              <span>Default model <span className="field-optional">(optional)</span></span>
+                              <input
+                                value={defaultModelId}
+                                onChange={(event) => setDefaultModelId(event.target.value)}
+                                placeholder={qp.defaultModelSuggestion ?? "e.g. gpt-4o"}
+                              />
+                            </label>
+                          )}
+
+                          {isCli ? (
+                            <div className="provider-quick-note">
+                              <span>
+                                {selectedProviderType === "claude-code-cli"
+                                  ? "Run `claude auth login` first, then save and use Refresh to pull models."
+                                  : "Run `codex login` first, then save and use Refresh to pull models."}
+                              </span>
+                            </div>
+                          ) : null}
+
+                          <div className="button-row">
+                            <button className="button ghost" onClick={resetProviderBuilder}>
+                              Cancel
+                            </button>
+                            <button
+                              className="button primary"
+                              onClick={() => void createPresetProvider()}
+                              disabled={
+                                creatingProvider ||
+                                !providerName.trim() ||
+                                (qp.apiKeyRequired && !apiKey.trim()) ||
+                                (isOpenAI && !baseUrl.trim())
+                              }
+                            >
+                              {creatingProvider ? "Connecting..." : "Connect Provider"}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })() : null}
+                  </section>
+                ) : null}
+
+                <section className="settings-block">
+                  <div className="settings-block-head">
+                    <h3>Connected providers</h3>
+                    <p className="helper-copy">
+                      Keep the rows small and editable. Models are discovered automatically.
+                    </p>
+                  </div>
+
+                  {orderedProviders.length === 0 ? (
+                    <div className="settings-empty-state">
+                      <p>No providers configured yet.</p>
+                      <span>Start with Codex, Claude, Anthropic, or an OpenAI-compatible endpoint.</span>
+                    </div>
+                  ) : (
+                    <div className="settings-provider-list">
+                      {orderedProviders.map((provider) => {
+                        const models = providerModelsMap.get(provider.id) ?? [];
+                        const featuredModels = models.slice(0, 3);
+                        const busy = busyProviderId === provider.id;
+                        const isEditing = editingProviderId === provider.id && providerEditor !== null;
+                        const canAssign =
+                          provider.status === "connected" &&
+                          provider.capabilities.canChat &&
+                          models.length > 0;
+                        const defaultModel = provider.config.defaultModelId?.trim() ?? "";
+
+                        return (
+                          <article key={provider.id} className="settings-provider-card minimal">
+                            <div className="settings-provider-head">
+                              <div className="settings-provider-title">
+                                <div className={`provider-status-dot ${provider.status}`} />
+                                <div>
+                                  <p className="section-label">{getProviderTypeLabel(provider)}</p>
+                                  <h3>{provider.name}</h3>
+                                  <p className="helper-copy">
+                                    {getProviderSummary(provider, models.length)}
+                                  </p>
+                                </div>
+                              </div>
+                              <span className={`settings-status-pill ${provider.status}`}>
+                                {getStatusLabel(provider, models.length)}
+                              </span>
+                            </div>
+
+                            <div className="settings-provider-meta settings-provider-facts">
+                              <span>{getProviderAuthLabel(provider)}</span>
+                              <span>{models.length} model{models.length === 1 ? "" : "s"}</span>
+                              <span>{canAssign ? "Role ready" : "Needs setup"}</span>
+                              {defaultModel ? <span>Default: {defaultModel}</span> : null}
+                            </div>
+
+                            {provider.lastError ? (
+                              <div className="notice-strip danger">{provider.lastError}</div>
+                            ) : null}
+
+                            {models.length > 0 ? (
+                              <div className="settings-model-pills">
+                                {featuredModels.map((model) => (
+                                  <span key={model} className="settings-model-pill">
+                                    {model}
+                                  </span>
+                                ))}
+                                {models.length > featuredModels.length ? (
+                                  <span className="settings-model-pill muted">
+                                    +{models.length - featuredModels.length} more
+                                  </span>
+                                ) : null}
+                              </div>
+                            ) : (
+                              <p className="helper-copy">
+                                No models discovered yet. Refresh after authenticating this provider.
+                              </p>
+                            )}
+
+                            {isEditing ? (
+                              <div className="settings-provider-editor">
+                                <div className="settings-provider-editor-grid">
+                                  <label className="field">
+                                    <span>Provider name</span>
+                                    <input
+                                      value={providerEditor.name}
+                                      onChange={(event) =>
+                                        setProviderEditor((current) =>
+                                          current ? { ...current, name: event.target.value } : current,
+                                        )
+                                      }
+                                      placeholder="Provider name"
+                                    />
+                                  </label>
+
+                                  {provider.typeId === "openai-compatible" ? (
+                                    <label className="field">
+                                      <span>Endpoint URL</span>
+                                      <input
+                                        value={providerEditor.baseUrl}
+                                        onChange={(event) =>
+                                          setProviderEditor((current) =>
+                                            current
+                                              ? { ...current, baseUrl: event.target.value }
+                                              : current,
+                                          )
+                                        }
+                                        placeholder="http://127.0.0.1:11434/v1"
+                                      />
+                                    </label>
+                                  ) : null}
+
+                                  <label className="field">
+                                    <span>Preferred default model</span>
+                                    <select
+                                      value={providerEditor.defaultModelId}
+                                      onChange={(event) =>
+                                        setProviderEditor((current) =>
+                                          current
+                                            ? { ...current, defaultModelId: event.target.value }
+                                            : current,
+                                        )
+                                      }
+                                    >
+                                      <option value="">Use connector default</option>
+                                      {models.map((model) => (
+                                        <option key={model} value={model}>
+                                          {model}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </label>
+
+                                  {provider.typeId !== "codex-cli" &&
+                                  provider.typeId !== "claude-code-cli" ? (
+                                    <label className="field">
+                                      <span>Replace API key</span>
+                                      <input
+                                        type="password"
+                                        value={providerEditor.apiKey}
+                                        onChange={(event) =>
+                                          setProviderEditor((current) =>
+                                            current
+                                              ? { ...current, apiKey: event.target.value }
+                                              : current,
+                                          )
+                                        }
+                                        placeholder="Leave blank to keep the current key"
+                                      />
+                                    </label>
+                                  ) : null}
+                                </div>
+
+                                <div className="settings-provider-actions">
+                                  <button className="button ghost" onClick={stopEditingProvider}>
+                                    Cancel
+                                  </button>
+                                  <button
+                                    className="button primary"
+                                    onClick={() => void saveProviderEdits(provider)}
+                                    disabled={
+                                      busy ||
+                                      !providerEditor.name.trim() ||
+                                      (provider.typeId === "openai-compatible" &&
+                                        !providerEditor.baseUrl.trim())
+                                    }
+                                  >
+                                    {busy ? "Saving..." : "Save Provider"}
+                                  </button>
+                                </div>
+                              </div>
+                            ) : null}
+
+                            <div className="settings-provider-actions">
+                              {provider.status === "connected" ? (
+                                <button
+                                  className="button"
+                                  onClick={() => void mutateProvider(provider.id, "recheck")}
+                                  disabled={busy}
+                                >
+                                  {busy ? "Refreshing..." : "Refresh Models"}
+                                </button>
+                              ) : (
+                                <button
+                                  className="button primary"
+                                  onClick={() =>
+                                    void mutateProvider(
+                                      provider.id,
+                                      provider.capabilities.requiresBrowserAuth ? "connect" : "recheck",
+                                    )
+                                  }
+                                  disabled={busy}
+                                >
+                                  {busy
+                                    ? "Working..."
+                                    : provider.capabilities.requiresBrowserAuth
+                                      ? "Launch Login"
+                                      : "Connect"}
+                                </button>
+                              )}
+
+                              {provider.capabilities.requiresBrowserAuth ? (
+                                <button
+                                  className="button"
+                                  onClick={() => void mutateProvider(provider.id, "reconnect")}
+                                  disabled={busy}
+                                >
+                                  Reconnect
+                                </button>
+                              ) : null}
+
+                              {!isEditing ? (
+                                <button
+                                  className="button"
+                                  onClick={() => startEditingProvider(provider)}
+                                  disabled={busy}
+                                >
+                                  Edit
+                                </button>
+                              ) : null}
+
+                              <button
+                                className="button ghost"
+                                onClick={() => {
+                                  if (window.confirm(`Remove "${provider.name}"?`)) {
+                                    void mutateProvider(provider.id, "delete");
+                                  }
+                                }}
+                                disabled={busy}
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          </article>
+                        );
+                      })}
+                    </div>
+                  )}
+                </section>
+              </Surface>
+            ) : null}
+
+            {activePanel === "roles" ? (
+              <Surface className="settings-pane">
+                <div className="settings-pane-head">
+                  <div>
+                    <h2>Roles</h2>
+                    <p className="helper-copy">
+                      Assign one provider and one model per role from the discovered catalogs.
+                    </p>
+                  </div>
+                  <button className="button" onClick={autoAssignRoles} disabled={roleReadyProviders.length === 0}>
+                    Auto-Assign
+                  </button>
+                </div>
+
+                <section className="settings-block">
+                  <div className="settings-block-head">
+                    <h3>Role routing</h3>
+                    <p className="helper-copy">Compact rows instead of cards, with the same controls.</p>
+                  </div>
+
+                  {connectedProviders.length === 0 ? (
+                    <div className="settings-empty-state">
+                      <p>Connect a provider first.</p>
+                      <span>Role assignment becomes available once a provider is connected.</span>
+                    </div>
+                  ) : (
+                    <div className="settings-role-list">
+                      {assignments.map((assignment) => {
+                        const selectedProvider = assignment.providerId
+                          ? providerMap.get(assignment.providerId) ?? null
+                          : null;
+                        const availableModels = selectedProvider
+                          ? providerModelsMap.get(selectedProvider.id) ?? []
+                          : [];
+
+                        return (
+                          <article key={assignment.role} className="settings-role-row">
+                            <div className="settings-role-summary">
+                              <strong>{ROLE_DETAILS[assignment.role].title}</strong>
+                              <span>{ROLE_DETAILS[assignment.role].description}</span>
+                            </div>
+
+                            <div className="settings-role-controls">
+                              <label className="field">
+                                <span>Provider</span>
+                                <select
+                                  value={assignment.providerId ?? ""}
+                                  onChange={(event) =>
+                                    updateRoleProvider(assignment.role, event.target.value)
+                                  }
+                                >
+                                  <option value="">Select provider...</option>
+                                  {connectedProviders
+                                    .filter((provider) => provider.capabilities.canChat)
+                                    .map((provider) => (
+                                      <option key={provider.id} value={provider.id}>
+                                        {provider.name}
+                                      </option>
+                                    ))}
+                                </select>
+                              </label>
+
+                              <label className="field">
+                                <span>Model</span>
+                                <select
+                                  value={assignment.modelId ?? ""}
+                                  onChange={(event) =>
+                                    updateRoleModel(assignment.role, event.target.value)
+                                  }
+                                  disabled={!selectedProvider || availableModels.length === 0}
+                                >
+                                  <option value="">
+                                    {selectedProvider ? "Select model..." : "Choose a provider first"}
+                                  </option>
+                                  {availableModels.map((model) => (
+                                    <option key={model} value={model}>
+                                      {model}
+                                    </option>
+                                  ))}
+                                </select>
+                              </label>
+                            </div>
+
+                            <span
+                              className={`settings-role-badge${assignment.providerId && assignment.modelId ? " assigned" : ""}`}
+                            >
+                              {assignment.providerId && assignment.modelId ? "Assigned" : "Needs setup"}
+                            </span>
+                          </article>
+                        );
+                      })}
+                    </div>
+                  )}
+                </section>
+              </Surface>
+            ) : null}
+
+            {activePanel === "prompts" ? (
+              <Surface className="settings-pane">
+                <div className="settings-pane-head">
+                  <div>
+                    <h2>Prompts</h2>
+                    <p className="helper-copy">
+                      Keep these light. Only override the defaults when the workspace needs it.
+                    </p>
+                  </div>
+                </div>
+
+                <section className="settings-block">
+                  <div className="settings-block-head">
+                    <h3>Shared prompt</h3>
+                    <p className="helper-copy">Applied to every routed role.</p>
+                  </div>
+                  <label className="field">
+                    <span>Shared system prompt</span>
+                    <textarea
+                      value={settings.systemPrompts.shared}
+                      onChange={(event) =>
+                        setSettings((current) => ({
+                          ...current,
+                          systemPrompts: { ...current.systemPrompts, shared: event.target.value },
+                        }))
+                      }
+                      rows={4}
+                      placeholder="Optional instructions applied to every role"
+                    />
+                  </label>
+                </section>
+
+                <section className="settings-block">
+                  <div className="settings-block-head">
+                    <h3>Role prompts</h3>
+                    <p className="helper-copy">Edit only the roles that need specialized behavior.</p>
+                  </div>
+                  <div className="settings-prompt-grid">
+                    {ROLES.map((role) => (
+                      <label key={role} className="field">
+                        <span>{ROLE_DETAILS[role].title}</span>
+                        <textarea
+                          value={settings.systemPrompts.roles[role]}
+                          onChange={(event) => setRolePrompt(role, event.target.value)}
+                          rows={4}
+                          placeholder={`Optional override for ${ROLE_DETAILS[role].title.toLowerCase()}`}
+                        />
+                      </label>
+                    ))}
+                  </div>
+                </section>
+              </Surface>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

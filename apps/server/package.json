@@ -1,0 +1,20 @@
+{
+  "name": "@ember/server",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --project tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@ember/connectors": "workspace:*",
+    "@ember/core": "workspace:*",
+    "@ember/prompts": "workspace:*",
+    "@fastify/cors": "^11.0.1",
+    "fastify": "^5.2.1"
+  }
+}

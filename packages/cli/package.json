@@ -1,0 +1,18 @@
+{
+  "name": "@ember/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "ember": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts",
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --project tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@ember/core": "workspace:*"
+  }
+}
