@@ -9,25 +9,37 @@ export const handoffTool: EmberTool = {
   definition: {
     name: "handoff",
     description:
-      "Pass the current task to another EMBER role when they are better suited to continue or complete the work. Call this when you have finished your part and another specialist should take over.",
+      "Pass the current task to a specialist EMBER role when they are better suited to continue. " +
+      "Call this AT MOST ONCE per response, and only after your own work is complete. " +
+      "After calling handoff, write your final summary and stop using tools. " +
+      "Valid roles: advisor (planning/architecture), coordinator (routine tasks), director (implementation/coding), inspector (review/testing), ops (polish/cleanup).",
     inputSchema: {
       type: "object",
       properties: {
         role: {
           type: "string",
           description:
-            "The role to pass to. One of: advisor, coordinator, director, inspector, ops",
+            "The role to hand off to. Must be one of: advisor, coordinator, director, inspector, ops",
         },
         message: {
           type: "string",
           description:
-            "What to tell the next role. Include the goal, what you already did, what remains, and any files, commands, or findings they need.",
+            "Context for the next role. Use this exact format:\n" +
+            "GOAL: <what the user originally asked for>\n" +
+            "DONE: <what you completed in this response>\n" +
+            "TODO: <what the next role should do>\n" +
+            "FILES: <key files created, modified, or relevant — list file paths>\n" +
+            "NOTES: <warnings, blockers, or findings the next role must know>\n\n" +
+            "If handing to inspector: specify exactly what to verify and what acceptance looks like.\n" +
+            "If handing to director: list every issue to fix with file and location.",
         },
       },
       required: ["role", "message"],
     },
   },
   systemPrompt:
-    "handoff — Use only when another role is clearly better suited to continue. In message, include the goal, work completed, remaining work, and the key files, commands, or findings.",
+    "handoff — Transfer work to a specialist role. Call at most ONCE per response, only after your own work for this turn is done. " +
+    "Format the message as: GOAL / DONE / TODO / FILES / NOTES. " +
+    "Do not call handoff if the task is already complete — just respond to the user instead.",
   execute: async () => "Handoff acknowledged.",
 };

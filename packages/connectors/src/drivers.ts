@@ -24,6 +24,178 @@ function toolResultToText(result: ToolResult): string {
   return typeof result === "string" ? result : result.text;
 }
 
+function normalizeJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => normalizeJsonValue(item));
+  }
+
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, item]) => [key, normalizeJsonValue(item)]),
+    );
+  }
+
+  return value;
+}
+
+function buildToolCallSignature(name: string, input: Record<string, unknown>): string {
+  return `${name}:${JSON.stringify(normalizeJsonValue(input))}`;
+}
+
+function truncateToolText(value: string, limit = 8_000): string {
+  return value.length > limit ? `${value.slice(0, limit)}\n\n[truncated at ${limit} chars]` : value;
+}
+
+const DEFAULT_PROVIDER_TOOL_LOOP_LIMIT = 30;
+
+function getProviderToolLoopLimit(): number {
+  const raw = Number(process.env.EMBER_PROVIDER_TOOL_LOOP_LIMIT ?? "");
+  if (!Number.isFinite(raw)) {
+    return DEFAULT_PROVIDER_TOOL_LOOP_LIMIT;
+  }
+
+  const normalized = Math.floor(raw);
+  if (normalized < 1) {
+    return DEFAULT_PROVIDER_TOOL_LOOP_LIMIT;
+  }
+
+  return Math.min(normalized, 100);
+}
+
+interface TextBasedToolCall {
+  name: string;
+  args: Record<string, unknown>;
+}
+
+function collectTextToolCalls(...contentBlocks: Array<string | null | undefined>): TextBasedToolCall[] {
+  const calls: TextBasedToolCall[] = [];
+  const seen = new Set<string>();
+
+  for (const block of contentBlocks) {
+    if (!block) {
+      continue;
+    }
+
+    for (const call of parseTextToolCalls(block)) {
+      const signature = buildToolCallSignature(call.name, call.args);
+      if (seen.has(signature)) {
+        continue;
+      }
+      seen.add(signature);
+      calls.push(call);
+    }
+  }
+
+  return calls;
+}
+
+/**
+ * Parse text-based tool calls emitted by local models (e.g. Qwen/Hermes) that don't use the
+ * OpenAI structured tool_calls protocol. Handles two formats:
+ *   Hermes/Qwen JSON: <tool_call>{"name":"x","arguments":{...}}</tool_call>
+ *   XML-style:        <tool_call><function=x><parameter=k>v</parameter>...</function></tool_call>
+ */
+function parseTextToolCalls(content: string): TextBasedToolCall[] {
+  const calls: TextBasedToolCall[] = [];
+  const blockRegex = /<tool_call>([\s\S]*?)<\/tool_call>/g;
+  let match: RegExpExecArray | null;
+  while ((match = blockRegex.exec(content)) !== null) {
+    const inner = match[1].trim();
+    // Try Hermes/Qwen JSON format: {"name": "...", "arguments": {...}}
+    try {
+      const parsed = JSON.parse(inner) as Record<string, unknown>;
+      if (parsed.name && typeof parsed.name === "string") {
+        calls.push({
+          name: parsed.name,
+          args: (parsed.arguments ?? parsed.parameters ?? parsed.args ?? {}) as Record<string, unknown>,
+        });
+        continue;
+      }
+    } catch {
+      // fall through to XML format
+    }
+    // Try XML-style: <function=name><parameter=key>value</parameter>...</function>
+    const funcMatch = inner.match(/<function=(\w+)>([\s\S]*?)<\/function>/);
+    if (funcMatch) {
+      const name = funcMatch[1];
+      const args: Record<string, unknown> = {};
+      const paramRegex = /<parameter=(\w+)>([\s\S]*?)<\/parameter>/g;
+      let paramMatch: RegExpExecArray | null;
+      while ((paramMatch = paramRegex.exec(funcMatch[2])) !== null) {
+        args[paramMatch[1]] = paramMatch[2].trim();
+      }
+      calls.push({ name, args });
+    }
+  }
+  return calls;
+}
+
+function stripTextToolCalls(content: string): string {
+  return content.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, "").trim();
+}
+
+/**
+ * Streaming filter that suppresses <tool_call>...</tool_call> blocks from being
+ * forwarded to the client as visible content. Buffers input characters from the
+ * moment a <tool_call> open tag is detected; only flushes safe content to the caller.
+ */
+class ToolCallStreamFilter {
+  private buffer = "";
+
+  /** Feed a content delta. Returns the portion safe to emit to the client. */
+  push(delta: string): string {
+    this.buffer += delta;
+    return this.flush_safe();
+  }
+
+  /** Call after the stream ends to release any remaining buffered content. */
+  drain(): string {
+    const remaining = this.buffer;
+    this.buffer = "";
+    return remaining;
+  }
+
+  private flush_safe(): string {
+    const OPEN = "<tool_call>";
+    const CLOSE = "</tool_call>";
+    let safe = "";
+
+    while (this.buffer.length > 0) {
+      const openIdx = this.buffer.indexOf(OPEN);
+
+      if (openIdx === -1) {
+        // No open tag in buffer — emit everything except a trailing partial-tag window.
+        const windowSize = OPEN.length - 1;
+        if (this.buffer.length > windowSize) {
+          safe += this.buffer.slice(0, this.buffer.length - windowSize);
+          this.buffer = this.buffer.slice(this.buffer.length - windowSize);
+        }
+        break;
+      }
+
+      // Emit content before the opening tag.
+      if (openIdx > 0) {
+        safe += this.buffer.slice(0, openIdx);
+        this.buffer = this.buffer.slice(openIdx);
+      }
+
+      // We're now at the start of a <tool_call> block — wait for the close tag.
+      const closeIdx = this.buffer.indexOf(CLOSE);
+      if (closeIdx === -1) {
+        // Close tag not yet received — keep buffering.
+        break;
+      }
+
+      // Skip over the complete <tool_call>...</tool_call> block.
+      this.buffer = this.buffer.slice(closeIdx + CLOSE.length);
+    }
+
+    return safe;
+  }
+}
+
 /**
  * Convert a ToolResult to Anthropic's tool_result content format.
  * If the result includes an image, returns a multi-block content array so
@@ -540,6 +712,45 @@ function formatCliConversation(
 
 const CODEX_TOOL_CALL_TAG = "ember_tool_call";
 
+function extractCodexToolCallPayload(content: string): string | null {
+  const matches = [
+    ...content.matchAll(
+      new RegExp(`<${CODEX_TOOL_CALL_TAG}>\\s*([\\s\\S]*?)\\s*</${CODEX_TOOL_CALL_TAG}>`, "gi"),
+    ),
+  ];
+  return matches.at(-1)?.[1]?.trim() ?? null;
+}
+
+function parseCodexToolCallPreview(content: string): { name: string; input: Record<string, unknown> } | null {
+  const rawPayload = extractCodexToolCallPayload(content);
+  if (!rawPayload) {
+    return null;
+  }
+
+  try {
+    const payload = JSON.parse(rawPayload) as Record<string, unknown>;
+    const name =
+      typeof payload.name === "string"
+        ? payload.name.trim()
+        : typeof payload.tool === "string"
+          ? payload.tool.trim()
+          : "";
+    const input = payload.input ?? payload.arguments ?? {};
+    if (!name || !input || typeof input !== "object" || Array.isArray(input)) {
+      return null;
+    }
+    return { name, input: input as Record<string, unknown> };
+  } catch {
+    return null;
+  }
+}
+
+function stripCodexToolCallBlocks(content: string): string {
+  return content
+    .replace(new RegExp(`<${CODEX_TOOL_CALL_TAG}>[\\s\\S]*?</${CODEX_TOOL_CALL_TAG}>`, "gi"), "")
+    .trim();
+}
+
 interface ParsedCliToolCall {
   name: string;
   input: Record<string, unknown>;
@@ -559,11 +770,14 @@ function buildCodexToolProtocol(tools: ToolDefinition[]): string {
 
   return [
     "## EMBER tool protocol",
-    "When you need an EMBER tool, respond with exactly one tool call block and no extra prose:",
+    "When you need an EMBER tool, you may include one brief sentence explaining what you are checking or about to do.",
+    "Then output exactly one tool call block:",
     `<${CODEX_TOOL_CALL_TAG}>`,
     '{"name":"read_file","input":{"path":"packages/core/src/types.ts"}}',
     `</${CODEX_TOOL_CALL_TAG}>`,
     "Use only the tool names listed below and ensure the JSON is valid.",
+    "Keep any sentence before the tool call short and user-readable.",
+    "Do not repeat the exact same tool call with identical input immediately after receiving its result.",
     "After the tool result appears in the conversation, continue the task. When the work is complete, reply normally to the user.",
     "Available tools:",
     ...toolLines,
@@ -582,12 +796,7 @@ function formatCodexConversation(request: ProviderExecutionRequest): string {
 }
 
 function parseCodexToolCall(content: string): { call: ParsedCliToolCall | null; error: string | null } {
-  const matches = [
-    ...content.matchAll(
-      new RegExp(`<${CODEX_TOOL_CALL_TAG}>\\s*([\\s\\S]*?)\\s*</${CODEX_TOOL_CALL_TAG}>`, "gi"),
-    ),
-  ];
-  const rawPayload = matches.at(-1)?.[1]?.trim();
+  const rawPayload = extractCodexToolCallPayload(content);
   if (!rawPayload) {
     return { call: null, error: null };
   }
@@ -756,6 +965,136 @@ function parseCodexExecJson(stdout: string): string {
   return "";
 }
 
+function parseCodexExecEvent(
+  line: string,
+): {
+  type?: string;
+  item?: {
+    type?: string;
+    text?: string;
+    command?: string;
+    exit_code?: number | null;
+    status?: string;
+  };
+} | null {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("{")) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(trimmed) as {
+      type?: string;
+      item?: { type?: string; text?: string };
+    };
+  } catch {
+    return null;
+  }
+}
+
+function summarizeCodexCommand(command: string): string {
+  const normalized = command.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "command";
+  }
+
+  return normalized.length > 120 ? `${normalized.slice(0, 117)}...` : normalized;
+}
+
+function flushPendingCodexNote(
+  state: { pendingNote: string | null },
+  handlers?: Pick<ProviderStreamHandlers, "onThinking">,
+): void {
+  const note = state.pendingNote?.trim();
+  if (!note) {
+    state.pendingNote = null;
+    return;
+  }
+
+  handlers?.onThinking?.(`${note}\n\n`);
+  state.pendingNote = null;
+}
+
+function processCodexStdoutChunk(
+  chunk: string,
+  state: {
+    buffer: string;
+    content: string;
+    pendingNote: string | null;
+  },
+  handlers?: Pick<ProviderStreamHandlers, "onStatus" | "onThinking">,
+): void {
+  state.buffer += chunk;
+  const lines = state.buffer.split("\n");
+  state.buffer = lines.pop() ?? "";
+
+  for (const line of lines) {
+    const event = parseCodexExecEvent(line);
+    if (!event) {
+      continue;
+    }
+
+    if (event.type === "turn.started") {
+      handlers?.onStatus?.("Codex is working...");
+      continue;
+    }
+
+    if (event.type === "item.started" && event.item?.type === "command_execution") {
+      flushPendingCodexNote(state, handlers);
+      handlers?.onStatus?.(`Running command: ${summarizeCodexCommand(event.item.command ?? "")}`);
+      continue;
+    }
+
+    if (event.type === "item.completed" && event.item?.type === "command_execution") {
+      const exitCode =
+        typeof event.item.exit_code === "number" && Number.isFinite(event.item.exit_code)
+          ? event.item.exit_code
+          : null;
+      const suffix = exitCode === null ? "completed" : exitCode === 0 ? "completed" : `failed (exit ${exitCode})`;
+      handlers?.onStatus?.(`Command ${suffix}: ${summarizeCodexCommand(event.item.command ?? "")}`);
+      continue;
+    }
+
+    if (event.type === "item.completed" && event.item?.type === "agent_message") {
+      const text = event.item.text?.trim() ?? "";
+      if (text) {
+        const prose = stripCodexToolCallBlocks(text);
+        const toolPreview = parseCodexToolCallPreview(text);
+        const displayNote =
+          prose ||
+          (toolPreview
+            ? `Requesting tool: ${toolPreview.name}`
+            : "");
+        if (state.pendingNote) {
+          flushPendingCodexNote(state, handlers);
+        }
+        state.pendingNote = displayNote || null;
+        if (toolPreview) {
+          handlers?.onStatus?.(`Tool request: ${toolPreview.name}`);
+        }
+        state.content = text;
+      }
+    }
+  }
+}
+
+function processCodexStderrChunk(
+  chunk: string,
+  state: { buffer: string },
+  handlers?: Pick<ProviderStreamHandlers, "onStatus">,
+): void {
+  state.buffer += chunk;
+  const lines = state.buffer.split("\n");
+  state.buffer = lines.pop() ?? "";
+
+  for (const line of lines) {
+    const status = stripAnsi(line).trim();
+    if (status && shouldSurfaceCodexStatus(status)) {
+      handlers?.onStatus?.(status);
+    }
+  }
+}
+
 function extractClaudeMessageText(value: unknown): string {
   if (!Array.isArray(value)) {
     return "";
@@ -920,6 +1259,36 @@ function extractOpenAiDeltaThinking(delta: Record<string, unknown> | undefined):
   return "";
 }
 
+function extractOpenAiMessageThinking(message: Record<string, unknown> | undefined): string {
+  if (!message) {
+    return "";
+  }
+
+  const candidates = [
+    message.reasoning_content,
+    message.reasoning,
+    message.thinking,
+    message.reasoningText,
+    message.reasoning_text,
+    message.reasoningContent,
+    message.thinking_content,
+  ];
+
+  for (const candidate of candidates) {
+    const extracted = extractNestedText(candidate);
+    if (extracted) {
+      return extracted;
+    }
+  }
+
+  return extractBlockTextByType(message.content, [
+    "reasoning",
+    "thinking",
+    "reasoning_content",
+    "thinking_content",
+  ]);
+}
+
 function processSseChunk(
   buffer: string,
   onEvent: (data: string, eventName: string | null) => void,
@@ -982,7 +1351,7 @@ async function readResponseStream(
 async function runCodexCliTurn(
   provider: Provider,
   request: ProviderExecutionRequest,
-  handlers?: Pick<ProviderStreamHandlers, "onStatus">,
+  handlers?: Pick<ProviderStreamHandlers, "onStatus" | "onThinking">,
 ): Promise<ProviderExecutionResult> {
   if (!commandExists("codex")) {
     throw new Error("codex is not installed locally.");
@@ -1007,29 +1376,54 @@ async function runCodexCliTurn(
 
   try {
     handlers?.onStatus?.("Launching Codex CLI...");
-    const result = spawnSync("codex", args, {
+    const child = spawn("codex", args, {
       cwd: repoRoot,
-      encoding: "utf8",
       env: {
         ...process.env,
         OTEL_SDK_DISABLED: "true",
       },
-      maxBuffer: 10 * 1024 * 1024,
     });
 
-    const stdout = result.stdout?.trim() ?? "";
-    const stderr = result.stderr?.trim() ?? "";
-    const content = parseCodexExecJson(stdout);
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
 
-    if (stderr) {
-      const status = stripAnsi(stderr).trim();
+    let stdout = "";
+    let stderr = "";
+    const stdoutState = { buffer: "", content: "", pendingNote: null as string | null };
+    const stderrState = { buffer: "" };
+
+    child.stdout?.on("data", (chunk: string) => {
+      stdout += chunk;
+      processCodexStdoutChunk(chunk, stdoutState, handlers);
+    });
+    child.stderr?.on("data", (chunk: string) => {
+      stderr += chunk;
+      processCodexStderrChunk(chunk, stderrState, handlers);
+    });
+
+    const exitCode = await new Promise<number>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", (code) => resolve(code ?? 1));
+    });
+
+    if (stderrState.buffer.trim()) {
+      const status = stripAnsi(stderrState.buffer).trim();
       if (status && shouldSurfaceCodexStatus(status)) {
         handlers?.onStatus?.(status);
       }
     }
 
-    if (result.status !== 0 && !content) {
-      throw new Error(stderr || stdout || "Codex exec failed.");
+    if (stdoutState.buffer.trim()) {
+      processCodexStdoutChunk(`${stdoutState.buffer}\n`, stdoutState, handlers);
+      stdoutState.buffer = "";
+    }
+
+    flushPendingCodexNote(stdoutState, handlers);
+
+    const content = stdoutState.content || parseCodexExecJson(stdout);
+
+    if (exitCode !== 0 && !content) {
+      throw new Error(stderr.trim() || stdout.trim() || "Codex exec failed.");
     }
 
     if (!content) {
@@ -1048,14 +1442,17 @@ async function runCodexCliTurn(
 async function executeCodexCli(
   provider: Provider,
   request: ProviderExecutionRequest,
-  handlers?: Pick<ProviderStreamHandlers, "onStatus">,
+  handlers?: Pick<ProviderStreamHandlers, "onStatus" | "onThinking">,
 ): Promise<ProviderExecutionResult> {
   let conversation = [...request.conversation];
   let currentContent = request.content;
   let lastContent = "";
   let modelId = request.modelId?.trim() || provider.config.defaultModelId?.trim() || null;
+  let lastToolSignature: string | null = null;
+  let lastToolResultText = "";
+  const maxToolTurns = getProviderToolLoopLimit();
 
-  for (let turn = 0; turn < 10; turn++) {
+  for (let turn = 0; turn < maxToolTurns; turn++) {
     const result = await runCodexCliTurn(provider, {
       ...request,
       conversation,
@@ -1085,8 +1482,24 @@ async function executeCodexCli(
     }
 
     handlers?.onStatus?.(`Tool: ${parsed.call!.name}`);
+    const toolSignature = buildToolCallSignature(parsed.call!.name, parsed.call!.input);
+    if (toolSignature === lastToolSignature) {
+      currentContent = [
+        `You just called ${parsed.call!.name} with the same input and already received its result.`,
+        "Do not repeat the same tool call immediately.",
+        "Continue using the existing result, or choose a different tool if you need more information.",
+        "",
+        `Previous result for ${parsed.call!.name}:`,
+        truncateToolText(lastToolResultText),
+      ].join("\n");
+      conversation.push(buildSyntheticCliMessage("user", currentContent, request));
+      continue;
+    }
+
     const toolResult = await request.onToolCall(parsed.call!.name, parsed.call!.input);
-    currentContent = `Tool result for ${parsed.call!.name}:\n${toolResultToText(toolResult)}`;
+    lastToolSignature = toolSignature;
+    lastToolResultText = toolResultToText(toolResult);
+    currentContent = `Tool result for ${parsed.call!.name}:\n${lastToolResultText}`;
     conversation.push(buildSyntheticCliMessage("user", currentContent, request));
   }
 
@@ -1094,7 +1507,7 @@ async function executeCodexCli(
     return { content: lastContent, modelId };
   }
 
-  throw new Error("Codex tool loop reached the turn limit without a final response.");
+  throw new Error(`Codex tool loop reached the turn limit (${maxToolTurns}) without a final response.`);
 }
 
 async function streamCodexCli(
@@ -1102,7 +1515,10 @@ async function streamCodexCli(
   request: ProviderExecutionRequest,
   handlers: ProviderStreamHandlers,
 ): Promise<ProviderExecutionResult> {
-  const result = await executeCodexCli(provider, request, { onStatus: handlers.onStatus });
+  const result = await executeCodexCli(provider, request, {
+    onStatus: handlers.onStatus,
+    onThinking: handlers.onThinking,
+  });
   handlers.onContent?.(result.content);
   return result;
 }
@@ -1139,8 +1555,11 @@ async function executeOpenAiCompatible(
 
   let lastTextContent = "";
   let nudged = false;
+  let lastToolSignature: string | null = null;
+  let lastToolResultText = "";
+  const maxToolTurns = getProviderToolLoopLimit();
 
-  for (let turn = 0; turn < 10; turn++) {
+  for (let turn = 0; turn < maxToolTurns; turn++) {
     const body: Record<string, unknown> = { model: modelId, messages };
 
     if (request.tools?.length) {
@@ -1178,9 +1597,41 @@ async function executeOpenAiCompatible(
 
     // Capture any text the model produced alongside or instead of tool calls.
     const turnText = extractTextContent(message?.content);
+    const turnThinking = extractOpenAiMessageThinking(message as Record<string, unknown> | undefined);
     if (turnText.trim()) lastTextContent = turnText;
 
     if (!toolCalls?.length || !request.onToolCall) {
+      // Fallback: parse text-based tool calls for models that don't use the OpenAI protocol.
+      if (request.onToolCall && (turnText || turnThinking)) {
+        const textCalls = collectTextToolCalls(turnText, turnThinking);
+        if (textCalls.length > 0) {
+          const cleanText = stripTextToolCalls(turnText);
+          if (cleanText) lastTextContent = cleanText;
+          const toolMessages: unknown[] = [];
+          for (const tc of textCalls) {
+            const toolSignature = buildToolCallSignature(tc.name, tc.args);
+            const toolResultText = toolSignature === lastToolSignature
+              ? [
+                  `You just called ${tc.name} with the same input and already received its result.`,
+                  "Do not repeat the same tool call immediately.",
+                  "Continue using the existing result, or provide the final answer.",
+                  "",
+                  `Previous result for ${tc.name}:`,
+                  truncateToolText(lastToolResultText),
+                ].join("\n")
+              : toolResultToText(await request.onToolCall(tc.name, tc.args));
+            if (toolSignature !== lastToolSignature) {
+              lastToolSignature = toolSignature;
+              lastToolResultText = toolResultText;
+            }
+            toolMessages.push({ role: "user", content: `<tool_response>\n${toolResultText}\n</tool_response>` });
+          }
+          messages = [...messages, { role: "assistant", content: cleanText || turnText }, ...toolMessages];
+          nudged = false;
+          continue;
+        }
+      }
+
       if (!lastTextContent.trim()) {
         // Model returned empty after tool use — nudge it once to synthesize a response.
         if (!nudged) {
@@ -1204,18 +1655,32 @@ async function executeOpenAiCompatible(
     } catch {
       // Leave input empty on parse failure.
     }
-    const toolResult = await request.onToolCall(toolCall.function.name, toolInput);
+    const toolSignature = buildToolCallSignature(toolCall.function.name, toolInput);
+    const toolResultText = toolSignature === lastToolSignature
+      ? [
+          `You just called ${toolCall.function.name} with the same input and already received its result.`,
+          "Do not repeat the same tool call immediately.",
+          "Continue using the existing result, or provide the final answer.",
+          "",
+          `Previous result for ${toolCall.function.name}:`,
+          truncateToolText(lastToolResultText),
+        ].join("\n")
+      : toolResultToText(await request.onToolCall(toolCall.function.name, toolInput));
+    if (toolSignature !== lastToolSignature) {
+      lastToolSignature = toolSignature;
+      lastToolResultText = toolResultText;
+    }
     messages = [
       ...messages,
       { role: "assistant", content: message?.content ?? null, tool_calls: toolCalls },
-      { role: "tool", tool_call_id: toolCall.id, content: toolResultToText(toolResult) },
+      { role: "tool", tool_call_id: toolCall.id, content: toolResultText },
     ];
     nudged = false; // reset so the model gets a clean nudge opportunity after each tool round
   }
 
   // Turn limit reached — return the last text the model produced, if any.
   if (lastTextContent.trim()) return { content: lastTextContent, modelId };
-  throw new Error("Tool call limit reached without a final response.");
+  throw new Error(`Tool call limit reached without a final response after ${maxToolTurns} tool turns.`);
 }
 
 async function streamOpenAiCompatible(
@@ -1251,9 +1716,12 @@ async function streamOpenAiCompatible(
   let totalContent = "";
   let totalThinking = "";
   let nudged = false;
+  let lastToolSignature: string | null = null;
+  let lastToolResultText = "";
+  const maxToolTurns = getProviderToolLoopLimit();
   handlers.onStatus?.("Streaming response...");
 
-  for (let turn = 0; turn < 10; turn++) {
+  for (let turn = 0; turn < maxToolTurns; turn++) {
     const body: Record<string, unknown> = { model: modelId, stream: true, messages };
 
     if (request.tools?.length) {
@@ -1283,7 +1751,10 @@ async function streamOpenAiCompatible(
 
     let buffer = "";
     let turnContent = "";
+    let turnThinking = "";
     let finishReason = "";
+    const contentFilter = new ToolCallStreamFilter();
+    const thinkingFilter = new ToolCallStreamFilter();
 
     // Accumulate tool call fragments: stream index → accumulated call data.
     const toolCallAcc: Record<number, { id: string; name: string; arguments: string }> = {};
@@ -1325,14 +1796,18 @@ async function streamOpenAiCompatible(
 
           const thinkingDelta = extractOpenAiDeltaThinking(delta);
           if (thinkingDelta) {
+            turnThinking += thinkingDelta;
             totalThinking += thinkingDelta;
-            handlers.onThinking?.(thinkingDelta);
+            const safeThinking = thinkingFilter.push(thinkingDelta);
+            if (safeThinking) handlers.onThinking?.(safeThinking);
           }
 
           const contentDelta = extractOpenAiDeltaContent(delta);
           if (contentDelta) {
             turnContent += contentDelta;
-            handlers.onContent?.(contentDelta);
+            // Filter out <tool_call> blocks before emitting to the client.
+            const safe = contentFilter.push(contentDelta);
+            if (safe) handlers.onContent?.(safe);
           }
         } catch {
           // Ignore malformed stream chunks.
@@ -1340,10 +1815,49 @@ async function streamOpenAiCompatible(
       });
     });
 
+    // Flush any buffered content that turned out not to be a tool call.
+    const drained = contentFilter.drain();
+    if (drained) handlers.onContent?.(drained);
+    const drainedThinking = thinkingFilter.drain();
+    if (drainedThinking) handlers.onThinking?.(drainedThinking);
+
     totalContent += turnContent;
 
     const toolCalls = Object.values(toolCallAcc);
     if (finishReason !== "tool_calls" || !toolCalls.length || !request.onToolCall) {
+      // Fallback: parse text-based tool calls for models that don't use the OpenAI protocol.
+      if (request.onToolCall && (turnContent || turnThinking)) {
+        const textCalls = collectTextToolCalls(turnContent, turnThinking);
+        if (textCalls.length > 0) {
+          const cleanContent = stripTextToolCalls(turnContent);
+          // Replace raw turn content in totalContent with the stripped version.
+          totalContent = totalContent.slice(0, -turnContent.length) + cleanContent;
+          const toolMessages: unknown[] = [];
+          for (const tc of textCalls) {
+            handlers.onStatus?.(`Tool: ${tc.name}`);
+            const toolSignature = buildToolCallSignature(tc.name, tc.args);
+            const toolResultText = toolSignature === lastToolSignature
+              ? [
+                  `You just called ${tc.name} with the same input and already received its result.`,
+                  "Do not repeat the same tool call immediately.",
+                  "Continue using the existing result, or provide the final answer.",
+                  "",
+                  `Previous result for ${tc.name}:`,
+                  truncateToolText(lastToolResultText),
+                ].join("\n")
+              : toolResultToText(await request.onToolCall(tc.name, tc.args));
+            if (toolSignature !== lastToolSignature) {
+              lastToolSignature = toolSignature;
+              lastToolResultText = toolResultText;
+            }
+            toolMessages.push({ role: "user", content: `<tool_response>\n${toolResultText}\n</tool_response>` });
+          }
+          messages = [...messages, { role: "assistant", content: cleanContent || null }, ...toolMessages];
+          nudged = false;
+          continue;
+        }
+      }
+
       if (!totalContent.trim()) {
         if (!nudged) {
           nudged = true;
@@ -1355,7 +1869,8 @@ async function streamOpenAiCompatible(
         }
         throw new Error("Provider returned an empty completion.");
       }
-      return { content: totalContent, modelId, thinking: totalThinking || null };
+      const cleanThinking = stripTextToolCalls(totalThinking).trim();
+      return { content: totalContent, modelId, thinking: cleanThinking || null };
     }
 
     // Append assistant message with tool_calls, then execute each tool.
@@ -1374,8 +1889,22 @@ async function streamOpenAiCompatible(
       let input: Record<string, unknown> = {};
       try { input = JSON.parse(tc.arguments); } catch { /* leave empty on parse failure */ }
       handlers.onStatus?.(`Tool: ${tc.name}`);
-      const result = await request.onToolCall(tc.name, input);
-      toolMessages.push({ role: "tool", tool_call_id: tc.id, content: toolResultToText(result) });
+      const toolSignature = buildToolCallSignature(tc.name, input);
+      const toolResultText = toolSignature === lastToolSignature
+        ? [
+            `You just called ${tc.name} with the same input and already received its result.`,
+            "Do not repeat the same tool call immediately.",
+            "Continue using the existing result, or provide the final answer.",
+            "",
+            `Previous result for ${tc.name}:`,
+            truncateToolText(lastToolResultText),
+          ].join("\n")
+        : toolResultToText(await request.onToolCall(tc.name, input));
+      if (toolSignature !== lastToolSignature) {
+        lastToolSignature = toolSignature;
+        lastToolResultText = toolResultText;
+      }
+      toolMessages.push({ role: "tool", tool_call_id: tc.id, content: toolResultText });
     }
 
     messages = [...messages, assistantMessage, ...toolMessages];
@@ -1383,8 +1912,11 @@ async function streamOpenAiCompatible(
   }
 
   // Turn limit reached — return whatever the model streamed so far.
-  if (totalContent.trim()) return { content: totalContent, modelId, thinking: totalThinking || null };
-  throw new Error("Tool call limit reached without a final response.");
+  if (totalContent.trim()) {
+    const cleanThinking = stripTextToolCalls(totalThinking).trim();
+    return { content: totalContent, modelId, thinking: cleanThinking || null };
+  }
+  throw new Error(`Tool call limit reached without a final response after ${maxToolTurns} tool turns.`);
 }
 
 async function executeAnthropic(
@@ -1407,8 +1939,9 @@ async function executeAnthropic(
   let messages: unknown[] = toAnthropicMessages(request.conversation, request.content);
   let lastTextContent = "";
   let nudged = false;
+  const maxToolTurns = getProviderToolLoopLimit();
 
-  for (let turn = 0; turn < 10; turn++) {
+  for (let turn = 0; turn < maxToolTurns; turn++) {
     const body: Record<string, unknown> = {
       model: modelId,
       system: systemPrompt,
@@ -1485,7 +2018,7 @@ async function executeAnthropic(
 
   // Turn limit reached — return the last text the model produced, if any.
   if (lastTextContent.trim()) return { content: lastTextContent, modelId };
-  throw new Error("Tool call limit reached without a final response.");
+  throw new Error(`Tool call limit reached without a final response after ${maxToolTurns} tool turns.`);
 }
 
 async function streamAnthropic(
@@ -1510,9 +2043,10 @@ async function streamAnthropic(
   let totalContent = "";
   let totalThinking = "";
   let nudged = false;
+  const maxToolTurns = getProviderToolLoopLimit();
   handlers.onStatus?.("Streaming response...");
 
-  for (let turn = 0; turn < 10; turn++) {
+  for (let turn = 0; turn < maxToolTurns; turn++) {
     const body: Record<string, unknown> = {
       model: modelId,
       stream: true,
@@ -1645,7 +2179,7 @@ async function streamAnthropic(
 
   // Turn limit reached — return whatever the model streamed so far.
   if (totalContent.trim()) return { content: totalContent, modelId, thinking: totalThinking || null };
-  throw new Error("Tool call limit reached without a final response.");
+  throw new Error(`Tool call limit reached without a final response after ${maxToolTurns} tool turns.`);
 }
 
 export async function recheckProvider(

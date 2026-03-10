@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { Route } from "next";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
@@ -11,7 +10,6 @@ import { clientApiPath } from "../lib/api";
 import {
   announceConversationsChanged,
   CONVERSATIONS_CHANGED_EVENT,
-  formatConversationTimestamp,
   sortConversationSummaries,
 } from "../lib/conversations";
 

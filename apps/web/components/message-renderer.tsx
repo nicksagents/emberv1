@@ -1,4 +1,4 @@
-import { Fragment, type ReactNode } from "react";
+import { Fragment, type ReactNode, useState, useCallback } from "react";
 
 import type { ChatAttachment, ChatMessage } from "@ember/core/client";
 
@@ -11,10 +11,23 @@ type MarkdownBlock =
   | { type: "table"; headers: string[]; rows: string[][] };
 
 function formatMessageTime(value: string): string {
+  const date = new Date(value);
+  const now = new Date();
+  const isToday = date.toDateString() === now.toDateString();
+  
+  if (isToday) {
+    return new Intl.DateTimeFormat("en-US", {
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(date);
+  }
+  
   return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
     hour: "numeric",
     minute: "2-digit",
-  }).format(new Date(value));
+  }).format(date);
 }
 
 function isUnorderedListLine(line: string): boolean {
@@ -165,7 +178,7 @@ function parseMarkdown(content: string): MarkdownBlock[] {
 }
 
 function splitAutoLink(url: string): { href: string; trailing: string } {
-  const match = url.match(/^(.*?)([.,!?;:)]*)$/);
+  const match = url.match(/^(.*?)([.,!?;:]*)$/);
   if (!match) {
     return { href: url, trailing: "" };
   }
@@ -341,7 +354,7 @@ export function ThinkingPanel({
   }
 
   return (
-    <details className={`thinking-panel${live ? " live" : ""}`} open={live ? true : undefined}>
+    <details className={`thinking-panel${live ? " live" : ""}`} open>
       <summary>
         <span>Thinking</span>
         {live ? <span className="thinking-live-badge">Live</span> : null}
@@ -369,6 +382,42 @@ function ImageAttachments({ attachments }: { attachments: ChatAttachment[] }) {
   );
 }
 
+function CopyButton({ content }: { content: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Ignore copy errors
+    }
+  }, [content]);
+
+  return (
+    <button
+      type="button"
+      className="message-action-btn"
+      onClick={handleCopy}
+      aria-label={copied ? "Copied" : "Copy message"}
+      title={copied ? "Copied!" : "Copy message"}
+    >
+      {copied ? (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M20 6L9 17l-5-5" />
+        </svg>
+      ) : (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+          <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
+        </svg>
+      )}
+      <span>{copied ? "Copied" : "Copy"}</span>
+    </button>
+  );
+}
+
 export function MessageRenderer({
   message,
   humanName,
@@ -378,32 +427,50 @@ export function MessageRenderer({
 }) {
   const isUser = message.role === "user";
   const author = isUser ? humanName?.trim() || "You" : message.providerName || "Ember";
-  const initials = author.slice(0, 2).toUpperCase();
-  const roleLabel =
-    !isUser && message.authorRole !== "user"
-      ? `${message.authorRole.slice(0, 1).toUpperCase()}${message.authorRole.slice(1)}`
-      : null;
+  
+  // Get role label (e.g., "Director", "Coordinator")
+  const roleLabel = !isUser && message.authorRole !== "user"
+    ? `${message.authorRole.slice(0, 1).toUpperCase()}${message.authorRole.slice(1)}`
+    : null;
+  
+  // Get model label
   const modelLabel = !isUser ? message.modelId?.trim() ?? null : null;
+  
   const imageAttachments = (message.attachments ?? []).filter(
     (attachment) => attachment.kind === "image",
   );
 
   return (
     <div className={`message ${isUser ? "user" : "assistant"}`}>
-      <div className={`message-avatar ${isUser ? "user" : "assistant"}`}>
-        {initials}
-      </div>
       <div className="message-content">
+        {/* Header with author name only */}
         <div className="message-header">
           <span className="message-author">{author}</span>
-          {roleLabel ? <span className="message-role">{roleLabel}</span> : null}
-          {modelLabel ? <span className="message-role">{modelLabel}</span> : null}
-          <span className="message-meta">{formatMessageTime(message.createdAt)}</span>
         </div>
-        <ThinkingPanel content={message.thinking ?? ""} />
+        
+        {/* Thinking panel for assistant */}
+        {!isUser && <ThinkingPanel content={message.thinking ?? ""} />}
+        
+        {/* Message bubble */}
         <div className={`message-bubble ${isUser ? "user" : "assistant"}`}>
           <ImageAttachments attachments={imageAttachments} />
           <MessageContent content={message.content} />
+        </div>
+        
+        {/* Footer with role, model, time, and copy button */}
+        <div className="message-footer">
+          <div className="message-meta-left">
+            {!isUser && roleLabel && (
+              <span className="message-badge role">{roleLabel}</span>
+            )}
+            {!isUser && modelLabel && (
+              <span className="message-badge model">{modelLabel}</span>
+            )}
+            <span className="message-time">{formatMessageTime(message.createdAt)}</span>
+          </div>
+          <div className="message-meta-right">
+            <CopyButton content={message.content} />
+          </div>
         </div>
       </div>
     </div>

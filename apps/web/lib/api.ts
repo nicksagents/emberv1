@@ -17,4 +17,8 @@ export function clientApiPath(path: string): string {
   return `${CLIENT_API_PREFIX}${path}`;
 }
 
+export function clientStreamApiPath(path: string): string {
+  return clientApiPath(path);
+}
+
 export { API_URL };

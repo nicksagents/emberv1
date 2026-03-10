@@ -1,3 +1,4 @@
+// @ember/connectors rebuilt — edit this file to force tsx watch to reload packaged dependencies.
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import {
@@ -83,8 +84,7 @@ function sanitizeRecord(value: Record<string, string> | undefined): Record<strin
 }
 
 function toConversationSummary(conversation: Conversation): ConversationSummary {
-  const { messages, ...summary } = conversation;
-  void messages;
+  const { messages: _messages, ...summary } = conversation;
   return summary;
 }
 
@@ -285,6 +285,7 @@ function buildReplyMessage(
 
 const MAX_AGENT_LOOP = 16;
 const MAX_ROLE_VISITS = 5;
+const DISPATCH_TIMEOUT_MS = 10_000;
 
 function buildHandoffContext(source: ExecutionContext, targetRole: ExecutionRole): ExecutionContext {
   const assignment = source.assignmentMap.get(targetRole);
@@ -338,14 +339,21 @@ async function resolveAutoRouteDecision(
 
   try {
     console.log(`[dispatch] calling ${routerProvider.name} (${routerAssignment?.modelId ?? "default model"})`);
-    const routerExecution = await executeProviderChat(routerProvider, secrets, {
-      modelId: routerAssignment?.modelId ?? null,
-      promptStack: getPromptStack(settings, "dispatch"),
-      role: "dispatch",
-      conversation: [],
-      content: buildDispatchInput(request),
-      purpose: "route",
-    });
+    const routerExecution = await Promise.race([
+      executeProviderChat(routerProvider, secrets, {
+        modelId: routerAssignment?.modelId ?? null,
+        promptStack: getPromptStack(settings, "dispatch"),
+        role: "dispatch",
+        conversation: [],
+        content: buildDispatchInput(request),
+        purpose: "route",
+      }),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => {
+          reject(new Error(`Dispatch timed out after ${DISPATCH_TIMEOUT_MS}ms.`));
+        }, DISPATCH_TIMEOUT_MS).unref();
+      }),
+    ]);
     console.log(`[dispatch] raw response: "${routerExecution.content}"`);
     const decision = resolveDispatchDecision(routerExecution.content, policy.decision);
     console.log(
@@ -985,11 +993,29 @@ app.post("/api/chat/stream", async (request, reply) => {
     "content-type": "application/x-ndjson; charset=utf-8",
     "cache-control": "no-cache, no-transform",
     connection: "keep-alive",
+    "x-accel-buffering": "no",
   });
+  reply.raw.flushHeaders?.();
+
+  // Disable Nagle's algorithm so each event flushes to the client immediately.
+  (reply.raw.socket as import("node:net").Socket | null)?.setNoDelay(true);
 
   const send = (event: ChatStreamEvent) => {
     reply.raw.write(`${JSON.stringify(event)}\n`);
+    (reply.raw as typeof reply.raw & { flush?: () => void }).flush?.();
   };
+
+  // Send an immediate heartbeat so the client knows the server is alive
+  // before the (potentially slow) routing/dispatch LLM call begins.
+  const mode = normalizeChatMode(body.mode);
+  send({
+    type: "status",
+    phase: "routing",
+    message: mode === "auto" ? "Evaluating route..." : "Connecting to provider...",
+    role: null,
+    providerName: null,
+    modelId: null,
+  });
 
   try {
     const context = await prepareExecution(body);
@@ -1000,8 +1026,8 @@ app.post("/api/chat/stream", async (request, reply) => {
         phase: "routing",
         message: `Auto routed to ${context.routeDecision.role} via ${formatRouteSource(context.routeDecision.source)}.`,
         role: context.routeDecision.role,
-        providerName: null,
-        modelId: null,
+        providerName: context.provider?.name ?? null,
+        modelId: context.responseModelId,
       });
     }
 

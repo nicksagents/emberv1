@@ -2,6 +2,9 @@ import type { NextRequest } from "next/server";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:3005";
 
+// Headers that must be stripped to avoid conflicts when proxying a streaming response.
+const HOP_BY_HOP = ["connection", "keep-alive", "transfer-encoding", "content-encoding", "content-length"];
+
 async function proxy(request: NextRequest, path: string[]) {
   const search = request.nextUrl.search || "";
   const target = `${API_URL}/api/${path.join("/")}${search}`;
@@ -21,10 +24,20 @@ async function proxy(request: NextRequest, path: string[]) {
     init.body = await request.arrayBuffer();
   }
 
-  const response = await fetch(target, init);
+  let response: Response;
+  try {
+    response = await fetch(target, init);
+  } catch {
+    return new Response(
+      JSON.stringify({ message: "EMBER runtime is not reachable. Make sure the server is running on port 3005." }),
+      { status: 502, headers: { "content-type": "application/json" } },
+    );
+  }
+
   const responseHeaders = new Headers(response.headers);
-  responseHeaders.delete("content-encoding");
-  responseHeaders.delete("content-length");
+  for (const header of HOP_BY_HOP) {
+    responseHeaders.delete(header);
+  }
 
   return new Response(response.body, {
     status: response.status,

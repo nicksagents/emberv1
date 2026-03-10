@@ -2,8 +2,12 @@ import type { Role, ToolDefinition } from "@ember/core";
 
 import { browserTool } from "./browser.js";
 import { fetchPageTool } from "./fetch-page.js";
-import { editFileTool, readFileTool, writeFileTool } from "./files.js";
+import { editFileTool, listDirectoryTool, readFileTool, writeFileTool } from "./files.js";
+import { gitInspectTool } from "./git-inspect.js";
 import { handoffTool } from "./handoff.js";
+import { httpRequestTool } from "./http-request.js";
+import { projectOverviewTool } from "./project-overview.js";
+import { searchFilesTool } from "./search-files.js";
 import { setSudoPassword, terminalTool } from "./terminal.js";
 import type { EmberTool } from "./types.js";
 import { webSearchTool } from "./web-search.js";
@@ -15,11 +19,16 @@ export type { EmberTool };
 // See TOOLS.md for how to create and register a new tool.
 
 const REGISTRY: EmberTool[] = [
+  projectOverviewTool,
+  gitInspectTool,
   terminalTool,
+  listDirectoryTool,
+  searchFilesTool,
   readFileTool,
   writeFileTool,
   editFileTool,
   webSearchTool,
+  httpRequestTool,
   fetchPageTool,
   browserTool,
   handoffTool,
@@ -36,11 +45,11 @@ const TOOL_MAP = new Map<string, EmberTool>(
 
 const ROLE_TOOLS: Record<Role, EmberTool[]> = {
   dispatch:    [],
-  coordinator: [readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, fetchPageTool, browserTool, handoffTool],
-  advisor:     [readFileTool, terminalTool, webSearchTool, fetchPageTool, browserTool, handoffTool],
-  director:    [readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, fetchPageTool, browserTool, handoffTool],
-  inspector:   [readFileTool, terminalTool, webSearchTool, fetchPageTool, browserTool, handoffTool],
-  ops:         [readFileTool, writeFileTool, editFileTool, handoffTool],
+  coordinator: [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, browserTool, handoffTool],
+  advisor:     [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, browserTool, handoffTool],
+  director:    [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, browserTool, handoffTool],
+  inspector:   [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, browserTool, handoffTool],
+  ops:         [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, httpRequestTool, handoffTool],
 };
 
 // ─── Handoff state ────────────────────────────────────────────────────────────
@@ -74,7 +83,7 @@ export function createToolHandler(options?: { browserSessionKey?: string }) {
         return `Handoff to ${role} registered. Wrap up your response and ${role} will continue.`;
       }
 
-      if (name === "browser" && options?.browserSessionKey) {
+      if ((name === "browser" || name === "run_terminal_command") && options?.browserSessionKey) {
         return handleToolCall(name, {
           ...input,
           __sessionKey: options.browserSessionKey,
@@ -103,20 +112,66 @@ export function getToolsForRole(role: Role): ToolDefinition[] {
 
 export function getToolSystemPrompt(tools: ToolDefinition[]): string {
   if (!tools.length) return "";
+  const toolNames = new Set(tools.map((tool) => tool.name));
   const lines = tools
     .map((t) => TOOL_MAP.get(t.name)?.systemPrompt)
     .filter(Boolean)
     .map((p) => `- ${p}`);
+  const workflows: string[] = [];
+
+  if (toolNames.has("project_overview")) {
+    workflows.push("For unfamiliar repos: start with project_overview.");
+  }
+  if (toolNames.has("git_inspect")) {
+    workflows.push("For dirty worktrees, reviews, or change summaries: check git_inspect before editing.");
+  }
+  if (toolNames.has("search_files") && toolNames.has("read_file")) {
+    workflows.push("For code tasks: search_files first, then read_file before editing.");
+  }
+  if (toolNames.has("http_request")) {
+    workflows.push("For APIs and health checks: prefer http_request over browser automation.");
+  }
+  if (toolNames.has("web_search") && toolNames.has("fetch_page")) {
+    workflows.push("For external research: web_search first, then fetch_page on the best source.");
+  }
+  if (toolNames.has("browser")) {
+    workflows.push("Use browser only when page state, UI interaction, screenshots, or cookies matter.");
+  }
+  if (toolNames.has("run_terminal_command")) {
+    workflows.push("Use the terminal for commands or interactive workflows only after a narrower tool would not be enough.");
+  }
+
   return [
     "## Tools",
     "Use tools when they help you answer correctly or complete the task.",
-    "Base claims on tool results. Do not claim you checked, changed, ran, or verified something unless you actually did.",
+    "Base every claim on tool results. Never say you checked, changed, ran, or verified something unless a tool result proves it.",
     "Choose the smallest tool that fits the job.",
-    "Read before editing. Verify after important changes when feasible.",
-    "After a tool result, either continue with the next necessary step or give a complete answer.",
-    "Do not loop unnecessarily. Once you have enough information or the task is complete, stop using tools and respond.",
+    "Prefer short-output tools and the smallest valid input shape.",
+    "Prefer one tool call per step, then reassess.",
+    "",
+    "## Loop Prevention (IMPORTANT)",
+    "- Do NOT call the same tool with the same input twice in a row unless the underlying state changed.",
+    "- Do NOT read the same file multiple times in one response unless you edited it in between.",
+    "- After getting a tool result, decide: is the task done? If yes, respond. If not, what is the single next step?",
+    "- If you are going in circles (reading → thinking → reading the same thing again), stop and respond with what you know.",
+    "- Once you have enough information to complete the task, stop using tools and give your answer.",
+    "",
+    "## Small-Model Defaults",
+    "- For browser work: navigate -> snapshot -> act with element_id -> snapshot.",
+    "- For APIs: use http_request before browser.",
+    "- For code search: use search_files with literal=true for exact strings.",
+    "- For file inspection: use read_file with start_line/end_line when possible.",
+    "- For terminal follow-up: use action=read, action=input, or action=interrupt.",
+    "",
+    "## Handoff Rules",
+    "- Call the handoff tool at most ONCE per response.",
+    "- Only call handoff after your own tool work is complete for this turn.",
+    "- If the task is done, do NOT call handoff — just respond to the user.",
+    workflows.length ? "\n## Recommended Workflows" : "",
+    ...workflows.map((line) => `- ${line}`),
+    lines.length ? "\n## Available Tools" : "",
     ...lines,
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 export async function handleToolCall(

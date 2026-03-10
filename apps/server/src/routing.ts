@@ -204,7 +204,6 @@ export function routeAutoRequestPolicy(request: ChatRequest): PolicyRouteEvaluat
     /\bdocumentation\b/,
     /\bdocs\b/,
     /\bsource\b/,
-    /\bwebsite\b/,
     /\bbrowse\b/,
   ]);
 
@@ -312,7 +311,7 @@ export function routeAutoRequestPolicy(request: ChatRequest): PolicyRouteEvaluat
   const substantialCoding =
     codingScore >= 2 &&
     (complexityScore >= 1 || taskCount >= 3 || wordCount >= 20 || /(across backend and frontend|multi-file|refactor)/.test(normalized));
-  const routineExecution = browserScore + researchScore + filesystemScore >= 1 || codingScore === 1;
+  const routineExecution = browserScore + researchScore + filesystemScore >= 1;
 
   if (wantsBrowserFindings) {
     return {

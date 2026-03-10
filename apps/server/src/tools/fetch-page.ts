@@ -1,7 +1,7 @@
 import type { EmberTool } from "./types.js";
 
-const MAX_CHARS = 100_000;
 const PAGE_SIZE = 100_000;
+const LINK_LIMIT = 40;
 
 function extractTitle(html: string): string {
   const m = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
@@ -58,17 +58,55 @@ function htmlToText(html: string): string {
   );
 }
 
+function extractLinks(html: string, baseUrl: string): string[] {
+  const rawMatches = [...html.matchAll(/<a[^>]+href=["']([^"'#]+)["'][^>]*>([\s\S]*?)<\/a>/gi)];
+  const seen = new Set<string>();
+  const results: string[] = [];
+
+  for (const match of rawMatches) {
+    if (results.length >= LINK_LIMIT) {
+      break;
+    }
+
+    const href = match[1]?.trim() ?? "";
+    const text = decodeEntities((match[2] ?? "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
+    if (!href) {
+      continue;
+    }
+
+    let resolved = href;
+    try {
+      resolved = new URL(href, baseUrl).toString();
+    } catch {
+      resolved = href;
+    }
+
+    const key = `${resolved}|${text}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    results.push(text ? `${text}\n  ${resolved}` : resolved);
+  }
+
+  return results;
+}
+
 async function execute(input: Record<string, unknown>): Promise<string> {
   const url = typeof input.url === "string" ? input.url.trim() : "";
   if (!url) return "Error: no URL provided.";
   if (!/^https?:\/\//i.test(url)) return "Error: URL must start with http:// or https://.";
 
   const offset = typeof input.offset === "number" ? Math.max(0, Math.floor(input.offset)) : 0;
+  const includeLinks = input.include_links === true;
 
-  console.log(`[tool:fetch_page] "${url}" offset=${offset}`);
+  console.log(`[tool:fetch_page] "${url}" offset=${offset}${includeLinks ? " (include_links)" : ""}`);
 
   let rawText: string;
   let title = "";
+  let pageLinks: string[] = [];
+  let finalUrl = url;
+  let contentType = "";
 
   try {
     const response = await fetch(url, {
@@ -85,7 +123,8 @@ async function execute(input: Record<string, unknown>): Promise<string> {
       return `Error: ${response.status} ${response.statusText} from ${url}`;
     }
 
-    const contentType = response.headers.get("content-type") ?? "";
+    finalUrl = response.url || url;
+    contentType = response.headers.get("content-type") ?? "";
 
     if (contentType.includes("application/pdf")) {
       return (
@@ -110,7 +149,16 @@ async function execute(input: Record<string, unknown>): Promise<string> {
 
     if (contentType.includes("html")) {
       title = extractTitle(body);
+      if (includeLinks) {
+        pageLinks = extractLinks(body, finalUrl);
+      }
       rawText = htmlToText(body);
+    } else if (contentType.includes("json")) {
+      try {
+        rawText = JSON.stringify(JSON.parse(body), null, 2);
+      } catch {
+        rawText = decodeEntities(body);
+      }
     } else {
       // plain text / xml / json — return as-is (decoded if needed)
       rawText = decodeEntities(body);
@@ -127,7 +175,8 @@ async function execute(input: Record<string, unknown>): Promise<string> {
 
   const header = [
     title ? `Title: ${title}` : null,
-    `URL: ${url}`,
+    `URL: ${finalUrl}`,
+    `Content-Type: ${contentType || "unknown"}`,
     `Characters: ${offset + 1}–${Math.min(offset + slice.length, totalChars)} of ${totalChars}`,
     hasMore
       ? `\nThis page has more content. Call fetch_page again with offset=${nextOffset} to continue reading.`
@@ -137,7 +186,12 @@ async function execute(input: Record<string, unknown>): Promise<string> {
     .filter((x) => x !== null)
     .join("\n");
 
-  return header + "\n" + slice;
+  const linksSection =
+    includeLinks && pageLinks.length
+      ? `\n\nLinks:\n${pageLinks.join("\n\n")}${pageLinks.length >= LINK_LIMIT ? "\n\n[truncated link list]" : ""}`
+      : "";
+
+  return header + "\n" + slice + linksSection;
 }
 
 export const fetchPageTool: EmberTool = {
@@ -162,6 +216,10 @@ export const fetchPageTool: EmberTool = {
           description:
             "Character offset to start reading from (default 0). " +
             "Use the value from 'Call fetch_page again with offset=N' to read the next page of a long document.",
+        },
+        include_links: {
+          type: "boolean",
+          description: "Set to true to append a deduplicated link list from the page.",
         },
       },
       required: ["url"],

@@ -13,6 +13,15 @@ interface SearchResult {
   url: string;
 }
 
+function normalizeDomain(domain: string): string {
+  return domain
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/\/.*$/, "")
+    .replace(/^www\./, "");
+}
+
 function stripHtml(html: string): string {
   return html
     .replace(/<[^>]+>/g, " ")
@@ -100,8 +109,12 @@ async function fetchInstantAnswer(query: string): Promise<string | null> {
   }
 }
 
-async function fetchWebResults(query: string, maxResults: number): Promise<SearchResult[]> {
-  const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}&kl=us-en`;
+async function fetchWebResults(
+  query: string,
+  maxResults: number,
+  region: string,
+): Promise<SearchResult[]> {
+  const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}&kl=${encodeURIComponent(region)}`;
   const res = await fetch(url, {
     headers: {
       "User-Agent":
@@ -113,20 +126,32 @@ async function fetchWebResults(query: string, maxResults: number): Promise<Searc
   });
   if (!res.ok) throw new Error(`DDG HTML search returned ${res.status}`);
   const html = await res.text();
-  return parseDdgHtml(html, maxResults);
+  const seen = new Set<string>();
+  return parseDdgHtml(html, maxResults * 2).filter((result) => {
+    const key = normalizeDomain(result.url) + "|" + result.title.toLowerCase();
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  }).slice(0, maxResults);
 }
 
 async function execute(input: Record<string, unknown>): Promise<string> {
   const query = typeof input.query === "string" ? input.query.trim() : "";
   const maxResults = typeof input.max_results === "number" ? Math.min(input.max_results, 10) : 6;
+  const site = typeof input.site === "string" ? normalizeDomain(input.site) : "";
+  const region = typeof input.region === "string" && input.region.trim() ? input.region.trim() : "us-en";
   if (!query) return "Error: no query provided.";
 
-  console.log(`[tool:web_search] "${query}" (max ${maxResults})`);
+  const effectiveQuery = site ? `${query} site:${site}` : query;
+
+  console.log(`[tool:web_search] "${effectiveQuery}" (max ${maxResults}, region ${region})`);
 
   // Fire both requests concurrently
   const [instant, webResults] = await Promise.allSettled([
-    fetchInstantAnswer(query),
-    fetchWebResults(query, maxResults),
+    fetchInstantAnswer(effectiveQuery),
+    fetchWebResults(effectiveQuery, maxResults, region),
   ]);
 
   const sections: string[] = [];
@@ -142,7 +167,7 @@ async function execute(input: Record<string, unknown>): Promise<string> {
         return `${i + 1}. ${r.title}${snippet}\n   ${r.url}`;
       })
       .join("\n\n");
-    sections.push(`Web results:\n\n${items}`);
+    sections.push(`Web results${site ? ` (site:${site})` : ""}:\n\n${items}`);
   } else if (webResults.status === "rejected") {
     console.warn(`[tool:web_search] HTML fetch failed: ${webResults.reason}`);
   }
@@ -171,6 +196,14 @@ export const webSearchTool: EmberTool = {
         max_results: {
           type: "number",
           description: "Maximum number of web results to return (default 6, max 10).",
+        },
+        site: {
+          type: "string",
+          description: "Optional domain filter such as 'docs.openai.com' or 'github.com'.",
+        },
+        region: {
+          type: "string",
+          description: "Optional DuckDuckGo region code such as 'us-en' or 'ca-en'. Default us-en.",
         },
       },
       required: ["query"],

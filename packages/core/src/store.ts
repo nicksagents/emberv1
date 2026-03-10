@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -32,7 +32,7 @@ const DATA_FILES = {
 
 async function pathExists(target: string): Promise<boolean> {
   try {
-    await readFile(target, "utf8");
+    await access(target);
     return true;
   } catch {
     return false;
@@ -65,10 +65,10 @@ export function getDataRoot(from = process.cwd()): string {
 }
 
 export async function ensureDataFiles(from = process.cwd()): Promise<void> {
-  const dataRoot = getDataRoot(from);
   const repoRoot = process.env.EMBER_ROOT
     ? path.resolve(process.env.EMBER_ROOT)
     : resolveRepoRoot(from);
+  const dataRoot = path.join(repoRoot, "data");
   await mkdir(dataRoot, { recursive: true });
 
   const defaults = {

@@ -25,7 +25,7 @@ import type {
 } from "@ember/core/client";
 import { ROLES } from "@ember/core/client";
 
-import { clientApiPath } from "../lib/api";
+import { clientApiPath, clientStreamApiPath } from "../lib/api";
 import { announceConversationsChanged } from "../lib/conversations";
 import { MessageRenderer, StreamingContent, ThinkingPanel } from "./message-renderer";
 
@@ -106,6 +106,23 @@ function readImageAttachment(file: File): Promise<ChatAttachment> {
   });
 }
 
+async function fetchConversationSnapshot(id: string): Promise<Conversation | null> {
+  const response = await fetch(clientApiPath(`/conversations/${id}`), {
+    cache: "no-store",
+  });
+
+  if (response.status === 404) {
+    return null;
+  }
+
+  if (!response.ok) {
+    throw new Error(`Conversation load failed with status ${response.status}.`);
+  }
+
+  const payload = (await response.json()) as { item: Conversation };
+  return payload.item;
+}
+
 export function ChatClient({
   providers,
   assignments,
@@ -158,11 +175,8 @@ export function ChatClient({
       setErrorMessage(null);
 
       try {
-        const response = await fetch(clientApiPath(`/conversations/${id}`), {
-          cache: "no-store",
-        });
-
-        if (response.status === 404) {
+        const item = await fetchConversationSnapshot(id);
+        if (!item) {
           if (!cancelled) {
             setConversation(null);
             setMessages([]);
@@ -171,20 +185,14 @@ export function ChatClient({
           }
           return;
         }
-
-        if (!response.ok) {
-          throw new Error(`Conversation load failed with status ${response.status}.`);
-        }
-
-        const payload = (await response.json()) as { item: Conversation };
         if (cancelled) {
           return;
         }
 
-        const { messages: nextMessages, ...summary } = payload.item;
+        const { messages: nextMessages, ...summary } = item;
         setConversation(summary);
         setMessages(nextMessages);
-        setMode(normalizeMode(payload.item.mode));
+        setMode(normalizeMode(item.mode));
       } catch (error) {
         if (!cancelled) {
           setErrorMessage(
@@ -250,10 +258,6 @@ export function ChatClient({
       ? null
       : providers.find((provider) => provider.id === activeAssignment?.providerId) ?? null;
   const activeImageProvider = mode === "auto" ? routerProvider : activeProvider;
-  const liveExecutionReady =
-    mode === "auto"
-      ? routerProvider?.status === "connected" && routerProvider.capabilities.canChat
-      : activeProvider?.status === "connected" && activeProvider.capabilities.canChat;
   const setupReady =
     mode === "auto"
       ? Boolean(
@@ -287,6 +291,16 @@ export function ChatClient({
     element.style.height = "0px";
     element.style.height = `${Math.min(element.scrollHeight, 200)}px`;
   }, [input]);
+
+  // Reset textarea height after sending
+  useEffect(() => {
+    if (!sending) {
+      const element = composerRef.current;
+      if (element) {
+        element.style.height = "auto";
+      }
+    }
+  }, [sending]);
 
   useEffect(() => {
     autoScrollRef.current = true;
@@ -393,18 +407,18 @@ export function ChatClient({
     setStreamingPreview({
       content: "",
       thinking: "",
-      status: mode === "auto" ? "Routing..." : "Waiting for provider...",
+      status: mode === "auto" ? "Evaluating route..." : "Waiting for provider...",
       phase: mode === "auto" ? "routing" : "provider",
-      providerName: mode === "auto" ? routerProvider?.name ?? null : activeProvider?.name ?? null,
-      role: mode === "auto" ? "dispatch" : mode,
+      providerName: mode === "auto" ? null : activeProvider?.name ?? null,
+      role: mode === "auto" ? null : mode,
       modelId:
         mode === "auto"
-          ? routerAssignment?.modelId ?? routerProvider?.config.defaultModelId ?? null
+          ? null
           : activeAssignment?.modelId ?? activeProvider?.config.defaultModelId ?? null,
     });
 
     try {
-      const response = await fetch(clientApiPath("/chat/stream"), {
+      const response = await fetch(clientStreamApiPath("/chat/stream"), {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -520,10 +534,33 @@ export function ChatClient({
       }
     } catch (error) {
       setStreamingPreview(null);
-      setMessages((current) => current.filter((message) => message.id !== userMessage.id));
-      setInput(userMessage.content);
-      setPendingAttachments(userMessage.attachments ?? []);
-      setErrorMessage(error instanceof Error ? error.message : "Chat request failed.");
+      const activeConversationId = conversation?.id ?? selectedConversationId;
+      let recovered = false;
+
+      if (activeConversationId) {
+        try {
+          const snapshot = await fetchConversationSnapshot(activeConversationId);
+          if (snapshot && snapshot.messages.length >= nextConversation.length) {
+            const { messages: nextMessages, ...summary } = snapshot;
+            setConversation(summary);
+            setMessages(nextMessages);
+            setMode(normalizeMode(snapshot.mode));
+            announceConversationsChanged();
+            recovered = true;
+          }
+        } catch {
+          // Fall back to the existing error recovery path below.
+        }
+      }
+
+      if (recovered) {
+        setErrorMessage("The live stream disconnected, but the saved response was recovered.");
+      } else {
+        setMessages((current) => current.filter((message) => message.id !== userMessage.id));
+        setInput(userMessage.content);
+        setPendingAttachments(userMessage.attachments ?? []);
+        setErrorMessage(error instanceof Error ? error.message : "Chat request failed.");
+      }
     } finally {
       setSending(false);
     }
@@ -737,23 +774,11 @@ export function ChatClient({
 
           {sending && streamingPreview ? (
             <div className="message assistant">
-              <div className="message-avatar assistant">
-                {(streamingPreview.providerName || titleCase(streamingPreview.role))
-                  .slice(0, 2)
-                  .toUpperCase()}
-              </div>
               <div className="message-content">
                 <div className="message-header">
                   <span className="message-author">
                     {streamingPreview.providerName || titleCase(streamingPreview.role)}
                   </span>
-                  {streamingPreview.role ? (
-                    <span className="message-role">{titleCase(streamingPreview.role)}</span>
-                  ) : null}
-                  {streamingPreview.modelId ? (
-                    <span className="message-role">{streamingPreview.modelId}</span>
-                  ) : null}
-                  <span className="message-meta">{streamingPreview.status}</span>
                 </div>
 
                 <ThinkingPanel content={streamingPreview.thinking} live />
@@ -762,8 +787,20 @@ export function ChatClient({
                   {streamingPreview.content.trim() ? (
                     <StreamingContent content={streamingPreview.content} />
                   ) : (
-                    <p className="streaming-status">{streamingPreview.status}</p>
+                    <span className="streaming-loader" aria-label="Waiting for response" />
                   )}
+                </div>
+                
+                <div className="message-footer">
+                  <div className="message-meta-left">
+                    {streamingPreview.role && (
+                      <span className="message-badge role">{titleCase(streamingPreview.role)}</span>
+                    )}
+                    {streamingPreview.modelId && (
+                      <span className="message-badge model">{streamingPreview.modelId}</span>
+                    )}
+                    <span className="message-time">{streamingPreview.status}</span>
+                  </div>
                 </div>
               </div>
             </div>

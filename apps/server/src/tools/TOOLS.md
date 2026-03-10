@@ -1,6 +1,6 @@
 # Ember Tool System
 
-Tools give LLMs the ability to take actions — run commands, read files, search the web, call APIs.
+Tools give LLMs the ability to take actions: run commands, inspect files, search the web, call APIs, and automate browsers.
 Each role gets a specific subset of tools. The system composes a tight system prompt from only
 the tools that role actually has access to, so no LLM sees more than it needs.
 
@@ -16,7 +16,7 @@ User sends message
   → The LLM receives: shared prompt + role prompt + tools prompt + conversation
   → LLM responds and optionally requests a tool call
   → handleToolCall(name, input) dispatches to the tool's execute() function
-  → Result is fed back to the LLM (this loops up to 10 times per request)
+  → Result is fed back to the LLM (this loops up to the configured provider tool-turn limit)
   → LLM produces a final text response
 ```
 
@@ -127,14 +127,14 @@ tool server-side before continuing the loop.
 
 ## Per-role tool access
 
-| Role      | Tools                                                                      |
-|-----------|----------------------------------------------------------------------------|
-| router    | none (classification only)                                                 |
-| assistant | read_file, run_terminal_command, web_search, fetch_page                    |
-| planner   | read_file, run_terminal_command, web_search, fetch_page                    |
-| coder     | read_file, write_file, edit_file, run_terminal_command, web_search, fetch_page |
-| auditor   | read_file, run_terminal_command, web_search, fetch_page                    |
-| janitor   | read_file, write_file, edit_file (background only)                         |
+| Role        | Tools                                                                                                                      |
+|-------------|----------------------------------------------------------------------------------------------------------------------------|
+| dispatch    | none (classification only)                                                                                                 |
+| coordinator | project_overview, git_inspect, list_directory, search_files, read_file, write_file, edit_file, run_terminal_command, web_search, http_request, fetch_page, browser, handoff |
+| advisor     | project_overview, git_inspect, list_directory, search_files, read_file, run_terminal_command, web_search, http_request, fetch_page, browser, handoff |
+| director    | project_overview, git_inspect, list_directory, search_files, read_file, write_file, edit_file, run_terminal_command, web_search, http_request, fetch_page, browser, handoff |
+| inspector   | project_overview, git_inspect, list_directory, search_files, read_file, run_terminal_command, web_search, http_request, fetch_page, browser, handoff |
+| ops         | project_overview, git_inspect, list_directory, search_files, read_file, write_file, edit_file, http_request, handoff     |
 
 ---
 
@@ -142,10 +142,12 @@ tool server-side before continuing the loop.
 
 - **Return plain text.** The LLM reads the return value directly. Avoid JSON unless the LLM
   specifically needs to parse it.
+- **Optimize for small models.** Prefer compact snapshots, short status text, stable IDs, and a few high-leverage parameters over large raw dumps.
 - **Fail loudly with a clear message.** Return `"Error: ..."` strings — don't throw. The LLM
   will see the error and can try a different approach.
 - **Cap output size.** Large outputs waste context window. Truncate at ~100 KB for file reads,
   and summarize or paginate for API responses.
+- **Design for cross-platform execution.** Prefer Node APIs or well-supported binaries with clear fallbacks so tools behave on macOS, Linux, and Windows.
 - **Log what you do.** Use `console.log(`[tool:name] ...`)` so server logs are useful.
 - **Keep execute() focused.** One tool, one job. If you need two things, make two tools.
 - **async is fine.** `execute` can be `async` — the system awaits it.
