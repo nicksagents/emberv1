@@ -206,8 +206,6 @@ It is acceptable to hardcode connector types, such as:
 
 codex-cli
 
-claude-code-cli
-
 anthropic-api
 
 openai-compatible
@@ -675,10 +673,6 @@ Codex must support these connector types first:
 codex-cli
 
 For the local Codex browser login flow.
-
-claude-code-cli
-
-For the local Claude Code browser login flow.
 
 anthropic-api
 

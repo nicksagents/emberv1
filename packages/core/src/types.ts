@@ -1,12 +1,12 @@
 import type { UiBlock } from "@ember/ui-schema";
 
 export const ROLES = [
-  "router",
-  "assistant",
-  "planner",
-  "coder",
-  "auditor",
-  "janitor",
+  "dispatch",
+  "coordinator",
+  "advisor",
+  "director",
+  "inspector",
+  "ops",
 ] as const;
 
 export type Role = (typeof ROLES)[number];
@@ -14,7 +14,6 @@ export type ChatMode = Role | "auto";
 
 export const CONNECTOR_TYPE_IDS = [
   "codex-cli",
-  "claude-code-cli",
   "anthropic-api",
   "openai-compatible",
 ] as const;
@@ -40,6 +39,7 @@ export interface ProviderCapabilities {
   canListModels: boolean;
   requiresBrowserAuth: boolean;
   canUseImages: boolean;
+  canUseTools: boolean;
 }
 
 export interface ChatAttachment {
@@ -74,6 +74,7 @@ export interface Settings {
   workspaceRoot: string;
   themePreference: string;
   tailscaleStatus: string;
+  sudoPassword: string;
   systemPrompts: {
     shared: string;
     roles: Record<Role, string>;
@@ -100,7 +101,7 @@ export interface ProviderSecrets {
 export interface ChatMessage {
   id: string;
   role: "user" | "system" | "assistant";
-  authorRole: Role | "assistant" | "user";
+  authorRole: Role | "user";
   mode: ChatMode;
   content: string;
   attachments?: ChatAttachment[];
@@ -123,6 +124,7 @@ export interface ChatRequest {
 export interface PromptStack {
   shared: string;
   role: string;
+  tools: string;
 }
 
 export interface ChatExecutionResult {
@@ -198,14 +200,25 @@ export interface ToolDefinition {
   };
 }
 
+/** A tool result that includes both text and an optional screenshot/image. */
+export interface ToolImageResult {
+  text: string;
+  imageBase64: string;
+  imageMimeType: "image/png" | "image/jpeg" | "image/webp";
+}
+
+/** What a tool's execute() function may return. */
+export type ToolResult = string | ToolImageResult;
+
 export interface ProviderExecutionRequest {
   modelId: string | null;
   promptStack: PromptStack;
   conversation: ChatMessage[];
   content: string;
+  role?: Role;
   purpose?: "chat" | "route";
   tools?: ToolDefinition[];
-  onToolCall?: (name: string, input: Record<string, unknown>) => Promise<string>;
+  onToolCall?: (name: string, input: Record<string, unknown>) => Promise<ToolResult>;
 }
 
 export interface ProviderExecutionResult {

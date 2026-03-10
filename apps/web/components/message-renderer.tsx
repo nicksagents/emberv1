@@ -310,6 +310,24 @@ export function MessageContent({ content }: { content: string }) {
   return <div className="message-markdown">{renderBlocks(parseMarkdown(content))}</div>;
 }
 
+/**
+ * Used during streaming. Renders plain paragraphs split on blank lines — no
+ * markdown parsing — so partial tables/lists never flash as raw pipe characters.
+ * Once streaming completes the finalized ChatMessage switches to MessageContent.
+ */
+export function StreamingContent({ content }: { content: string }) {
+  const paragraphs = content.split(/\n{2,}/);
+  return (
+    <div className="message-markdown">
+      {paragraphs.map((p, i) => (
+        <p key={i} style={{ whiteSpace: "pre-wrap" }}>
+          {p}
+        </p>
+      ))}
+    </div>
+  );
+}
+
 export function ThinkingPanel({
   content,
   live = false,

@@ -40,15 +40,9 @@ interface ProviderPreset {
 const PROVIDER_PRESETS: Record<ConnectorTypeId, ProviderPreset> = {
   "codex-cli": {
     name: "Codex CLI",
-    description: "Use your local Codex login and automatically pull the models on that account.",
+    description: "Use your local Codex login, discovered models, and EMBER tool support.",
     requiresKey: false,
     setupNote: "Model choices come from your local Codex CLI session on this machine.",
-  },
-  "claude-code-cli": {
-    name: "Claude Code CLI",
-    description: "Use your local Claude login and pull the models available to that subscription.",
-    requiresKey: false,
-    setupNote: "Model choices come from your local Claude CLI install and account metadata.",
   },
   "anthropic-api": {
     name: "Anthropic API",
@@ -211,28 +205,28 @@ const QUICK_PRESETS: QuickPreset[] = [
 ];
 
 const ROLE_DETAILS: Record<Role, { title: string; description: string }> = {
-  router: {
-    title: "Router",
+  dispatch: {
+    title: "Dispatch",
     description: "Chooses the best role when chat is running in auto mode.",
   },
-  assistant: {
-    title: "Assistant",
-    description: "Handles direct answers, general help, and lightweight tasks.",
+  coordinator: {
+    title: "Coordinator",
+    description: "Default operator for most tasks, including browsing, research, and routine execution.",
   },
-  planner: {
-    title: "Planner",
-    description: "Breaks larger requests into steps and execution plans.",
+  advisor: {
+    title: "Advisor",
+    description: "Planning-first role for architecture, scoping, sequencing, and tradeoffs.",
   },
-  coder: {
-    title: "Coder",
+  director: {
+    title: "Director",
     description: "Implements product, UI, and code changes across the workspace.",
   },
-  auditor: {
-    title: "Auditor",
-    description: "Reviews work for bugs, regressions, and missing validation.",
+  inspector: {
+    title: "Inspector",
+    description: "Reviews work, validates browser/UI behavior, and produces findings.",
   },
-  janitor: {
-    title: "Janitor",
+  ops: {
+    title: "Ops",
     description: "Cleans up formatting, naming, and low-risk polish tasks.",
   },
 };
@@ -315,9 +309,7 @@ function getProviderModels(
 ): string[] {
   return normalizeModels([
     ...provider.availableModels,
-    ...(provider.typeId === "codex-cli" || provider.typeId === "claude-code-cli"
-      ? modelCatalog[provider.typeId] ?? []
-      : []),
+    ...(provider.typeId === "codex-cli" ? modelCatalog[provider.typeId] ?? [] : []),
     provider.config.defaultModelId ?? "",
   ]);
 }
@@ -355,7 +347,7 @@ function getProviderTypeLabel(provider: ProviderView): string {
 }
 
 function getProviderAuthLabel(provider: Provider): string {
-  if (provider.typeId === "codex-cli" || provider.typeId === "claude-code-cli") {
+  if (provider.typeId === "codex-cli") {
     return "Local CLI session";
   }
 
@@ -393,10 +385,6 @@ function getProviderSummary(provider: ProviderView, modelCount: number): string 
 function deriveProviderName(typeId: ConnectorTypeId, baseUrl: string): string {
   if (typeId === "codex-cli") {
     return "Codex CLI";
-  }
-
-  if (typeId === "claude-code-cli") {
-    return "Claude Code CLI";
   }
 
   if (typeId === "anthropic-api") {
@@ -534,7 +522,7 @@ export function SettingsClient({
 
   const selectedCliModels =
     selectedProviderType &&
-    (selectedProviderType === "codex-cli" || selectedProviderType === "claude-code-cli")
+    selectedProviderType === "codex-cli"
       ? normalizeModels(modelCatalog[selectedProviderType] ?? [])
       : [];
 
@@ -849,7 +837,7 @@ export function SettingsClient({
       const secrets: Record<string, string> = {};
 
       if (
-        (selectedProviderType === "codex-cli" || selectedProviderType === "claude-code-cli") &&
+        selectedProviderType === "codex-cli" &&
         defaultModelId.trim()
       ) {
         config.defaultModelId = defaultModelId.trim();
@@ -1026,6 +1014,18 @@ export function SettingsClient({
                         placeholder="How Ember should address you"
                       />
                     </label>
+                    <label className="field">
+                      <span>Sudo password</span>
+                      <input
+                        type="password"
+                        value={settings.sudoPassword ?? ""}
+                        onChange={(event) =>
+                          setSettings((current) => ({ ...current, sudoPassword: event.target.value }))
+                        }
+                        placeholder="Used for commands that need elevated access"
+                        autoComplete="new-password"
+                      />
+                    </label>
                     <div className="settings-inline-note">
                       <span className="section-label">Overview</span>
                       <p>{connectedProviders.length} connected providers</p>
@@ -1080,10 +1080,6 @@ export function SettingsClient({
                     <div className="settings-rule-row">
                       <strong>Codex CLI</strong>
                       <span>Read models from the local Codex account metadata on this machine.</span>
-                    </div>
-                    <div className="settings-rule-row">
-                      <strong>Claude Code CLI</strong>
-                      <span>Read models from the local Claude subscription metadata on this machine.</span>
                     </div>
                   </div>
                 </section>
@@ -1154,7 +1150,7 @@ export function SettingsClient({
 
                     {selectedQuickPresetId && selectedProviderType ? (() => {
                       const qp = QUICK_PRESETS.find((p) => p.id === selectedQuickPresetId)!;
-                      const isCli = selectedProviderType === "codex-cli" || selectedProviderType === "claude-code-cli";
+                      const isCli = selectedProviderType === "codex-cli";
                       const isOpenAI = selectedProviderType === "openai-compatible";
                       return (
                         <div className="provider-quick-form">
@@ -1222,9 +1218,7 @@ export function SettingsClient({
                           {isCli ? (
                             <div className="provider-quick-note">
                               <span>
-                                {selectedProviderType === "claude-code-cli"
-                                  ? "Run `claude auth login` first, then save and use Refresh to pull models."
-                                  : "Run `codex login` first, then save and use Refresh to pull models."}
+                                Run `codex login` first, then save and use Refresh to pull models.
                               </span>
                             </div>
                           ) : null}
@@ -1380,8 +1374,7 @@ export function SettingsClient({
                                     </select>
                                   </label>
 
-                                  {provider.typeId !== "codex-cli" &&
-                                  provider.typeId !== "claude-code-cli" ? (
+                                  {provider.typeId !== "codex-cli" ? (
                                     <label className="field">
                                       <span>Replace API key</span>
                                       <input

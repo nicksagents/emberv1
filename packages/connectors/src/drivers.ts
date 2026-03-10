@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
@@ -10,11 +11,40 @@ import {
   type ChatMessage,
   type PromptStack,
   type Provider,
+  type ToolDefinition,
+  type ToolResult,
   type ProviderExecutionRequest,
   type ProviderExecutionResult,
   type ProviderSecrets,
   type ProviderStatus,
 } from "@ember/core";
+
+/** Extract plain text from a ToolResult (used for providers that don't support image content). */
+function toolResultToText(result: ToolResult): string {
+  return typeof result === "string" ? result : result.text;
+}
+
+/**
+ * Convert a ToolResult to Anthropic's tool_result content format.
+ * If the result includes an image, returns a multi-block content array so
+ * vision-capable models can see the screenshot alongside the text description.
+ */
+function toolResultToAnthropicContent(
+  result: ToolResult,
+): string | Array<{ type: string; [key: string]: unknown }> {
+  if (typeof result === "string") return result;
+  return [
+    {
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: result.imageMimeType,
+        data: result.imageBase64,
+      },
+    },
+    { type: "text", text: result.text },
+  ];
+}
 
 interface ProviderStreamHandlers {
   onStatus?: (message: string) => void;
@@ -45,6 +75,14 @@ function shouldSurfaceCodexStatus(value: string): boolean {
   return normalized.length <= 240;
 }
 
+function cliNeedsFullAccess(request: ProviderExecutionRequest): boolean {
+  return request.role === "director";
+}
+
+function getCodexSandboxMode(request: ProviderExecutionRequest): "workspace-write" | "danger-full-access" {
+  return cliNeedsFullAccess(request) ? "danger-full-access" : "workspace-write";
+}
+
 export interface RecheckResult {
   status: ProviderStatus;
   lastError: string | null;
@@ -58,10 +96,6 @@ interface CodexModelsCache {
     priority?: number | null;
     shell_type?: string | null;
   }>;
-}
-
-interface ClaudeStatsCache {
-  modelUsage?: Record<string, unknown>;
 }
 
 function commandExists(command: string): boolean {
@@ -129,110 +163,30 @@ function readCodexModels(): string[] {
     .map((model) => model.slug!.trim());
 }
 
-function normalizeClaudeModelId(value: string): string {
-  return value.trim().toLowerCase().replace(/\./g, "-").replace(/-+/g, "-");
-}
-
-function isSupportedClaudeModel(value: string): boolean {
-  return /^(claude-(?:sonnet|opus|haiku)-\d+(?:-\d+)*(?:-\d{8})?(?:-v\d+)?)$/.test(
-    value,
-  );
-}
-
-function sortClaudeModels(values: string[]): string[] {
-  const aliases = ["sonnet", "opus", "haiku"];
-  const aliasSet = new Set(aliases);
-  const uniqueValues = unique(values);
-
-  const aliasValues = aliases.filter((alias) => uniqueValues.includes(alias));
-  const versionedValues = uniqueValues
-    .filter((value) => !aliasSet.has(value))
-    .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
-
-  return [...aliasValues, ...versionedValues];
-}
-
-function readClaudeModelsFromStats(): string[] {
-  const statsPath = path.join(os.homedir(), ".claude", "stats-cache.json");
-  const stats = readJsonFile<ClaudeStatsCache>(statsPath);
-
-  return Object.keys(stats?.modelUsage ?? {})
-    .map(normalizeClaudeModelId)
-    .filter(isSupportedClaudeModel);
-}
-
-function readClaudeModelsFromBinary(): string[] {
-  const commandPath = resolveCommandPath("claude");
-  if (!commandPath || !commandExists("strings")) {
-    return [];
-  }
-
-  const result = spawnSync("strings", [commandPath], {
-    encoding: "utf8",
-    maxBuffer: 16 * 1024 * 1024,
-  });
-
-  if (result.status !== 0) {
-    return [];
-  }
-
-  const matches =
-    result.stdout.match(/\b(?:claude-(?:sonnet|opus|haiku)-[a-z0-9.-]+|sonnet|opus|haiku)\b/gi) ??
-    [];
-
-  return matches
-    .map(normalizeClaudeModelId)
-    .filter(
-      (value) =>
-        value === "sonnet" ||
-        value === "opus" ||
-        value === "haiku" ||
-        isSupportedClaudeModel(value),
-    );
-}
-
-function readCliModels(command: "codex" | "claude"): string[] {
-  if (command === "codex") {
-    return unique(readCodexModels());
-  }
-
-  return sortClaudeModels([
-    ...readClaudeModelsFromBinary(),
-    ...readClaudeModelsFromStats(),
-  ]);
-}
-
 export function getConnectorModelCatalog(): Partial<Record<ConnectorTypeId, string[]>> {
   return {
-    "codex-cli": readCliModels("codex"),
-    "claude-code-cli": readCliModels("claude"),
+    "codex-cli": unique(readCodexModels()),
   };
 }
 
-function readCliStatus(command: "codex" | "claude"): RecheckResult {
-  const availableModels = readCliModels(command);
+function readCodexCliStatus(): RecheckResult {
+  const availableModels = unique(readCodexModels());
 
-  if (!commandExists(command)) {
+  if (!commandExists("codex")) {
     return {
       status: "missing",
-      lastError: `${command} is not installed locally.`,
+      lastError: "codex is not installed locally.",
       availableModels,
     };
   }
 
-  const statusChecks =
-    command === "codex"
-      ? [
-          ["login", "status"],
-          ["auth", "status"],
-        ]
-      : [
-          ["auth", "status"],
-          ["login", "status"],
-        ];
+  const statusChecks = [
+    ["login", "status"],
+    ["auth", "status"],
+  ];
 
   for (const args of statusChecks) {
-    const authResult = runStatusCommand(command, args);
+    const authResult = runStatusCommand("codex", args);
 
     if (authResult.status === 0) {
       return {
@@ -257,7 +211,7 @@ function readCliStatus(command: "codex" | "claude"): RecheckResult {
       return {
         status: "needs-auth",
         lastError:
-          combined || `${command} is installed but not authenticated.`,
+          combined || "codex is installed but not authenticated.",
         availableModels,
       };
     }
@@ -265,7 +219,7 @@ function readCliStatus(command: "codex" | "claude"): RecheckResult {
 
   return {
     status: "needs-auth",
-    lastError: `${command} is installed but EMBER could not confirm the login state with this CLI version.`,
+    lastError: "codex is installed but EMBER could not confirm the login state with this CLI version.",
     availableModels,
   };
 }
@@ -400,13 +354,17 @@ async function testAnthropicApi(
   }
 }
 
+function buildSystemPrompt(stack: PromptStack): string {
+  return [stack.shared, stack.role, stack.tools].filter(Boolean).join("\n\n");
+}
+
 function toOpenAiMessages(
   conversation: ChatMessage[],
   promptStack: PromptStack,
   content: string,
   purpose: "chat" | "route" = "chat",
 ) {
-  const systemContent = [promptStack.shared, promptStack.role].filter(Boolean).join("\n\n");
+  const systemContent = buildSystemPrompt(promptStack);
 
   if (purpose === "route") {
     return [
@@ -448,6 +406,19 @@ function toAnthropicMessages(conversation: ChatMessage[], content: string) {
 
 function getImageAttachments(message: ChatMessage): ChatAttachment[] {
   return (message.attachments ?? []).filter((attachment) => attachment.kind === "image");
+}
+
+function withCliAttachmentLabels(message: ChatMessage): string {
+  const attachments = getImageAttachments(message);
+  if (attachments.length === 0) {
+    return message.content;
+  }
+
+  const label = `Attached images: ${attachments
+    .map((attachment) => attachment.name.trim() || attachment.id)
+    .join(", ")}`;
+
+  return message.content.trim() ? `${message.content}\n[${label}]` : `[${label}]`;
 }
 
 function toOpenAiUserContent(message: ChatMessage) {
@@ -540,28 +511,219 @@ function formatCliConversation(
   content: string,
   purpose: "chat" | "route" = "chat",
 ): string {
-  const systemParts = [promptStack.shared, promptStack.role].filter(Boolean);
+  const systemParts = [promptStack.shared, promptStack.role, promptStack.tools].filter(Boolean);
 
   if (purpose === "route") {
     return [...systemParts, `User: ${content}`].join("\n\n");
   }
 
   const recentConversation = conversation.slice(-10);
+  const alreadyHasLatest =
+    recentConversation.at(-1)?.role === "user" &&
+    recentConversation.at(-1)?.content.trim() === content.trim();
   const transcript = recentConversation
     .map((message) => {
       const speaker = message.role === "user" ? "User" : "Assistant";
-      return `${speaker}: ${message.content}`;
+      return `${speaker}: ${withCliAttachmentLabels(message)}`;
     })
     .join("\n\n");
 
   return [
     ...systemParts,
     transcript ? `Conversation so far:\n${transcript}` : "",
-    `User: ${content}`,
+    ...(alreadyHasLatest ? [] : [`User: ${content}`]),
     "Respond as the assigned role. Keep the answer direct and user-facing.",
   ]
     .filter(Boolean)
     .join("\n\n");
+}
+
+const CODEX_TOOL_CALL_TAG = "ember_tool_call";
+
+interface ParsedCliToolCall {
+  name: string;
+  input: Record<string, unknown>;
+}
+
+function buildCodexToolProtocol(tools: ToolDefinition[]): string {
+  if (!tools.length) {
+    return "";
+  }
+
+  const toolLines = tools.map((tool) => {
+    const fields = Object.entries(tool.inputSchema.properties)
+      .map(([name, spec]) => `${name}: ${spec.type}`)
+      .join(", ");
+    return `- ${tool.name}(${fields || "no arguments"}) — ${tool.description}`;
+  });
+
+  return [
+    "## EMBER tool protocol",
+    "When you need an EMBER tool, respond with exactly one tool call block and no extra prose:",
+    `<${CODEX_TOOL_CALL_TAG}>`,
+    '{"name":"read_file","input":{"path":"packages/core/src/types.ts"}}',
+    `</${CODEX_TOOL_CALL_TAG}>`,
+    "Use only the tool names listed below and ensure the JSON is valid.",
+    "After the tool result appears in the conversation, continue the task. When the work is complete, reply normally to the user.",
+    "Available tools:",
+    ...toolLines,
+  ].join("\n");
+}
+
+function formatCodexConversation(request: ProviderExecutionRequest): string {
+  const basePrompt = formatCliConversation(
+    request.conversation,
+    request.promptStack,
+    request.content,
+    request.purpose,
+  );
+  const toolProtocol = buildCodexToolProtocol(request.tools ?? []);
+  return [basePrompt, toolProtocol].filter(Boolean).join("\n\n");
+}
+
+function parseCodexToolCall(content: string): { call: ParsedCliToolCall | null; error: string | null } {
+  const matches = [
+    ...content.matchAll(
+      new RegExp(`<${CODEX_TOOL_CALL_TAG}>\\s*([\\s\\S]*?)\\s*</${CODEX_TOOL_CALL_TAG}>`, "gi"),
+    ),
+  ];
+  const rawPayload = matches.at(-1)?.[1]?.trim();
+  if (!rawPayload) {
+    return { call: null, error: null };
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(rawPayload);
+  } catch {
+    return {
+      call: null,
+      error: `Error: malformed ${CODEX_TOOL_CALL_TAG} JSON. Return valid JSON with "name" and "input".`,
+    };
+  }
+
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return {
+      call: null,
+      error: `Error: ${CODEX_TOOL_CALL_TAG} must contain a JSON object.`,
+    };
+  }
+
+  const record = payload as Record<string, unknown>;
+  const name =
+    typeof record.name === "string"
+      ? record.name.trim()
+      : typeof record.tool === "string"
+        ? record.tool.trim()
+        : "";
+  const input = record.input ?? record.arguments ?? {};
+
+  if (!name) {
+    return {
+      call: null,
+      error: `Error: ${CODEX_TOOL_CALL_TAG} is missing a tool name.`,
+    };
+  }
+
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return {
+      call: null,
+      error: `Error: ${CODEX_TOOL_CALL_TAG} input must be a JSON object.`,
+    };
+  }
+
+  return {
+    call: {
+      name,
+      input: input as Record<string, unknown>,
+    },
+    error: null,
+  };
+}
+
+function buildSyntheticCliMessage(
+  role: "user" | "assistant",
+  content: string,
+  request: ProviderExecutionRequest,
+): ChatMessage {
+  return {
+    id: `cli-${role}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    role,
+    authorRole: role === "user" ? "user" : (request.role ?? "coordinator"),
+    mode: (request.role ?? "coordinator") as ChatMessage["mode"],
+    content,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function extensionForMediaType(mediaType: string): string {
+  switch (mediaType.toLowerCase()) {
+    case "image/png":
+      return "png";
+    case "image/jpeg":
+    case "image/jpg":
+      return "jpg";
+    case "image/webp":
+      return "webp";
+    case "image/gif":
+      return "gif";
+    case "image/bmp":
+      return "bmp";
+    case "image/tiff":
+      return "tiff";
+    case "image/heic":
+      return "heic";
+    case "image/heif":
+      return "heif";
+    default:
+      return "img";
+  }
+}
+
+function collectRecentCliImages(conversation: ChatMessage[]): ChatAttachment[] {
+  return conversation.slice(-10).flatMap((message) => getImageAttachments(message));
+}
+
+async function materializeCliImages(
+  conversation: ChatMessage[],
+): Promise<{ dirPath: string | null; filePaths: string[]; cleanup: () => Promise<void> }> {
+  const attachments = collectRecentCliImages(conversation);
+  if (attachments.length === 0) {
+    return {
+      dirPath: null,
+      filePaths: [],
+      cleanup: async () => {},
+    };
+  }
+
+  const dirPath = await mkdtemp(path.join(os.tmpdir(), "ember-codex-images-"));
+  const filePaths = await Promise.all(
+    attachments.map(async (attachment, index) => {
+      const parsed = parseDataUrl(attachment.dataUrl);
+      if (!parsed) {
+        throw new Error(`Unsupported image attachment format for ${attachment.name}.`);
+      }
+
+      const filePath = path.join(
+        dirPath,
+        `${String(index + 1).padStart(2, "0")}-${attachment.id}.${extensionForMediaType(
+          parsed.mediaType,
+        )}`,
+      );
+      await writeFile(filePath, Buffer.from(parsed.data, "base64"));
+      return filePath;
+    }),
+  );
+
+  return {
+    dirPath,
+    filePaths,
+    cleanup: async () => {
+      if (dirPath) {
+        await rm(dirPath, { recursive: true, force: true });
+      }
+    },
+  };
 }
 
 function parseCodexExecJson(stdout: string): string {
@@ -592,6 +754,65 @@ function parseCodexExecJson(stdout: string): string {
   }
 
   return "";
+}
+
+function extractClaudeMessageText(value: unknown): string {
+  if (!Array.isArray(value)) {
+    return "";
+  }
+
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") {
+        return "";
+      }
+      const block = item as { type?: unknown; text?: unknown };
+      return block.type === "text" && typeof block.text === "string" ? block.text : "";
+    })
+    .filter(Boolean)
+    .join("");
+}
+
+function parseClaudeExecJson(stdout: string): { content: string; isError: boolean } {
+  const lines = stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  for (const line of lines.reverse()) {
+    if (!line.startsWith("{")) {
+      continue;
+    }
+
+    try {
+      const event = JSON.parse(line) as {
+        type?: string;
+        result?: unknown;
+        is_error?: boolean;
+        message?: { content?: unknown };
+        error?: unknown;
+      };
+
+      if (event.type === "result") {
+        const content =
+          typeof event.result === "string"
+            ? event.result.trim()
+            : extractClaudeMessageText(event.message?.content);
+        return { content, isError: Boolean(event.is_error) };
+      }
+
+      if (event.type === "assistant") {
+        const content = extractClaudeMessageText(event.message?.content);
+        if (content) {
+          return { content, isError: Boolean(event.error) };
+        }
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return { content: "", isError: false };
 }
 
 function extractNestedText(value: unknown): string {
@@ -758,60 +979,122 @@ async function readResponseStream(
   }
 }
 
-async function executeCodexCli(
+async function runCodexCliTurn(
   provider: Provider,
   request: ProviderExecutionRequest,
+  handlers?: Pick<ProviderStreamHandlers, "onStatus">,
 ): Promise<ProviderExecutionResult> {
   if (!commandExists("codex")) {
     throw new Error("codex is not installed locally.");
   }
 
   const modelId = request.modelId?.trim() || provider.config.defaultModelId?.trim() || null;
-  const prompt = formatCliConversation(
-    request.conversation,
-    request.promptStack,
-    request.content,
-    request.purpose,
-  );
+  const prompt = formatCodexConversation(request);
   const repoRoot = process.env.EMBER_ROOT
     ? path.resolve(process.env.EMBER_ROOT)
     : process.cwd();
+  const imageFiles = await materializeCliImages(request.conversation);
   const args = [
     "exec",
     "--skip-git-repo-check",
     "--sandbox",
-    "workspace-write",
+    getCodexSandboxMode(request),
     "--json",
     ...(modelId ? ["-m", modelId] : []),
+    ...imageFiles.filePaths.flatMap((filePath) => ["--image", filePath]),
     prompt,
   ];
 
-  const result = spawnSync("codex", args, {
-    cwd: repoRoot,
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      OTEL_SDK_DISABLED: "true",
-    },
-    maxBuffer: 10 * 1024 * 1024,
-  });
+  try {
+    handlers?.onStatus?.("Launching Codex CLI...");
+    const result = spawnSync("codex", args, {
+      cwd: repoRoot,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        OTEL_SDK_DISABLED: "true",
+      },
+      maxBuffer: 10 * 1024 * 1024,
+    });
 
-  const stdout = result.stdout?.trim() ?? "";
-  const stderr = result.stderr?.trim() ?? "";
-  const content = parseCodexExecJson(stdout);
+    const stdout = result.stdout?.trim() ?? "";
+    const stderr = result.stderr?.trim() ?? "";
+    const content = parseCodexExecJson(stdout);
 
-  if (result.status !== 0 && !content) {
-    throw new Error(stderr || stdout || "Codex exec failed.");
+    if (stderr) {
+      const status = stripAnsi(stderr).trim();
+      if (status && shouldSurfaceCodexStatus(status)) {
+        handlers?.onStatus?.(status);
+      }
+    }
+
+    if (result.status !== 0 && !content) {
+      throw new Error(stderr || stdout || "Codex exec failed.");
+    }
+
+    if (!content) {
+      throw new Error("Codex returned an empty response.");
+    }
+
+    return {
+      content,
+      modelId,
+    };
+  } finally {
+    await imageFiles.cleanup();
+  }
+}
+
+async function executeCodexCli(
+  provider: Provider,
+  request: ProviderExecutionRequest,
+  handlers?: Pick<ProviderStreamHandlers, "onStatus">,
+): Promise<ProviderExecutionResult> {
+  let conversation = [...request.conversation];
+  let currentContent = request.content;
+  let lastContent = "";
+  let modelId = request.modelId?.trim() || provider.config.defaultModelId?.trim() || null;
+
+  for (let turn = 0; turn < 10; turn++) {
+    const result = await runCodexCliTurn(provider, {
+      ...request,
+      conversation,
+      content: currentContent,
+    }, handlers);
+    lastContent = result.content;
+    modelId = result.modelId;
+
+    if (!request.tools?.length || !request.onToolCall) {
+      return result;
+    }
+
+    const parsed = parseCodexToolCall(result.content);
+    if (!parsed.call && !parsed.error) {
+      return result;
+    }
+
+    conversation = [
+      ...conversation,
+      buildSyntheticCliMessage("assistant", result.content, request),
+    ];
+
+    if (parsed.error) {
+      currentContent = parsed.error;
+      conversation.push(buildSyntheticCliMessage("user", currentContent, request));
+      continue;
+    }
+
+    handlers?.onStatus?.(`Tool: ${parsed.call!.name}`);
+    const toolResult = await request.onToolCall(parsed.call!.name, parsed.call!.input);
+    currentContent = `Tool result for ${parsed.call!.name}:\n${toolResultToText(toolResult)}`;
+    conversation.push(buildSyntheticCliMessage("user", currentContent, request));
   }
 
-  if (!content) {
-    throw new Error("Codex returned an empty response.");
+  if (lastContent.trim()) {
+    return { content: lastContent, modelId };
   }
 
-  return {
-    content,
-    modelId,
-  };
+  throw new Error("Codex tool loop reached the turn limit without a final response.");
 }
 
 async function streamCodexCli(
@@ -819,152 +1102,9 @@ async function streamCodexCli(
   request: ProviderExecutionRequest,
   handlers: ProviderStreamHandlers,
 ): Promise<ProviderExecutionResult> {
-  if (!commandExists("codex")) {
-    throw new Error("codex is not installed locally.");
-  }
-
-  const modelId = request.modelId?.trim() || provider.config.defaultModelId?.trim() || null;
-  const prompt = formatCliConversation(
-    request.conversation,
-    request.promptStack,
-    request.content,
-    request.purpose,
-  );
-  const repoRoot = process.env.EMBER_ROOT
-    ? path.resolve(process.env.EMBER_ROOT)
-    : process.cwd();
-  const args = [
-    "exec",
-    "--skip-git-repo-check",
-    "--sandbox",
-    "workspace-write",
-    "--json",
-    ...(modelId ? ["-m", modelId] : []),
-    prompt,
-  ];
-
-  handlers.onStatus?.("Launching Codex CLI...");
-
-  return await new Promise<ProviderExecutionResult>((resolve, reject) => {
-    const child = spawn("codex", args, {
-      cwd: repoRoot,
-      env: {
-        ...process.env,
-        OTEL_SDK_DISABLED: "true",
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    let stdoutBuffer = "";
-    let stderrBuffer = "";
-    let fullStdout = "";
-    let content = "";
-    let thinking = "";
-
-    const processLine = (line: string) => {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("{")) {
-        return;
-      }
-
-      try {
-        const event = JSON.parse(trimmed) as {
-          type?: string;
-          delta?: unknown;
-          text?: unknown;
-          item?: { type?: string; text?: string; delta?: unknown; content?: unknown };
-        };
-        const eventType = event.type ?? "";
-        const itemType = event.item?.type ?? "";
-
-        const thinkingText =
-          /thinking|reason/i.test(eventType) || /thinking|reason/i.test(itemType)
-            ? extractNestedText(event.delta ?? event.text ?? event.item?.delta ?? event.item?.content ?? event.item?.text)
-            : "";
-        if (thinkingText) {
-          thinking += thinkingText;
-          handlers.onThinking?.(thinkingText);
-          return;
-        }
-
-        if (/agent_message/i.test(itemType)) {
-          const completedText = event.item?.text?.trim() ?? "";
-          if (completedText) {
-            if (!content) {
-              content = completedText;
-              handlers.onContent?.(completedText);
-            } else if (completedText.startsWith(content)) {
-              const delta = completedText.slice(content.length);
-              if (delta) {
-                content = completedText;
-                handlers.onContent?.(delta);
-              }
-            } else if (completedText !== content) {
-              const delta = completedText;
-              content = completedText;
-              handlers.onContent?.(delta);
-            }
-          }
-        }
-      } catch {
-        // Ignore non-JSON or unknown event lines from the CLI.
-      }
-    };
-
-    child.stdout.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => {
-      fullStdout += chunk;
-      stdoutBuffer += chunk;
-      const lines = stdoutBuffer.split("\n");
-      stdoutBuffer = lines.pop() ?? "";
-      for (const line of lines) {
-        processLine(line);
-      }
-    });
-
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk: string) => {
-      stderrBuffer += chunk;
-      const message = stripAnsi(chunk).trim();
-      if (message && shouldSurfaceCodexStatus(message)) {
-        handlers.onStatus?.(message);
-      }
-    });
-
-    child.on("error", (error) => {
-      reject(error);
-    });
-
-    child.on("close", (code) => {
-      if (stdoutBuffer.trim()) {
-        processLine(stdoutBuffer);
-      }
-
-      if (!content) {
-        const parsed = parseCodexExecJson(`${fullStdout}\n${stdoutBuffer}`);
-        if (parsed) {
-          content = parsed;
-          handlers.onContent?.(parsed);
-        }
-      }
-
-      if (code !== 0 && !content) {
-        reject(new Error(stderrBuffer.trim() || "Codex exec failed."));
-        return;
-      }
-
-      if (!content.trim()) {
-        reject(new Error("Codex returned an empty response."));
-        return;
-      }
-
-      resolve({
-        content,
-        modelId,
-        thinking: thinking || null,
-      });
-    });
-  });
+  const result = await executeCodexCli(provider, request, { onStatus: handlers.onStatus });
+  handlers.onContent?.(result.content);
+  return result;
 }
 
 async function executeOpenAiCompatible(
@@ -996,6 +1136,9 @@ async function executeOpenAiCompatible(
     request.content,
     request.purpose,
   );
+
+  let lastTextContent = "";
+  let nudged = false;
 
   for (let turn = 0; turn < 10; turn++) {
     const body: Record<string, unknown> = { model: modelId, messages };
@@ -1033,12 +1176,24 @@ async function executeOpenAiCompatible(
     const message = payload.choices?.[0]?.message;
     const toolCalls = message?.tool_calls;
 
+    // Capture any text the model produced alongside or instead of tool calls.
+    const turnText = extractTextContent(message?.content);
+    if (turnText.trim()) lastTextContent = turnText;
+
     if (!toolCalls?.length || !request.onToolCall) {
-      const content = extractTextContent(message?.content);
-      if (!content.trim()) {
+      if (!lastTextContent.trim()) {
+        // Model returned empty after tool use — nudge it once to synthesize a response.
+        if (!nudged) {
+          nudged = true;
+          messages = [
+            ...messages,
+            { role: "user", content: "Based on the information above, please provide your final answer." },
+          ];
+          continue;
+        }
         throw new Error("Provider returned an empty completion.");
       }
-      return { content, modelId };
+      return { content: lastTextContent, modelId };
     }
 
     // Execute the first tool call and loop back with result.
@@ -1052,12 +1207,15 @@ async function executeOpenAiCompatible(
     const toolResult = await request.onToolCall(toolCall.function.name, toolInput);
     messages = [
       ...messages,
-      { role: "assistant", content: null, tool_calls: toolCalls },
-      { role: "tool", tool_call_id: toolCall.id, content: toolResult },
+      { role: "assistant", content: message?.content ?? null, tool_calls: toolCalls },
+      { role: "tool", tool_call_id: toolCall.id, content: toolResultToText(toolResult) },
     ];
+    nudged = false; // reset so the model gets a clean nudge opportunity after each tool round
   }
 
-  throw new Error("Tool call limit reached (10 turns) without a final response.");
+  // Turn limit reached — return the last text the model produced, if any.
+  if (lastTextContent.trim()) return { content: lastTextContent, modelId };
+  throw new Error("Tool call limit reached without a final response.");
 }
 
 async function streamOpenAiCompatible(
@@ -1066,13 +1224,6 @@ async function streamOpenAiCompatible(
   request: ProviderExecutionRequest,
   handlers: ProviderStreamHandlers,
 ): Promise<ProviderExecutionResult> {
-  // When tools are enabled, use the non-streaming path so the tool loop works cleanly.
-  if (request.tools?.length && request.onToolCall) {
-    handlers.onStatus?.("Running with tool access...");
-    const result = await executeOpenAiCompatible(provider, secrets, request);
-    return result;
-  }
-
   const baseUrl = resolveOpenAiBaseUrl(provider);
   if (!baseUrl) {
     throw new Error("OpenAI-compatible providers require a base URL.");
@@ -1091,76 +1242,149 @@ async function streamOpenAiCompatible(
     headers.authorization = `Bearer ${apiKey}`;
   }
 
-  const response = await fetch(`${baseUrl}/chat/completions`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      model: modelId,
-      stream: true,
-      messages: toOpenAiMessages(
-        request.conversation,
-        request.promptStack,
-        request.content,
-        request.purpose,
-      ),
-    }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Provider responded with ${response.status}.`);
-  }
-
-  if (!response.body) {
-    return executeOpenAiCompatible(provider, secrets, request);
-  }
-
-  let buffer = "";
-  let content = "";
-  let thinking = "";
+  let messages: unknown[] = toOpenAiMessages(
+    request.conversation,
+    request.promptStack,
+    request.content,
+    request.purpose,
+  );
+  let totalContent = "";
+  let totalThinking = "";
+  let nudged = false;
   handlers.onStatus?.("Streaming response...");
 
-  await readResponseStream(response.body, (chunk) => {
-    buffer += chunk.replace(/\r\n/g, "\n");
-    buffer = processSseChunk(buffer, (data) => {
-      if (data === "[DONE]") {
-        return;
-      }
+  for (let turn = 0; turn < 10; turn++) {
+    const body: Record<string, unknown> = { model: modelId, stream: true, messages };
 
-      try {
-        const payload = JSON.parse(data) as {
-          model?: string;
-          choices?: Array<{
-            delta?: Record<string, unknown>;
-          }>;
-        };
+    if (request.tools?.length) {
+      body.tools = request.tools.map((t) => ({
+        type: "function",
+        function: {
+          name: t.name,
+          description: t.description,
+          parameters: t.inputSchema,
+        },
+      }));
+    }
 
-        const delta = payload.choices?.[0]?.delta;
-        const thinkingDelta = extractOpenAiDeltaThinking(delta);
-        if (thinkingDelta) {
-          thinking += thinkingDelta;
-          handlers.onThinking?.(thinkingDelta);
-        }
-
-        const contentDelta = extractOpenAiDeltaContent(delta);
-        if (contentDelta) {
-          content += contentDelta;
-          handlers.onContent?.(contentDelta);
-        }
-      } catch {
-        // Ignore malformed stream chunks.
-      }
+    const response = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
     });
-  });
 
-  if (!content.trim()) {
-    throw new Error("Provider returned an empty completion.");
+    if (!response.ok) {
+      throw new Error(`Provider responded with ${response.status}.`);
+    }
+
+    if (!response.body) {
+      throw new Error("No response body from provider.");
+    }
+
+    let buffer = "";
+    let turnContent = "";
+    let finishReason = "";
+
+    // Accumulate tool call fragments: stream index → accumulated call data.
+    const toolCallAcc: Record<number, { id: string; name: string; arguments: string }> = {};
+
+    await readResponseStream(response.body, (chunk) => {
+      buffer += chunk.replace(/\r\n/g, "\n");
+      buffer = processSseChunk(buffer, (data) => {
+        if (data === "[DONE]") return;
+        try {
+          const payload = JSON.parse(data) as {
+            choices?: Array<{
+              delta?: Record<string, unknown>;
+              finish_reason?: string | null;
+            }>;
+          };
+
+          const choice = payload.choices?.[0];
+          if (choice?.finish_reason) finishReason = choice.finish_reason;
+          const delta = choice?.delta;
+
+          // Accumulate streamed tool call fragments.
+          const toolCallDeltas = delta?.tool_calls as Array<{
+            index: number;
+            id?: string;
+            function?: { name?: string; arguments?: string };
+          }> | undefined;
+
+          if (toolCallDeltas) {
+            for (const tc of toolCallDeltas) {
+              if (!toolCallAcc[tc.index]) {
+                toolCallAcc[tc.index] = { id: tc.id ?? "", name: tc.function?.name ?? "", arguments: "" };
+              } else {
+                if (tc.id) toolCallAcc[tc.index].id = tc.id;
+                if (tc.function?.name) toolCallAcc[tc.index].name += tc.function.name;
+              }
+              if (tc.function?.arguments) toolCallAcc[tc.index].arguments += tc.function.arguments;
+            }
+          }
+
+          const thinkingDelta = extractOpenAiDeltaThinking(delta);
+          if (thinkingDelta) {
+            totalThinking += thinkingDelta;
+            handlers.onThinking?.(thinkingDelta);
+          }
+
+          const contentDelta = extractOpenAiDeltaContent(delta);
+          if (contentDelta) {
+            turnContent += contentDelta;
+            handlers.onContent?.(contentDelta);
+          }
+        } catch {
+          // Ignore malformed stream chunks.
+        }
+      });
+    });
+
+    totalContent += turnContent;
+
+    const toolCalls = Object.values(toolCallAcc);
+    if (finishReason !== "tool_calls" || !toolCalls.length || !request.onToolCall) {
+      if (!totalContent.trim()) {
+        if (!nudged) {
+          nudged = true;
+          messages = [
+            ...messages,
+            { role: "user", content: "Based on the information above, please provide your final answer." },
+          ];
+          continue;
+        }
+        throw new Error("Provider returned an empty completion.");
+      }
+      return { content: totalContent, modelId, thinking: totalThinking || null };
+    }
+
+    // Append assistant message with tool_calls, then execute each tool.
+    const assistantMessage = {
+      role: "assistant",
+      content: turnContent || null,
+      tool_calls: toolCalls.map((tc) => ({
+        id: tc.id,
+        type: "function",
+        function: { name: tc.name, arguments: tc.arguments },
+      })),
+    };
+
+    const toolMessages: unknown[] = [];
+    for (const tc of toolCalls) {
+      let input: Record<string, unknown> = {};
+      try { input = JSON.parse(tc.arguments); } catch { /* leave empty on parse failure */ }
+      handlers.onStatus?.(`Tool: ${tc.name}`);
+      const result = await request.onToolCall(tc.name, input);
+      toolMessages.push({ role: "tool", tool_call_id: tc.id, content: toolResultToText(result) });
+    }
+
+    messages = [...messages, assistantMessage, ...toolMessages];
+    nudged = false; // reset so the model gets a clean nudge opportunity after each tool round
   }
 
-  return {
-    content,
-    modelId,
-    thinking: thinking || null,
-  };
+  // Turn limit reached — return whatever the model streamed so far.
+  if (totalContent.trim()) return { content: totalContent, modelId, thinking: totalThinking || null };
+  throw new Error("Tool call limit reached without a final response.");
 }
 
 async function executeAnthropic(
@@ -1178,9 +1402,11 @@ async function executeAnthropic(
     throw new Error("No model is assigned or discovered for this provider.");
   }
 
-  const systemPrompt = `${request.promptStack.shared}\n\n${request.promptStack.role}`;
+  const systemPrompt = buildSystemPrompt(request.promptStack);
   const maxTokens = request.tools?.length ? 4096 : 1200;
   let messages: unknown[] = toAnthropicMessages(request.conversation, request.content);
+  let lastTextContent = "";
+  let nudged = false;
 
   for (let turn = 0; turn < 10; turn++) {
     const body: Record<string, unknown> = {
@@ -1217,14 +1443,26 @@ async function executeAnthropic(
       stop_reason?: string;
     };
 
+    // Capture any text blocks alongside tool_use in this turn.
+    const turnText = extractTextContent(payload.content);
+    if (turnText.trim()) lastTextContent = turnText;
+
     const toolUseBlock = payload.content?.find((b) => b.type === "tool_use");
 
     if (!toolUseBlock || !request.onToolCall) {
-      const content = extractTextContent(payload.content);
-      if (!content.trim()) {
-        throw new Error("Anthropic returned an empty completion.");
+      if (!lastTextContent.trim()) {
+        // Model returned empty after tool use — nudge it once to synthesize a response.
+        if (!nudged) {
+          nudged = true;
+          messages = [
+            ...messages,
+            { role: "user", content: "Based on the information above, please provide your final answer." },
+          ];
+          continue;
+        }
+        throw new Error("Provider returned an empty completion.");
       }
-      return { content, modelId };
+      return { content: lastTextContent, modelId };
     }
 
     // Execute tool and loop back with result.
@@ -1232,11 +1470,22 @@ async function executeAnthropic(
     messages = [
       ...messages,
       { role: "assistant", content: payload.content },
-      { role: "user", content: [{ type: "tool_result", tool_use_id: toolUseBlock.id, content: toolResult }] },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: toolUseBlock.id,
+            content: toolResultToAnthropicContent(toolResult),
+          },
+        ],
+      },
     ];
   }
 
-  throw new Error("Tool call limit reached (10 turns) without a final response.");
+  // Turn limit reached — return the last text the model produced, if any.
+  if (lastTextContent.trim()) return { content: lastTextContent, modelId };
+  throw new Error("Tool call limit reached without a final response.");
 }
 
 async function streamAnthropic(
@@ -1245,14 +1494,6 @@ async function streamAnthropic(
   request: ProviderExecutionRequest,
   handlers: ProviderStreamHandlers,
 ): Promise<ProviderExecutionResult> {
-  // When tools are enabled, use the non-streaming path so the tool loop works
-  // cleanly. Status updates are still emitted around the call.
-  if (request.tools?.length && request.onToolCall) {
-    handlers.onStatus?.("Running with tool access...");
-    const result = await executeAnthropic(provider, secrets, request);
-    return result;
-  }
-
   const apiKey = secrets[provider.id]?.apiKey?.trim();
   if (!apiKey) {
     throw new Error("Anthropic providers require an API key.");
@@ -1263,78 +1504,148 @@ async function streamAnthropic(
     throw new Error("No model is assigned or discovered for this provider.");
   }
 
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      accept: "text/event-stream",
-    },
-    body: JSON.stringify({
-      model: modelId,
-      stream: true,
-      system: `${request.promptStack.shared}\n\n${request.promptStack.role}`,
-      max_tokens: 1200,
-      messages: toAnthropicMessages(request.conversation, request.content),
-    }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Anthropic responded with ${response.status}.`);
-  }
-
-  if (!response.body) {
-    return executeAnthropic(provider, secrets, request);
-  }
-
-  let buffer = "";
-  let content = "";
-  let thinking = "";
+  const systemPrompt = buildSystemPrompt(request.promptStack);
+  const maxTokens = request.tools?.length ? 4096 : 1200;
+  let messages: unknown[] = toAnthropicMessages(request.conversation, request.content);
+  let totalContent = "";
+  let totalThinking = "";
+  let nudged = false;
   handlers.onStatus?.("Streaming response...");
 
-  await readResponseStream(response.body, (chunk) => {
-    buffer += chunk.replace(/\r\n/g, "\n");
-    buffer = processSseChunk(buffer, (data, eventName) => {
-      if (data === "[DONE]") {
-        return;
-      }
+  for (let turn = 0; turn < 10; turn++) {
+    const body: Record<string, unknown> = {
+      model: modelId,
+      stream: true,
+      system: systemPrompt,
+      max_tokens: maxTokens,
+      messages,
+    };
 
-      try {
-        const payload = JSON.parse(data) as {
-          type?: string;
-          delta?: { text?: string; thinking?: string };
-        };
+    if (request.tools?.length) {
+      body.tools = request.tools.map((t) => ({
+        name: t.name,
+        description: t.description,
+        input_schema: t.inputSchema,
+      }));
+    }
 
-        const type = eventName ?? payload.type ?? "";
-        if (type === "content_block_delta" || type === "message_delta") {
-          const thinkingDelta = payload.delta?.thinking?.trim() ?? "";
-          if (thinkingDelta) {
-            thinking += thinkingDelta;
-            handlers.onThinking?.(thinkingDelta);
-          }
-
-          const textDelta = payload.delta?.text ?? "";
-          if (textDelta) {
-            content += textDelta;
-            handlers.onContent?.(textDelta);
-          }
-        }
-      } catch {
-        // Ignore malformed stream chunks.
-      }
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        accept: "text/event-stream",
+      },
+      body: JSON.stringify(body),
     });
-  });
 
-  if (!content.trim()) {
-    throw new Error("Anthropic returned an empty completion.");
+    if (!response.ok) {
+      throw new Error(`Anthropic responded with ${response.status}.`);
+    }
+
+    if (!response.body) {
+      throw new Error("No response body from Anthropic.");
+    }
+
+    let buffer = "";
+    let turnContent = "";
+    let turnThinking = "";
+    let stopReason = "";
+
+    interface ToolBlock { id: string; name: string; inputJson: string }
+    const toolBlocks: ToolBlock[] = [];
+    let currentBlockType = "";
+    let currentToolIdx = -1;
+
+    await readResponseStream(response.body, (chunk) => {
+      buffer += chunk.replace(/\r\n/g, "\n");
+      buffer = processSseChunk(buffer, (data, eventName) => {
+        if (data === "[DONE]") return;
+        try {
+          const payload = JSON.parse(data) as Record<string, unknown>;
+          const type = eventName ?? (payload.type as string) ?? "";
+
+          if (type === "content_block_start") {
+            const block = payload.content_block as Record<string, unknown>;
+            currentBlockType = (block?.type as string) ?? "";
+            if (currentBlockType === "tool_use") {
+              toolBlocks.push({ id: block.id as string, name: block.name as string, inputJson: "" });
+              currentToolIdx = toolBlocks.length - 1;
+            }
+          } else if (type === "content_block_delta") {
+            const delta = payload.delta as Record<string, unknown>;
+            if (delta?.type === "input_json_delta" && currentToolIdx >= 0) {
+              toolBlocks[currentToolIdx].inputJson += (delta.partial_json as string) ?? "";
+            } else if (delta?.type === "text_delta") {
+              const text = (delta.text as string) ?? "";
+              if (text) {
+                turnContent += text;
+                handlers.onContent?.(text);
+              }
+            } else if (delta?.type === "thinking_delta") {
+              const text = (delta.thinking as string) ?? "";
+              if (text) {
+                turnThinking += text;
+                handlers.onThinking?.(text);
+              }
+            }
+          } else if (type === "message_delta") {
+            const delta = payload.delta as Record<string, unknown>;
+            if (delta?.stop_reason) stopReason = delta.stop_reason as string;
+          }
+        } catch {
+          // Ignore malformed stream chunks.
+        }
+      });
+    });
+
+    totalContent += turnContent;
+    totalThinking += turnThinking;
+
+    if (stopReason !== "tool_use" || !toolBlocks.length || !request.onToolCall) {
+      if (!totalContent.trim()) {
+        if (!nudged) {
+          nudged = true;
+          messages = [
+            ...messages,
+            { role: "user", content: "Based on the information above, please provide your final answer." },
+          ];
+          continue;
+        }
+        throw new Error("Provider returned an empty completion.");
+      }
+      return { content: totalContent, modelId, thinking: totalThinking || null };
+    }
+
+    // Build assistant message with any text + tool_use blocks, then execute tools.
+    const assistantContent: unknown[] = [];
+    if (turnContent) assistantContent.push({ type: "text", text: turnContent });
+
+    const toolResults: unknown[] = [];
+    for (const tb of toolBlocks) {
+      let input: Record<string, unknown> = {};
+      try { input = JSON.parse(tb.inputJson); } catch { /* leave empty on parse failure */ }
+      assistantContent.push({ type: "tool_use", id: tb.id, name: tb.name, input });
+      handlers.onStatus?.(`Tool: ${tb.name}`);
+      const result = await request.onToolCall(tb.name, input);
+      toolResults.push({ type: "tool_result", tool_use_id: tb.id, content: toolResultToAnthropicContent(result) });
+    }
+
+    messages = [
+      ...messages,
+      { role: "assistant", content: assistantContent },
+      { role: "user", content: toolResults },
+    ];
+
+    // Reset tool tracking for next turn.
+    toolBlocks.length = 0;
+    currentToolIdx = -1;
   }
 
-  return {
-    content,
-    modelId,
-    thinking: thinking || null,
-  };
+  // Turn limit reached — return whatever the model streamed so far.
+  if (totalContent.trim()) return { content: totalContent, modelId, thinking: totalThinking || null };
+  throw new Error("Tool call limit reached without a final response.");
 }
 
 export async function recheckProvider(
@@ -1343,9 +1654,7 @@ export async function recheckProvider(
 ): Promise<RecheckResult> {
   switch (provider.typeId) {
     case "codex-cli":
-      return readCliStatus("codex");
-    case "claude-code-cli":
-      return readCliStatus("claude");
+      return readCodexCliStatus();
     case "anthropic-api":
       return testAnthropicApi(provider, secrets);
     case "openai-compatible":
@@ -1367,20 +1676,6 @@ export function launchProviderConnect(provider: Provider): RecheckResult {
       return {
         status: "needs-auth",
         lastError: "Codex login launched.",
-        availableModels: [],
-      };
-    case "claude-code-cli":
-      if (!commandExists("claude")) {
-        return {
-          status: "missing",
-          lastError: "claude is not installed locally.",
-          availableModels: [],
-        };
-      }
-      spawn("claude", ["login"], { detached: true, stdio: "ignore" }).unref();
-      return {
-        status: "needs-auth",
-        lastError: "Claude Code login launched.",
         availableModels: [],
       };
     case "anthropic-api":
@@ -1422,10 +1717,6 @@ export async function executeProviderChat(
       return executeOpenAiCompatible(provider, secrets, request);
     case "codex-cli":
       return executeCodexCli(provider, request);
-    case "claude-code-cli":
-      throw new Error(
-        "CLI providers are auth-capable in this phase but not yet wired into role execution.",
-      );
   }
 }
 
@@ -1446,9 +1737,5 @@ export async function streamProviderChat(
       return streamOpenAiCompatible(provider, secrets, request, handlers);
     case "codex-cli":
       return streamCodexCli(provider, request, handlers);
-    case "claude-code-cli":
-      throw new Error(
-        "CLI providers are auth-capable in this phase but not yet wired into role execution.",
-      );
   }
 }

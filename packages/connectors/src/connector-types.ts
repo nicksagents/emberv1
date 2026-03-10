@@ -4,14 +4,7 @@ export const connectorTypes: ConnectorType[] = [
   {
     id: "codex-cli",
     name: "Codex CLI",
-    description: "Browser-authenticated Codex local CLI connector.",
-    kind: "cli",
-    setupFields: ["defaultModelId"],
-  },
-  {
-    id: "claude-code-cli",
-    name: "Claude Code CLI",
-    description: "Browser-authenticated Claude Code local CLI connector.",
+    description: "Browser-authenticated Codex local CLI connector with EMBER tool support.",
     kind: "cli",
     setupFields: ["defaultModelId"],
   },

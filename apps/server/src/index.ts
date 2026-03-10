@@ -39,7 +39,14 @@ import type {
 } from "@ember/core";
 import type { UiBlock } from "@ember/ui-schema";
 import { getPromptStack } from "@ember/prompts";
-import { ALL_TOOLS, handleToolCall } from "./tools.js";
+import {
+  buildDispatchInput,
+  formatRouteSource,
+  resolveDispatchDecision,
+  routeAutoRequestPolicy,
+  type AutoRouteDecision,
+} from "./routing.js";
+import { createToolHandler, getToolsForRole, getToolSystemPrompt, setToolConfig } from "./tools/index.js";
 
 const host = process.env.EMBER_RUNTIME_HOST ?? "0.0.0.0";
 const port = Number(process.env.EMBER_RUNTIME_PORT ?? "3005");
@@ -82,7 +89,7 @@ function toConversationSummary(conversation: Conversation): ConversationSummary 
 }
 
 function normalizeChatMode(mode: ChatMode): ChatMode {
-  return mode === "router" ? "auto" : mode;
+  return mode === "dispatch" ? "auto" : mode;
 }
 
 function sortConversations(conversations: Conversation[]): Conversation[] {
@@ -115,207 +122,25 @@ function createConversationRecord(
   };
 }
 
-type RoutedRole = Exclude<Role, "router">;
-
-interface AutoRouteDecision {
-  role: RoutedRole;
-  reason: string;
-  source: "router-llm" | "heuristic";
-}
-
-function countPatternMatches(content: string, patterns: RegExp[]): number {
-  return patterns.reduce((total, pattern) => total + (pattern.test(content) ? 1 : 0), 0);
-}
-
-function estimateTaskCount(content: string): number {
-  const normalized = content
-    .toLowerCase()
-    .replace(/\b(after that|afterwards|next|then)\b/g, " and ");
-  const parts = normalized
-    .split(/\b(?:and|also)\b|[,;\n]+/)
-    .map((part) => part.trim())
-    .filter(Boolean);
-
-  return Math.max(1, Math.min(parts.length, 6));
-}
-
-function routeAutoRequestHeuristic(content: string): AutoRouteDecision {
-  const normalized = content.toLowerCase();
-  const wordCount = normalized.split(/\s+/).filter(Boolean).length;
-  const taskCount = estimateTaskCount(normalized);
-
-  const browserScore = countPatternMatches(normalized, [
-    /\bbrowser\b/,
-    /\bplaywright\b/,
-    /\bdevtools\b/,
-    /\bscreenshot\b/,
-    /\bdom\b/,
-    /\bselector\b/,
-    /\btab\b/,
-    /\bnavigate\b/,
-    /\bclick\b/,
-    /\bpage\b/,
-    /\be2e\b/,
-  ]);
-
-  const plannerScore = countPatternMatches(normalized, [
-    /\bplan\b/,
-    /\bplanning\b/,
-    /\broadmap\b/,
-    /\bmilestone\b/,
-    /\barchitecture\b/,
-    /\bmigration\b/,
-    /\boverhaul\b/,
-    /\bstrategy\b/,
-    /\brollout\b/,
-  ]);
-
-  const codingScore = countPatternMatches(normalized, [
-    /\bcode\b/,
-    /\bcoder\b/,
-    /\bimplement\b/,
-    /\bbuild\b/,
-    /\bfix\b/,
-    /\bbug\b/,
-    /\brefactor\b/,
-    /\bcomponent\b/,
-    /\bapi\b/,
-    /\bendpoint\b/,
-    /\btypescript\b/,
-    /\bjavascript\b/,
-    /\breact\b/,
-    /\bcss\b/,
-    /\bui\b/,
-    /\bfile\b/,
-    /\bfunction\b/,
-    /\bpatch\b/,
-  ]);
-
-  const auditScore = countPatternMatches(normalized, [
-    /\breview\b/,
-    /\baudit\b/,
-    /\bregression\b/,
-    /\btest\b/,
-    /\bvalidate\b/,
-    /\bverify\b/,
-    /\bsecurity\b/,
-    /\brisk\b/,
-  ]);
-
-  const janitorScore = countPatternMatches(normalized, [
-    /\bcleanup\b/,
-    /\bpolish\b/,
-    /\brename\b/,
-    /\bformat\b/,
-    /\blint\b/,
-    /\btidy\b/,
-    /\bsimplify\b/,
-    /\borganize\b/,
-  ]);
-
-  const casualChat =
-    /^(hi|hello|hey|yo|sup|thanks|thank you)\b/.test(normalized) ||
-    /\b(chat|talk|brainstorm|explain|summarize|summary|question)\b/.test(normalized);
-
-  const planningNeeded =
-    plannerScore >= 2 ||
-    (codingScore >= 3 && (wordCount > 35 || taskCount > 3)) ||
-    /(plan this|think through|before coding|safe rollout|implementation plan|spec this)/.test(
-      normalized,
-    );
-
-  const simpleCodingTask =
-    (codingScore >= 1 || browserScore >= 1) &&
-    !planningNeeded &&
-    wordCount <= 45 &&
-    taskCount <= 3;
-
-  if (auditScore >= 1 && codingScore === 0) {
-    return {
-      role: "auditor",
-      reason: "The request is focused on review, validation, or regression risk.",
-      source: "heuristic",
-    };
-  }
-
-  if (janitorScore >= 1 && codingScore <= 1 && plannerScore === 0) {
-    return {
-      role: "janitor",
-      reason: "The request is focused on cleanup, polish, or formatting.",
-      source: "heuristic",
-    };
-  }
-
-  if (browserScore >= 1) {
-    return {
-      role: "coder",
-      reason: "The request is browser-heavy and needs implementation work.",
-      source: "heuristic",
-    };
-  }
-
-  if (planningNeeded) {
-    return {
-      role: "planner",
-      reason: "The request needs planning, safety checks, or is large enough to scope before coding.",
-      source: "heuristic",
-    };
-  }
-
-  if (simpleCodingTask) {
-    return {
-      role: "coder",
-      reason: "The request looks like a direct code task that can be handled without a planning pass.",
-      source: "heuristic",
-    };
-  }
-
-  if (casualChat || taskCount <= 3) {
-    return {
-      role: "assistant",
-      reason: "The request is conversational or a small task that does not need planning first.",
-      source: "heuristic",
-    };
-  }
-
-  return {
-    role: "assistant",
-    reason: "The request is best handled as a direct assistant response.",
-    source: "heuristic",
-  };
-}
-
-
-function parseRouterRole(content: string): RoutedRole | null {
-  const normalized = content.trim().toLowerCase();
-  const roles: RoutedRole[] = ["assistant", "planner", "coder", "auditor", "janitor"];
-
-  for (const role of roles) {
-    if (normalized === role || new RegExp(`\\b${role}\\b`).test(normalized)) {
-      return role;
-    }
-  }
-
-  return null;
-}
+type ExecutionRole = Exclude<Role, "dispatch">;
 
 function resolveSpeakingRole(role: Role | null): Role {
-  return role === "router" || role === null ? "assistant" : role;
+  return role === "dispatch" || role === null ? "coordinator" : role;
 }
 
 function roleLead(role: Role): string {
   switch (role) {
-    case "router":
+    case "dispatch":
       return "Routing analysis";
-    case "assistant":
+    case "coordinator":
       return "Operator-facing response";
-    case "planner":
+    case "advisor":
       return "Execution plan";
-    case "coder":
+    case "director":
       return "Implementation direction";
-    case "auditor":
+    case "inspector":
       return "Audit pass";
-    case "janitor":
+    case "ops":
       return "Polish pass";
   }
 }
@@ -393,6 +218,14 @@ function createStatusError(statusCode: number, message: string): Error & { statu
   return error;
 }
 
+function resolveBrowserSessionKey(request: ChatRequest): string {
+  return (
+    request.conversation.find((message) => message.role === "user")?.id ??
+    request.conversationId ??
+    createId("browser")
+  );
+}
+
 interface ExecutionContext {
   mode: ChatMode;
   settings: Awaited<ReturnType<typeof readSettings>>;
@@ -403,10 +236,12 @@ interface ExecutionContext {
   routedTo: Role | null;
   activeRole: Role;
   promptStack: ReturnType<typeof getPromptStack>;
+  tools: ReturnType<typeof getToolsForRole>;
   assignment: RoleAssignment | undefined;
   provider: Provider | null;
   responseModelId: string | null;
   routeNote: string | null;
+  browserSessionKey: string;
 }
 
 function sendStreamEvent(
@@ -448,26 +283,27 @@ function buildReplyMessage(
   };
 }
 
-function parseHandoffTarget(content: string): RoutedRole | null {
-  const match = /^HANDOFF:\s*(coder|auditor|janitor|assistant)\b/im.exec(content);
-  if (!match) return null;
-  return match[1].trim().toLowerCase() as RoutedRole;
-}
+const MAX_AGENT_LOOP = 16;
+const MAX_ROLE_VISITS = 5;
 
-function buildHandoffContext(source: ExecutionContext, targetRole: RoutedRole): ExecutionContext {
+function buildHandoffContext(source: ExecutionContext, targetRole: ExecutionRole): ExecutionContext {
   const assignment = source.assignmentMap.get(targetRole);
   const provider = source.providers.find((p) => p.id === assignment?.providerId) ?? null;
   const responseModelId =
     assignment?.modelId ?? provider?.config.defaultModelId ?? provider?.availableModels[0] ?? null;
+  const tools = provider && !provider.capabilities.canUseTools ? [] : getToolsForRole(targetRole);
+  const promptStack = getPromptStack(source.settings, targetRole);
+  promptStack.tools = getToolSystemPrompt(tools);
   return {
     ...source,
     activeRole: targetRole,
-    promptStack: getPromptStack(source.settings, targetRole),
+    promptStack,
+    tools,
     assignment,
     provider,
     responseModelId,
     routedTo: targetRole,
-    routeNote: `Planner chained to ${targetRole}.`,
+    routeNote: `${source.activeRole} chained to ${targetRole}.`,
   };
 }
 
@@ -478,57 +314,52 @@ async function resolveAutoRouteDecision(
   assignmentMap: Map<Role, RoleAssignment>,
   secrets: ExecutionContext["secrets"],
 ): Promise<AutoRouteDecision> {
-  const routerAssignment = assignmentMap.get("router");
+  const policy = routeAutoRequestPolicy(request);
+  if (!policy.shouldQueryDispatch) {
+    return policy.decision;
+  }
+
+  const routerAssignment = assignmentMap.get("dispatch");
   const routerProvider =
     providers.find((candidate) => candidate.id === routerAssignment?.providerId) ?? null;
 
-  if (!routerProvider) {
-    throw createStatusError(409, "Auto mode requires a provider assigned to the router role.");
-  }
-
-  if (routerProvider.status !== "connected") {
-    throw createStatusError(
-      409,
-      `Auto mode requires a connected router provider. ${routerProvider.name} is currently ${routerProvider.status}.`,
-    );
-  }
-
-  if (!providerCanChat(routerProvider)) {
-    throw createStatusError(
-      409,
-      `Auto mode requires a chat-capable router provider. ${routerProvider.name} cannot execute chat requests.`,
-    );
+  if (!routerProvider || routerProvider.status !== "connected" || !providerCanChat(routerProvider)) {
+    const reason = !routerProvider
+      ? "Dispatch provider is not assigned."
+      : routerProvider.status !== "connected"
+        ? `Dispatch provider ${routerProvider.name} is ${routerProvider.status}.`
+        : `Dispatch provider ${routerProvider.name} cannot execute chat requests.`;
+    return {
+      ...policy.decision,
+      source: "policy-fallback",
+      reason: `${reason} Using the policy fallback.`,
+    };
   }
 
   try {
-    console.log(`[router] calling ${routerProvider.name} (${routerAssignment?.modelId ?? "default model"})`);
+    console.log(`[dispatch] calling ${routerProvider.name} (${routerAssignment?.modelId ?? "default model"})`);
     const routerExecution = await executeProviderChat(routerProvider, secrets, {
       modelId: routerAssignment?.modelId ?? null,
-      promptStack: getPromptStack(settings, "router"),
+      promptStack: getPromptStack(settings, "dispatch"),
+      role: "dispatch",
       conversation: [],
-      content: request.content,
+      content: buildDispatchInput(request),
       purpose: "route",
     });
-    console.log(`[router] raw response: "${routerExecution.content}"`);
-    const role = parseRouterRole(routerExecution.content);
-
-    if (!role) {
-      throw new Error(`Router returned an invalid role: "${routerExecution.content}"`);
-    }
-
-    console.log(`[router] parsed role: ${role} (source: router-llm)`);
-    return {
-      role,
-      reason: `Router chose ${role}.`,
-      source: "router-llm",
-    };
+    console.log(`[dispatch] raw response: "${routerExecution.content}"`);
+    const decision = resolveDispatchDecision(routerExecution.content, policy.decision);
+    console.log(
+      `[dispatch] parsed role: ${decision.role} (source: ${decision.source}, confidence: ${decision.confidence.toFixed(2)})`,
+    );
+    return decision;
   } catch (error) {
-    console.warn(`[router] failed, using heuristic fallback. reason: ${error instanceof Error ? error.message : String(error)}`);
-    const fallbackDecision = routeAutoRequestHeuristic(request.content);
-    console.log(`[router] heuristic chose: ${fallbackDecision.role}`);
+    console.warn(
+      `[dispatch] failed, using policy fallback. reason: ${error instanceof Error ? error.message : String(error)}`,
+    );
     return {
-      ...fallbackDecision,
-      reason: `Router failed, fallback chose ${fallbackDecision.role}.`,
+      ...policy.decision,
+      source: "policy-fallback",
+      reason: `Dispatch failed, so the policy fallback kept ${policy.decision.role}.`,
     };
   }
 }
@@ -546,21 +377,23 @@ async function prepareExecution(request: ChatRequest): Promise<ExecutionContext>
     assignments.map((assignment) => [assignment.role, assignment]),
   );
 
+  setToolConfig({ sudoPassword: settings.sudoPassword ?? "" });
+
   const routeDecision =
     mode === "auto"
       ? await resolveAutoRouteDecision(request, settings, providers, assignmentMap, secrets)
       : null;
   const routedTo = mode === "auto" ? resolveSpeakingRole(routeDecision?.role ?? null) : null;
-  const activeRole = mode === "auto" ? routedTo ?? "assistant" : resolveSpeakingRole(mode);
-  const promptStack = getPromptStack(settings, activeRole);
+  const activeRole = mode === "auto" ? routedTo ?? "coordinator" : resolveSpeakingRole(mode);
   const assignment = assignmentMap.get(activeRole);
   const provider = providers.find((candidate) => candidate.id === assignment?.providerId) ?? null;
+  const tools = provider && !provider.capabilities.canUseTools ? [] : getToolsForRole(activeRole);
+  const promptStack = getPromptStack(settings, activeRole);
+  promptStack.tools = getToolSystemPrompt(tools);
   const responseModelId =
     assignment?.modelId ?? provider?.config.defaultModelId ?? provider?.availableModels[0] ?? null;
   const routeNote = routeDecision
-    ? `Auto routed to ${routeDecision.role} via ${
-        routeDecision.source === "router-llm" ? "router" : "fallback"
-      }.`
+    ? `Auto routed to ${routeDecision.role} via ${formatRouteSource(routeDecision.source)}.`
     : null;
 
   return {
@@ -573,10 +406,12 @@ async function prepareExecution(request: ChatRequest): Promise<ExecutionContext>
     routedTo,
     activeRole,
     promptStack,
+    tools,
     assignment,
     provider,
     responseModelId,
     routeNote,
+    browserSessionKey: resolveBrowserSessionKey(request),
   };
 }
 
@@ -633,77 +468,65 @@ async function buildExecution(
     );
   }
 
-  let responseContent: string;
-  let responseThinking: string | null = null;
-  let responseModelId = context.responseModelId;
-  let executionNote = context.routeNote
-    ? `${context.routeNote} Live response generated through ${provider.name}.`
-    : `Live response generated through ${provider.name}.`;
+  const messages: ChatMessage[] = [];
+  const visitCounts = new Map<string, number>();
+  let currentCtx = context;
+  let currentConversation = request.conversation;
+  let currentContent = request.content;
 
-  try {
-    const execution = await executeProviderChat(provider, context.secrets, {
-      modelId: context.assignment?.modelId ?? null,
-      promptStack: context.promptStack,
-      conversation: request.conversation,
-      content: request.content,
-      tools: ALL_TOOLS,
-      onToolCall: handleToolCall,
-    });
-
-    responseContent = execution.content;
-    responseThinking = execution.thinking ?? null;
-    responseModelId = execution.modelId;
-  } catch (error) {
-    const executionNote = `${context.routeNote ? `${context.routeNote} ` : ""}Live provider execution failed: ${
-      error instanceof Error ? error.message : "Unknown error."
-    }`;
-    throw createStatusError(502, executionNote);
-  }
-
-  const replyMessage = buildReplyMessage(
-    context,
-    request,
-    responseContent,
-    responseThinking,
-    responseModelId,
-    executionNote,
-  );
-
-  const messages: ChatMessage[] = [replyMessage];
-
-  if (context.activeRole === "planner") {
-    const handoffTarget = parseHandoffTarget(responseContent);
-    if (handoffTarget) {
-      const handoffCtx = buildHandoffContext(context, handoffTarget);
-      const handoffProvider = handoffCtx.provider;
-      if (handoffProvider && handoffProvider.status === "connected" && providerCanChat(handoffProvider)) {
-        try {
-          console.log(`[planner] HANDOFF detected → chaining to ${handoffTarget}`);
-          const handoffExecution = await executeProviderChat(handoffProvider, context.secrets, {
-            modelId: handoffCtx.assignment?.modelId ?? null,
-            promptStack: handoffCtx.promptStack,
-            conversation: [],
-            content: responseContent,
-            tools: ALL_TOOLS,
-            onToolCall: handleToolCall,
-          });
-          messages.push(
-            buildReplyMessage(
-              handoffCtx,
-              request,
-              handoffExecution.content,
-              handoffExecution.thinking ?? null,
-              handoffExecution.modelId,
-              `Planner chained to ${handoffTarget} via EMBER orchestration.`,
-            ),
-          );
-        } catch (chainError) {
-          console.warn(`[planner] chain to ${handoffTarget} failed: ${chainError instanceof Error ? chainError.message : String(chainError)}`);
-        }
-      } else {
-        console.warn(`[planner] HANDOFF: ${handoffTarget} requested but provider not available.`);
-      }
+  for (let iteration = 0; iteration < MAX_AGENT_LOOP; iteration++) {
+    const iterProvider = currentCtx.provider;
+    if (!iterProvider || iterProvider.status !== "connected" || !providerCanChat(iterProvider)) {
+      if (iteration === 0) resolveExecutionGuard(currentCtx);
+      console.warn(`[loop] no usable provider for ${currentCtx.activeRole}, stopping`);
+      break;
     }
+
+    const handler = createToolHandler({ browserSessionKey: currentCtx.browserSessionKey });
+    let iterContent: string;
+    let iterThinking: string | null;
+    let iterModelId: string | null;
+
+    try {
+      const iterExecution = await executeProviderChat(iterProvider, currentCtx.secrets, {
+        modelId: currentCtx.assignment?.modelId ?? null,
+        promptStack: currentCtx.promptStack,
+        role: currentCtx.activeRole,
+        conversation: currentConversation,
+        content: currentContent,
+        tools: currentCtx.tools,
+        onToolCall: handler.onToolCall,
+      });
+      iterContent = iterExecution.content;
+      iterThinking = iterExecution.thinking ?? null;
+      iterModelId = iterExecution.modelId;
+    } catch (error) {
+      const note = `${currentCtx.routeNote ? `${currentCtx.routeNote} ` : ""}Live provider execution failed: ${
+        error instanceof Error ? error.message : "Unknown error."
+      }`;
+      if (iteration === 0) throw createStatusError(502, note);
+      console.warn(`[loop] ${currentCtx.activeRole} failed: ${note}`);
+      break;
+    }
+
+    const iterNote = `${currentCtx.routeNote ?? ""} Live response via ${iterProvider.name}.`.trim();
+    const iterMsg = buildReplyMessage(currentCtx, request, iterContent, iterThinking, iterModelId, iterNote);
+    messages.push(iterMsg);
+
+    const handoff = handler.getPendingHandoff();
+    if (!handoff) break;
+
+    const visits = (visitCounts.get(handoff.role) ?? 0) + 1;
+    if (visits > MAX_ROLE_VISITS) {
+      console.warn(`[loop] ${handoff.role} hit visit limit (${MAX_ROLE_VISITS}), stopping`);
+      break;
+    }
+    visitCounts.set(handoff.role, visits);
+    console.log(`[loop] ${currentCtx.activeRole} → handoff: ${handoff.role} (visit ${visits})`);
+
+    currentConversation = [...currentConversation, iterMsg];
+    currentContent = handoff.message;
+    currentCtx = buildHandoffContext(currentCtx, handoff.role as ExecutionRole);
   }
 
   const lastMessage = messages.at(-1)!;
@@ -712,7 +535,7 @@ async function buildExecution(
     activeRole: (lastMessage.authorRole as Role) ?? context.activeRole,
     providerId: lastMessage.providerId ?? provider.id,
     providerName: lastMessage.providerName ?? provider.name,
-    modelId: lastMessage.modelId ?? responseModelId,
+    modelId: lastMessage.modelId ?? context.responseModelId,
     promptStack: context.promptStack,
     routedTo: context.routedTo,
     conversationId: request.conversationId ?? null,
@@ -1132,7 +955,7 @@ app.put("/api/settings", async (request, reply) => {
 app.get("/api/prompts/:role", async (request, reply) => {
   const role = (request.params as { role: Role }).role;
   const settings = await readSettings();
-  if (!["router", "assistant", "planner", "coder", "auditor", "janitor"].includes(role)) {
+  if (!["dispatch", "coordinator", "advisor", "director", "inspector", "ops"].includes(role)) {
     reply.code(400);
     return { error: "Unknown role." };
   }
@@ -1175,10 +998,7 @@ app.post("/api/chat/stream", async (request, reply) => {
       sendStreamEvent(send, {
         type: "status",
         phase: "routing",
-        message:
-          context.routeDecision.source === "router-llm"
-            ? `Router chose ${context.routeDecision.role}.`
-            : `Router fallback chose ${context.routeDecision.role}.`,
+        message: `Auto routed to ${context.routeDecision.role} via ${formatRouteSource(context.routeDecision.source)}.`,
         role: context.routeDecision.role,
         providerName: null,
         modelId: null,
@@ -1186,150 +1006,111 @@ app.post("/api/chat/stream", async (request, reply) => {
     }
 
     const provider = context.provider;
-    if (!provider || provider.status !== "connected" || !providerCanChat(provider)) {
-      resolveExecutionGuard(context);
-    }
 
-    if (requestHasImageAttachments(body) && !provider.capabilities.canUseImages) {
+    if (requestHasImageAttachments(body) && provider && !provider.capabilities.canUseImages) {
       throw createStatusError(
         409,
         `${provider.name} does not accept image inputs. Switch to an image-capable provider or remove the image.`,
       );
     }
 
-    sendStreamEvent(send, {
-      type: "status",
-      phase: "provider",
-      message: `Using ${provider.name}${context.responseModelId ? ` with ${context.responseModelId}` : ""}.`,
-      role: context.activeRole,
-      providerName: provider.name,
-      modelId: context.responseModelId,
-    });
+    const resultMessages: ChatMessage[] = [];
+    const streamVisitCounts = new Map<string, number>();
+    let streamCtx = context;
+    let streamConversation = [...body.conversation];
+    let streamContent = body.content;
 
-    let streamedContent = "";
-    let streamedThinking = "";
+    for (let iteration = 0; iteration < MAX_AGENT_LOOP; iteration++) {
+      const iterProvider = streamCtx.provider;
+      if (!iterProvider || iterProvider.status !== "connected" || !providerCanChat(iterProvider)) {
+        if (iteration === 0) resolveExecutionGuard(streamCtx);
+        console.warn(`[loop] no usable provider for ${streamCtx.activeRole}, stopping`);
+        break;
+      }
 
-    const execution = await streamProviderChat(
-      provider,
-      context.secrets,
-      {
-        modelId: context.assignment?.modelId ?? null,
-        promptStack: context.promptStack,
-        conversation: body.conversation,
-        content: body.content,
-        tools: ALL_TOOLS,
-        onToolCall: handleToolCall,
-      },
-      {
-        onStatus(message) {
-          sendStreamEvent(send, {
-            type: "status",
-            phase: streamedContent ? "streaming" : "provider",
-            message,
-            role: context.activeRole,
-            providerName: provider.name,
-            modelId: context.responseModelId,
-          });
-        },
-        onThinking(text) {
-          streamedThinking += text;
-          sendStreamEvent(send, {
-            type: "thinking",
-            text,
-          });
-        },
-        onContent(text) {
-          streamedContent += text;
-          sendStreamEvent(send, {
-            type: "content",
-            text,
-          });
-        },
-      },
-    );
+      if (iteration === 0) {
+        sendStreamEvent(send, {
+          type: "status",
+          phase: "provider",
+          message: `Using ${iterProvider.name}${streamCtx.responseModelId ? ` with ${streamCtx.responseModelId}` : ""}.`,
+          role: streamCtx.activeRole,
+          providerName: iterProvider.name,
+          modelId: streamCtx.responseModelId,
+        });
+      } else {
+        sendStreamEvent(send, {
+          type: "status",
+          phase: "routing",
+          message: `Handing off to ${streamCtx.activeRole}...`,
+          role: streamCtx.activeRole,
+          providerName: iterProvider.name,
+          modelId: streamCtx.responseModelId,
+        });
+      }
 
-    const executionNote = [
-      context.routeNote,
-      `Live response generated through ${provider.name}.`,
-      streamedThinking ? "Reasoning details were streamed during generation." : null,
-    ]
-      .filter(Boolean)
-      .join(" ");
+      const handler = createToolHandler({ browserSessionKey: streamCtx.browserSessionKey });
+      let iterThinking = "";
+      let iterContent = "";
 
-    const primaryMessage = buildReplyMessage(
-      context,
-      body,
-      execution.content,
-      execution.thinking ?? null,
-      execution.modelId,
-      executionNote,
-    );
-    const resultMessages: ChatMessage[] = [primaryMessage];
+      try {
+        const iterExecution = await streamProviderChat(
+          iterProvider,
+          context.secrets,
+          {
+            modelId: streamCtx.assignment?.modelId ?? null,
+            promptStack: streamCtx.promptStack,
+            role: streamCtx.activeRole,
+            conversation: streamConversation,
+            content: streamContent,
+            tools: streamCtx.tools,
+            onToolCall: handler.onToolCall,
+          },
+          {
+            onStatus(message) {
+              sendStreamEvent(send, {
+                type: "status",
+                phase: "streaming",
+                message,
+                role: streamCtx.activeRole,
+                providerName: iterProvider.name,
+                modelId: streamCtx.responseModelId,
+              });
+            },
+            onThinking(text) {
+              iterThinking += text;
+              sendStreamEvent(send, { type: "thinking", text });
+            },
+            onContent(text) {
+              iterContent += text;
+              sendStreamEvent(send, { type: "content", text });
+            },
+          },
+        );
 
-    if (context.activeRole === "planner") {
-      const handoffTarget = parseHandoffTarget(execution.content);
-      if (handoffTarget) {
-        const handoffCtx = buildHandoffContext(context, handoffTarget);
-        const handoffProvider = handoffCtx.provider;
-        if (handoffProvider && handoffProvider.status === "connected" && providerCanChat(handoffProvider)) {
-          sendStreamEvent(send, {
-            type: "status",
-            phase: "routing",
-            message: `Planner complete — chaining to ${handoffTarget}...`,
-            role: handoffTarget,
-            providerName: handoffProvider.name,
-            modelId: handoffCtx.responseModelId,
-          });
-          try {
-            console.log(`[planner] HANDOFF detected → chaining to ${handoffTarget}`);
-            let chainContent = "";
-            let chainThinking = "";
-            const chainExecution = await streamProviderChat(
-              handoffProvider,
-              context.secrets,
-              {
-                modelId: handoffCtx.assignment?.modelId ?? null,
-                promptStack: handoffCtx.promptStack,
-                conversation: [],
-                content: execution.content,
-              },
-              {
-                onContent(text) {
-                  chainContent += text;
-                  sendStreamEvent(send, { type: "content", text });
-                },
-                onThinking(text) {
-                  chainThinking += text;
-                  sendStreamEvent(send, { type: "thinking", text });
-                },
-                onStatus(message) {
-                  sendStreamEvent(send, {
-                    type: "status",
-                    phase: "streaming",
-                    message,
-                    role: handoffCtx.activeRole,
-                    providerName: handoffProvider.name,
-                    modelId: handoffCtx.responseModelId,
-                  });
-                },
-              },
-            );
-            resultMessages.push(
-              buildReplyMessage(
-                handoffCtx,
-                body,
-                chainExecution.content,
-                chainExecution.thinking ?? null,
-                chainExecution.modelId,
-                `Planner chained to ${handoffTarget} via EMBER orchestration.`,
-              ),
-            );
-          } catch (chainError) {
-            console.warn(`[planner] stream chain to ${handoffTarget} failed: ${chainError instanceof Error ? chainError.message : String(chainError)}`);
-          }
-        } else {
-          console.warn(`[planner] HANDOFF: ${handoffTarget} requested but provider not available.`);
+        const iterNote = `${streamCtx.routeNote ?? ""} Live response via ${iterProvider.name}.`.trim();
+        const iterMsg = buildReplyMessage(
+          streamCtx, body, iterExecution.content, iterExecution.thinking ?? null, iterExecution.modelId, iterNote,
+        );
+        resultMessages.push(iterMsg);
+
+        const handoff = handler.getPendingHandoff();
+        if (!handoff) break;
+
+        const visits = (streamVisitCounts.get(handoff.role) ?? 0) + 1;
+        if (visits > MAX_ROLE_VISITS) {
+          console.warn(`[loop] ${handoff.role} hit visit limit (${MAX_ROLE_VISITS}), stopping`);
+          break;
         }
+        streamVisitCounts.set(handoff.role, visits);
+        console.log(`[loop] ${streamCtx.activeRole} → handoff: ${handoff.role} (visit ${visits})`);
+
+        streamConversation = [...streamConversation, iterMsg];
+        streamContent = handoff.message;
+        streamCtx = buildHandoffContext(streamCtx, handoff.role as ExecutionRole);
+      } catch (chainError) {
+        if (iteration === 0) throw chainError;
+        console.warn(`[loop] ${streamCtx.activeRole} failed: ${chainError instanceof Error ? chainError.message : String(chainError)}`);
+        break;
       }
     }
 
@@ -1337,9 +1118,9 @@ app.post("/api/chat/stream", async (request, reply) => {
     const result: ChatExecutionResult = {
       messages: resultMessages,
       activeRole: (lastResultMessage.authorRole as Role) ?? context.activeRole,
-      providerId: lastResultMessage.providerId ?? provider.id,
-      providerName: lastResultMessage.providerName ?? provider.name,
-      modelId: lastResultMessage.modelId ?? execution.modelId,
+      providerId: lastResultMessage.providerId ?? provider?.id ?? null,
+      providerName: lastResultMessage.providerName ?? provider?.name ?? null,
+      modelId: lastResultMessage.modelId ?? context.responseModelId,
       promptStack: context.promptStack,
       routedTo: context.routedTo,
       conversationId: body.conversationId ?? null,
@@ -1350,8 +1131,8 @@ app.post("/api/chat/stream", async (request, reply) => {
       phase: "saving",
       message: "Saving conversation...",
       role: context.activeRole,
-      providerName: provider.name,
-      modelId: execution.modelId,
+      providerName: provider?.name ?? null,
+      modelId: context.responseModelId,
     });
 
     const conversation = await persistConversationFromResult(body, result);

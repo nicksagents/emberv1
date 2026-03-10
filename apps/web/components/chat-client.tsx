@@ -27,15 +27,15 @@ import { ROLES } from "@ember/core/client";
 
 import { clientApiPath } from "../lib/api";
 import { announceConversationsChanged } from "../lib/conversations";
-import { MessageContent, MessageRenderer, ThinkingPanel } from "./message-renderer";
+import { MessageRenderer, StreamingContent, ThinkingPanel } from "./message-renderer";
 
-const directModes = ROLES.filter((role) => role !== "router" && role !== "assistant");
-const modes = ["auto", "assistant", ...directModes] as const;
+const directModes = ROLES.filter((role) => role !== "dispatch" && role !== "coordinator");
+const modes = ["auto", "coordinator", ...directModes] as const;
 const MAX_IMAGE_ATTACHMENTS = 3;
 const MAX_IMAGE_BYTES = 2.5 * 1024 * 1024;
 
 function normalizeMode(mode: ChatMode): (typeof modes)[number] {
-  return mode === "router" ? "auto" : mode;
+  return mode === "dispatch" ? "auto" : mode;
 }
 
 const suggestionPrompts = [
@@ -241,7 +241,7 @@ export function ChatClient({
     scrollToLatest("smooth");
   };
 
-  const routerAssignment = assignmentMap.get("router");
+  const routerAssignment = assignmentMap.get("dispatch");
   const routerProvider =
     providers.find((provider) => provider.id === routerAssignment?.providerId) ?? null;
   const activeAssignment = mode === "auto" ? null : assignmentMap.get(mode);
@@ -396,7 +396,7 @@ export function ChatClient({
       status: mode === "auto" ? "Routing..." : "Waiting for provider...",
       phase: mode === "auto" ? "routing" : "provider",
       providerName: mode === "auto" ? routerProvider?.name ?? null : activeProvider?.name ?? null,
-      role: mode === "auto" ? "router" : mode,
+      role: mode === "auto" ? "dispatch" : mode,
       modelId:
         mode === "auto"
           ? routerAssignment?.modelId ?? routerProvider?.config.defaultModelId ?? null
@@ -520,6 +520,9 @@ export function ChatClient({
       }
     } catch (error) {
       setStreamingPreview(null);
+      setMessages((current) => current.filter((message) => message.id !== userMessage.id));
+      setInput(userMessage.content);
+      setPendingAttachments(userMessage.attachments ?? []);
       setErrorMessage(error instanceof Error ? error.message : "Chat request failed.");
     } finally {
       setSending(false);
@@ -757,7 +760,7 @@ export function ChatClient({
 
                 <div className="message-bubble assistant">
                   {streamingPreview.content.trim() ? (
-                    <MessageContent content={streamingPreview.content} />
+                    <StreamingContent content={streamingPreview.content} />
                   ) : (
                     <p className="streaming-status">{streamingPreview.status}</p>
                   )}
@@ -851,28 +854,6 @@ export function ChatClient({
               </div>
               <div className="composer-toolbar-right">
                 <button
-                  type="button"
-                  className="composer-utility composer-voice"
-                  aria-label="Voice input coming soon"
-                  title="Voice input coming soon"
-                  disabled
-                >
-                  <svg
-                    width="16"
-                    height="16"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.8"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <path d="M12 3a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3Z" />
-                    <path d="M19 10a7 7 0 0 1-14 0" />
-                    <path d="M12 19v3" />
-                  </svg>
-                </button>
-                <button
                   type="submit"
                   className="composer-send"
                   disabled={
@@ -884,8 +865,8 @@ export function ChatClient({
                   aria-label={sending ? "Sending" : "Send message"}
                 >
                   <svg
-                    width="18"
-                    height="18"
+                    width="19"
+                    height="19"
                     viewBox="0 0 24 24"
                     fill="none"
                     stroke="currentColor"
@@ -893,8 +874,8 @@ export function ChatClient({
                     strokeLinecap="round"
                     strokeLinejoin="round"
                   >
-                    <path d="M22 2 11 13" />
-                    <path d="m22 2-7 20-4-9-9-4Z" />
+                    <path d="M5 12h14" />
+                    <path d="m12 5 7 7-7 7" />
                   </svg>
                 </button>
               </div>

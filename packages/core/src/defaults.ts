@@ -14,15 +14,7 @@ export const defaultConnectorTypes: ConnectorType[] = [
     id: "codex-cli",
     name: "Codex CLI",
     description:
-      "Use the local Codex CLI browser login flow and auth status checks.",
-    kind: "cli",
-    setupFields: ["defaultModelId"],
-  },
-  {
-    id: "claude-code-cli",
-    name: "Claude Code CLI",
-    description:
-      "Use the local Claude Code browser login flow and auth status checks.",
+      "Use the local Codex OAuth browser login flow and Codex CLI auth status checks.",
     kind: "cli",
     setupFields: ["defaultModelId"],
   },
@@ -55,15 +47,16 @@ export const defaultSettings = (workspaceRoot: string): Settings => ({
   workspaceRoot,
   themePreference: "ember-night",
   tailscaleStatus: "Not configured",
+  sudoPassword: "",
   systemPrompts: {
     shared: "",
     roles: {
-      router: "",
-      assistant: "",
-      planner: "",
-      coder: "",
-      auditor: "",
-      janitor: "",
+      dispatch: "",
+      coordinator: "",
+      advisor: "",
+      director: "",
+      inspector: "",
+      ops: "",
     },
   },
   runtimeInfo: {
@@ -114,14 +107,8 @@ export function getProviderCapabilities(
         canChat: true,
         canListModels: true,
         requiresBrowserAuth: true,
-        canUseImages: false,
-      };
-    case "claude-code-cli":
-      return {
-        canChat: false,
-        canListModels: true,
-        requiresBrowserAuth: true,
-        canUseImages: false,
+        canUseImages: true,
+        canUseTools: true,
       };
     case "anthropic-api":
     case "openai-compatible":
@@ -130,6 +117,7 @@ export function getProviderCapabilities(
         canListModels: true,
         requiresBrowserAuth: false,
         canUseImages: true,
+        canUseTools: true,
       };
   }
 }

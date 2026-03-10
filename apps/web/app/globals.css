@@ -86,22 +86,14 @@ textarea {
   -webkit-tap-highlight-color: transparent;
 }
 
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+/* Hide all scrollbars while keeping scroll functionality */
+* {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
 
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-::-webkit-scrollbar-thumb {
-  background: var(--border-strong);
-  border-radius: 4px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: var(--text-tertiary);
+*::-webkit-scrollbar {
+  display: none;
 }
 
 button,
@@ -857,6 +849,8 @@ p {
 .chat-surface {
   background: transparent;
   border: 0;
+  border-radius: 0;
+  padding: 0 0.75rem;
 }
 
 .messages {
@@ -1371,17 +1365,16 @@ p {
   font-size: 0.8rem;
 }
 
-.composer-voice {
-  color: var(--accent-muted);
-}
-
 .composer-send {
-  width: 2.7rem;
-  height: 2.7rem;
-  min-height: 2.7rem;
-  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 3.4rem;
+  height: 2.5rem;
+  min-height: 2.5rem;
+  padding: 0 0.75rem;
   border: 0;
-  border-radius: 999px;
+  border-radius: 0.9rem;
   background: var(--accent);
   color: var(--accent-contrast);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
@@ -2216,7 +2209,7 @@ p {
   }
 
   .chat-topbar {
-    padding-top: 0.1rem;
+    padding: 0.7rem 0 0.5rem;
   }
 
   .chat-topbar-actions {
@@ -2224,7 +2217,7 @@ p {
   }
 
   .chat-topbar-inner {
-    padding: 0;
+    padding: 0 0.75rem;
   }
 
   .chat-topbar-subtitle {
@@ -2269,12 +2262,39 @@ p {
   }
 
   .composer {
-    padding: 0.68rem 0.72rem 0.64rem;
-    border-radius: 1.5rem;
+    padding: 0.56rem 0.62rem 0.58rem;
+    border-radius: 1.35rem;
+  }
+
+  .chat-composer {
+    min-height: 5.35rem;
+  }
+
+  .composer textarea {
+    min-height: 2rem;
+    max-height: 6rem;
+    font-size: 0.84rem;
+  }
+
+  .composer-main {
+    gap: 0.35rem;
   }
 
   .composer-toolbar {
     align-items: flex-end;
+    min-height: 1.6rem;
+  }
+
+  .composer-utility {
+    width: 1.65rem;
+    height: 1.65rem;
+  }
+
+  .composer-send {
+    width: 3rem;
+    height: 2.2rem;
+    min-height: 2.2rem;
+    border-radius: 0.8rem;
   }
 
   .composer-context {

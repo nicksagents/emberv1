@@ -33,7 +33,7 @@ export function ProviderCreateForm({
     const config: Record<string, string> = {};
     const secrets: Record<string, string> = {};
 
-    if ((typeId === "codex-cli" || typeId === "claude-code-cli") && defaultModelId.trim()) {
+    if (typeId === "codex-cli" && defaultModelId.trim()) {
       config.defaultModelId = defaultModelId.trim();
     }
 
@@ -125,30 +125,15 @@ export function ProviderCreateForm({
                 </p>
               </>
             ) : null}
-            {typeId === "claude-code-cli" ? (
-              <>
-                <p className="page-copy">
-                  If you already ran `claude auth login`, save this and press Recheck on the
-                  Providers page.
-                </p>
-                <p className="page-copy">
-                  Discovered model ids are passed through to `claude --model ...` when execution support is enabled.
-                </p>
-              </>
-            ) : null}
           </Surface>
 
-          {typeId === "codex-cli" || typeId === "claude-code-cli" ? (
+          {typeId === "codex-cli" ? (
             <label className="field">
               <span>Default model id</span>
               <input
                 value={defaultModelId}
                 onChange={(event) => setDefaultModelId(event.target.value)}
-                placeholder={
-                  typeId === "codex-cli"
-                    ? "Optional Codex model id"
-                    : "Optional Claude model id"
-                }
+                placeholder="Optional Codex model id"
               />
             </label>
           ) : null}
