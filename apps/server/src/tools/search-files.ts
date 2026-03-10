@@ -421,7 +421,5 @@ export const searchFilesTool: EmberTool = {
       required: ["query"],
     },
   },
-  systemPrompt:
-    "search_files - Search before reading files. For exact text, use text/query plus literal=true.",
   execute,
 };

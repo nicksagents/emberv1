@@ -22,12 +22,13 @@ import type {
   Provider,
   RoleAssignment,
   Settings,
+  ToolCall,
 } from "@ember/core/client";
 import { ROLES } from "@ember/core/client";
 
 import { clientApiPath, clientStreamApiPath } from "../lib/api";
 import { announceConversationsChanged } from "../lib/conversations";
-import { MessageRenderer, StreamingContent, ThinkingPanel } from "./message-renderer";
+import { FunnyLoader, MessageRenderer, StreamingContent, ThinkingPanel, ToolCallsPanel } from "./message-renderer";
 
 const directModes = ROLES.filter((role) => role !== "dispatch" && role !== "coordinator");
 const modes = ["auto", "coordinator", ...directModes] as const;
@@ -69,6 +70,7 @@ interface StreamingPreview {
   providerName: string | null;
   role: string | null;
   modelId: string | null;
+  toolCalls: ToolCall[];
 }
 
 function titleCase(value: string | null | undefined): string {
@@ -415,6 +417,7 @@ export function ChatClient({
         mode === "auto"
           ? null
           : activeAssignment?.modelId ?? activeProvider?.config.defaultModelId ?? null,
+      toolCalls: [],
     });
 
     try {
@@ -491,6 +494,17 @@ export function ChatClient({
                     }
                   : current,
               );
+            } else if (event.type === "toolCall") {
+              setStreamingPreview((current) => {
+                if (!current) return current;
+                const existingIndex = current.toolCalls.findIndex((t) => t.id === event.toolCall.id);
+                if (existingIndex >= 0) {
+                  const updated = [...current.toolCalls];
+                  updated[existingIndex] = event.toolCall;
+                  return { ...current, toolCalls: updated };
+                }
+                return { ...current, toolCalls: [...current.toolCalls, event.toolCall] };
+              });
             } else if (event.type === "content") {
               setStreamingPreview((current) =>
                 current
@@ -782,12 +796,16 @@ export function ChatClient({
                 </div>
 
                 <ThinkingPanel content={streamingPreview.thinking} live />
+                
+                <ToolCallsPanel tools={streamingPreview.toolCalls} live />
 
                 <div className="message-bubble assistant">
                   {streamingPreview.content.trim() ? (
                     <StreamingContent content={streamingPreview.content} />
                   ) : (
-                    <span className="streaming-loader" aria-label="Waiting for response" />
+                    <div className="streaming-waiting">
+                      <FunnyLoader />
+                    </div>
                   )}
                 </div>
                 

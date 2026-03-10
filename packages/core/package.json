@@ -12,11 +12,19 @@
     "./client": {
       "types": "./dist/client.d.ts",
       "default": "./dist/client.js"
+    },
+    "./skills": {
+      "types": "./dist/skills/skill-manager.d.ts",
+      "default": "./dist/skills/skill-manager.js"
+    },
+    "./mcp": {
+      "types": "./dist/mcp/index.d.ts",
+      "default": "./dist/mcp/index.js"
     }
   },
   "scripts": {
-    "build": "tsup src/index.ts src/client.ts --format esm --dts",
-    "dev": "tsup src/index.ts src/client.ts --format esm --dts --watch",
+    "build": "tsup src/index.ts src/client.ts src/skills/skill-manager.ts src/mcp/index.ts --format esm --dts",
+    "dev": "tsup src/index.ts src/client.ts src/skills/skill-manager.ts src/mcp/index.ts --format esm --dts --watch",
     "typecheck": "tsc --project tsconfig.json --noEmit"
   },
   "dependencies": {

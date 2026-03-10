@@ -1,6 +1,9 @@
 import type { Role, ToolDefinition } from "@ember/core";
+import { skillManager } from "@ember/core/skills";
 
-import { browserTool } from "./browser.js";
+// browserTool is intentionally NOT imported here — replaced by @playwright/mcp (Phase 3).
+// See apps/server/mcp.default.json and skills/playwright-browser/SKILL.md.
+// To roll back: re-import browserTool and add it to REGISTRY + ROLE_TOOLS.
 import { fetchPageTool } from "./fetch-page.js";
 import { editFileTool, listDirectoryTool, readFileTool, writeFileTool } from "./files.js";
 import { gitInspectTool } from "./git-inspect.js";
@@ -17,6 +20,7 @@ export type { EmberTool };
 // ─── Registry ─────────────────────────────────────────────────────────────────
 // Add your tool to this array to make it available to the system.
 // See TOOLS.md for how to create and register a new tool.
+// MCP tools are added at startup via registerMcpTools() — do not edit by hand.
 
 const REGISTRY: EmberTool[] = [
   projectOverviewTool,
@@ -30,25 +34,28 @@ const REGISTRY: EmberTool[] = [
   webSearchTool,
   httpRequestTool,
   fetchPageTool,
-  browserTool,
+  // browserTool removed — replaced by @playwright/mcp (mcp__playwright__browser_*)
   handoffTool,
 ];
 
-// Fast lookup map built from the registry.
+// Fast lookup map rebuilt whenever registerMcpTools() adds new tools.
 const TOOL_MAP = new Map<string, EmberTool>(
   REGISTRY.map((tool) => [tool.definition.name, tool]),
 );
 
 // ─── Per-role tool sets ────────────────────────────────────────────────────────
 // Controls which tools each role can call. Roles not listed here get no tools.
-// Add a tool object to a role's array to grant that role access.
+// MCP tools are appended to these arrays by registerMcpTools() at startup.
 
+// Note: browser tools are NOT listed here — they are injected at startup via
+// registerMcpTools() when the @playwright/mcp server connects (mcp.default.json).
+// Roles: coordinator, advisor, director, inspector get mcp__playwright__browser_*
 const ROLE_TOOLS: Record<Role, EmberTool[]> = {
   dispatch:    [],
-  coordinator: [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, browserTool, handoffTool],
-  advisor:     [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, browserTool, handoffTool],
-  director:    [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, browserTool, handoffTool],
-  inspector:   [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, browserTool, handoffTool],
+  coordinator: [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, handoffTool],
+  advisor:     [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, handoffTool],
+  director:    [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, handoffTool],
+  inspector:   [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, handoffTool],
   ops:         [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, httpRequestTool, handoffTool],
 };
 
@@ -83,7 +90,9 @@ export function createToolHandler(options?: { browserSessionKey?: string }) {
         return `Handoff to ${role} registered. Wrap up your response and ${role} will continue.`;
       }
 
-      if ((name === "browser" || name === "run_terminal_command") && options?.browserSessionKey) {
+      // Only terminal tools use __sessionKey for session persistence.
+      // Playwright MCP manages its own sessions internally via the MCP server process.
+      if (name === "run_terminal_command" && options?.browserSessionKey) {
         return handleToolCall(name, {
           ...input,
           __sessionKey: options.browserSessionKey,
@@ -106,19 +115,66 @@ export function setToolConfig(config: { sudoPassword?: string }) {
   }
 }
 
+/**
+ * Register MCP-discovered tools into the global registry and role maps.
+ *
+ * Called once at server startup after McpClientManager.start() completes.
+ * Each entry carries the EmberTool and the Ember roles that may invoke it
+ * (derived from the server's `roles` config field).
+ *
+ * Tools with no roles remain in REGISTRY and TOOL_MAP (so handleToolCall
+ * can execute them if the LLM somehow names them), but they are not added to
+ * any ROLE_TOOLS array — meaning no role will receive them in its tool list.
+ */
+export function registerMcpTools(
+  entries: Array<{ tool: EmberTool; roles: Role[] }>,
+): void {
+  for (const { tool, roles } of entries) {
+    // Skip if already registered (e.g. duplicate names from multiple servers)
+    if (TOOL_MAP.has(tool.definition.name)) {
+      console.warn(
+        `[mcp] Tool name collision: "${tool.definition.name}" already registered. Skipping.`,
+      );
+      continue;
+    }
+
+    REGISTRY.push(tool);
+    TOOL_MAP.set(tool.definition.name, tool);
+
+    for (const role of roles) {
+      if (ROLE_TOOLS[role]) {
+        ROLE_TOOLS[role].push(tool);
+      }
+    }
+  }
+}
+
 export function getToolsForRole(role: Role): ToolDefinition[] {
   return (ROLE_TOOLS[role] ?? []).map((t) => t.definition);
 }
 
-export function getToolSystemPrompt(tools: ToolDefinition[]): string {
+/**
+ * Build the tools section of a role's system prompt.
+ *
+ * Injection logic:
+ *   - Tool-gated skills  (frontmatter `tools: [...]`): injected when at least
+ *     one of the listed tools is in the active set (from skills/<name>/SKILL.md).
+ *   - Role-scoped skills (no `tools` field): always injected for the role
+ *     (e.g. loop-prevention, coordinator-behavior).
+ *   - Dynamic workflow hints: short one-liners derived from the active tool set.
+ */
+export function getToolSystemPrompt(tools: ToolDefinition[], role?: Role): string {
   if (!tools.length) return "";
-  const toolNames = new Set(tools.map((tool) => tool.name));
-  const lines = tools
-    .map((t) => TOOL_MAP.get(t.name)?.systemPrompt)
-    .filter(Boolean)
-    .map((p) => `- ${p}`);
-  const workflows: string[] = [];
 
+  const toolNames = new Set(tools.map((t) => t.name));
+
+  // ── Skill injection ───────────────────────────────────────────────────────
+  const skills = skillManager.listSkills(role, toolNames);
+  const toolSkills = skills.filter((s) => s.tools && s.tools.length > 0);
+  const roleSkills = skills.filter((s) => !s.tools || s.tools.length === 0);
+
+  // ── Dynamic workflow hints ────────────────────────────────────────────────
+  const workflows: string[] = [];
   if (toolNames.has("project_overview")) {
     workflows.push("For unfamiliar repos: start with project_overview.");
   }
@@ -134,44 +190,42 @@ export function getToolSystemPrompt(tools: ToolDefinition[]): string {
   if (toolNames.has("web_search") && toolNames.has("fetch_page")) {
     workflows.push("For external research: web_search first, then fetch_page on the best source.");
   }
-  if (toolNames.has("browser")) {
-    workflows.push("Use browser only when page state, UI interaction, screenshots, or cookies matter.");
+  // Detect Playwright MCP tools (registered as mcp__playwright__browser_*)
+  if ([...toolNames].some((n) => n.startsWith("mcp__playwright__browser_"))) {
+    workflows.push(
+      "For web automation: navigate → snapshot (read accessibility tree refs) → click/fill using refs → snapshot to verify. Never skip the snapshot step.",
+    );
   }
   if (toolNames.has("run_terminal_command")) {
     workflows.push("Use the terminal for commands or interactive workflows only after a narrower tool would not be enough.");
   }
 
-  return [
+  // ── Assemble ──────────────────────────────────────────────────────────────
+  const out: string[] = [
     "## Tools",
     "Use tools when they help you answer correctly or complete the task.",
     "Base every claim on tool results. Never say you checked, changed, ran, or verified something unless a tool result proves it.",
     "Choose the smallest tool that fits the job.",
     "Prefer short-output tools and the smallest valid input shape.",
     "Prefer one tool call per step, then reassess.",
-    "",
-    "## Loop Prevention (IMPORTANT)",
-    "- Do NOT call the same tool with the same input twice in a row unless the underlying state changed.",
-    "- Do NOT read the same file multiple times in one response unless you edited it in between.",
-    "- After getting a tool result, decide: is the task done? If yes, respond. If not, what is the single next step?",
-    "- If you are going in circles (reading → thinking → reading the same thing again), stop and respond with what you know.",
-    "- Once you have enough information to complete the task, stop using tools and give your answer.",
-    "",
-    "## Small-Model Defaults",
-    "- For browser work: navigate -> snapshot -> act with element_id -> snapshot.",
-    "- For APIs: use http_request before browser.",
-    "- For code search: use search_files with literal=true for exact strings.",
-    "- For file inspection: use read_file with start_line/end_line when possible.",
-    "- For terminal follow-up: use action=read, action=input, or action=interrupt.",
-    "",
-    "## Handoff Rules",
-    "- Call the handoff tool at most ONCE per response.",
-    "- Only call handoff after your own tool work is complete for this turn.",
-    "- If the task is done, do NOT call handoff — just respond to the user.",
-    workflows.length ? "\n## Recommended Workflows" : "",
-    ...workflows.map((line) => `- ${line}`),
-    lines.length ? "\n## Available Tools" : "",
-    ...lines,
-  ].filter(Boolean).join("\n");
+  ];
+
+  if (workflows.length) {
+    out.push("", "## Recommended Workflows");
+    out.push(...workflows.map((w) => `- ${w}`));
+  }
+
+  // Inject tool-gated skill bodies
+  for (const skill of toolSkills) {
+    out.push("", skill.body);
+  }
+
+  // Inject role-scoped skill bodies (loop-prevention, coordinator-behavior, etc.)
+  for (const skill of roleSkills) {
+    out.push("", skill.body);
+  }
+
+  return out.join("\n");
 }
 
 export async function handleToolCall(

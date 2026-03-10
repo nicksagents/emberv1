@@ -226,8 +226,6 @@ export const readFileTool: EmberTool = {
       required: ["path"],
     },
   },
-  systemPrompt:
-    "read_file — Read the real file contents before quoting or editing. Use start_line/end_line to keep reads small.",
   execute: executeReadFile,
 };
 
@@ -256,8 +254,6 @@ export const writeFileTool: EmberTool = {
       required: ["path", "content"],
     },
   },
-  systemPrompt:
-    "write_file — Create a file or fully replace its contents. Use only when a full write is intended; prefer edit_file for localized changes.",
   execute: executeWriteFile,
 };
 
@@ -294,8 +290,6 @@ export const editFileTool: EmberTool = {
       required: ["path", "old_string", "new_string"],
     },
   },
-  systemPrompt:
-    "edit_file — Make a small exact replacement in an existing file. Read the file first and use a unique old_string.",
   execute: executeEditFile,
 };
 
@@ -332,7 +326,5 @@ export const listDirectoryTool: EmberTool = {
       required: ["path"],
     },
   },
-  systemPrompt:
-    "list_directory — Inspect folders and discover files before guessing paths or repository structure.",
   execute: executeListDirectory,
 };

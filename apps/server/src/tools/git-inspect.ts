@@ -162,7 +162,5 @@ export const gitInspectTool: EmberTool = {
       required: ["action"],
     },
   },
-  systemPrompt:
-    "git_inspect - Check repo state, diffs, and commit history without raw shell parsing.",
   execute,
 };

@@ -209,7 +209,5 @@ export const webSearchTool: EmberTool = {
       required: ["query"],
     },
   },
-  systemPrompt:
-    "web_search — Use for current or external information. Start here, then use fetch_page to read the best source instead of relying only on search snippets.",
   execute,
 };

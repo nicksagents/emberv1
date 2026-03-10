@@ -675,7 +675,5 @@ export const terminalTool: EmberTool = {
       },
     },
   },
-  systemPrompt:
-    "run_terminal_command — Use only when a narrower tool will not do. Default is run; use action=read/input/interrupt for follow-up terminal steps.",
   execute,
 };

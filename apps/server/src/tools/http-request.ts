@@ -179,7 +179,5 @@ export const httpRequestTool: EmberTool = {
       required: ["url"],
     },
   },
-  systemPrompt:
-    "http_request — For APIs use this before browser. GET with url is the default; use json for JSON POST bodies.",
   execute,
 };

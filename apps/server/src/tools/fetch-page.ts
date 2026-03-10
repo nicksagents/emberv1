@@ -225,7 +225,5 @@ export const fetchPageTool: EmberTool = {
       required: ["url"],
     },
   },
-  systemPrompt:
-    "fetch_page — Read the actual contents of a source URL. Use it after web_search or with a direct link when you need evidence from the page itself. Use offset to continue long documents.",
   execute,
 };

@@ -131,3 +131,29 @@ test("dispatch input includes recent transcript and strict json instructions", (
   assert.match(input, /strict JSON only/);
   assert.match(input, /latest_user_request/);
 });
+
+test("dispatch input includes compacted history separately from recent turns", () => {
+  const request = makeRequest("continue with the provider patch", [
+    {
+      id: "summary_1",
+      role: "assistant",
+      authorRole: "coordinator",
+      mode: "auto",
+      content: "Conversation memory summary. Earlier work covered provider selection and tool formatting.",
+      createdAt: new Date().toISOString(),
+      historySummary: {
+        kind: "history-summary",
+        sourceMessageCount: 14,
+        sourceToolCallCount: 3,
+        generatedAt: new Date().toISOString(),
+      },
+    },
+    makeUser("patch the compact history path next"),
+    makeAssistant("director", "I am updating the provider request formatter."),
+  ]);
+
+  const input = buildDispatchInput(request);
+  assert.match(input, /compacted_history/);
+  assert.match(input, /provider selection and tool formatting/);
+  assert.match(input, /recent_conversation/);
+});

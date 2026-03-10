@@ -37,9 +37,5 @@ export const handoffTool: EmberTool = {
       required: ["role", "message"],
     },
   },
-  systemPrompt:
-    "handoff — Transfer work to a specialist role. Call at most ONCE per response, only after your own work for this turn is done. " +
-    "Format the message as: GOAL / DONE / TODO / FILES / NOTES. " +
-    "Do not call handoff if the task is already complete — just respond to the user instead.",
   execute: async () => "Handoff acknowledged.",
 };

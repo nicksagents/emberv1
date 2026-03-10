@@ -1,8 +1,9 @@
 # Ember Tool System
 
-Tools give LLMs the ability to take actions: run commands, inspect files, search the web, call APIs, and automate browsers.
-Each role gets a specific subset of tools. The system composes a tight system prompt from only
-the tools that role actually has access to, so no LLM sees more than it needs.
+Tools give roles the ability to take actions: run commands, inspect files, search the web,
+call APIs, and automate browsers. Each role gets a specific subset of tools.
+The system composes a tight system prompt from only the tools that role has access to,
+so no model sees more than it needs.
 
 ---
 
@@ -12,24 +13,30 @@ the tools that role actually has access to, so no LLM sees more than it needs.
 User sends message
   → Role is selected (router or direct)
   → getToolsForRole(role) returns the ToolDefinition[] for that role
-  → getToolSystemPrompt(tools) builds a "## Tools available" block injected into the system prompt
+  → getToolSystemPrompt(tools, role) builds the tools section of the system prompt:
+      - Tool-gated skill bodies (from skills/<tool-name>/SKILL.md)
+      - Role-scoped skill bodies (loop-prevention, coordinator-behavior, etc.)
+      - Dynamic workflow hints based on the active tool set
   → The LLM receives: shared prompt + role prompt + tools prompt + conversation
   → LLM responds and optionally requests a tool call
   → handleToolCall(name, input) dispatches to the tool's execute() function
-  → Result is fed back to the LLM (this loops up to the configured provider tool-turn limit)
+  → Result is fed back to the LLM (loops up to the configured tool-turn limit)
   → LLM produces a final text response
 ```
 
-The tool loop streams in real time — text content is emitted as it arrives, and a status event
-("Tool: web_search") is emitted before each tool execution so the UI can show progress.
+The tool loop streams in real time — text content is emitted as it arrives, and a
+status event ("Tool: web_search") is emitted before each tool call so the UI can
+show progress.
 
 ---
 
-## How to add a new tool
+## Two ways to expose tools
 
-### 1. Create a tool file
+### Option A: Native EmberTool (TypeScript)
 
-Create `apps/server/src/tools/my-tool.ts` and export an `EmberTool`:
+For tools that need custom Node.js logic — file I/O, terminal management, etc.
+
+**1. Create a tool file** at `apps/server/src/tools/my-tool.ts`:
 
 ```ts
 import type { EmberTool } from "./types.js";
@@ -37,8 +44,6 @@ import type { EmberTool } from "./types.js";
 async function execute(input: Record<string, unknown>): Promise<string> {
   const value = typeof input.my_param === "string" ? input.my_param : "";
   if (!value) return "Error: my_param is required.";
-
-  // Do the work, return a plain string the LLM can read.
   return `Result: ${value}`;
 }
 
@@ -51,90 +56,138 @@ export const myTool: EmberTool = {
     inputSchema: {
       type: "object",
       properties: {
-        my_param: {
-          type: "string",
-          description: "What this parameter is for.",
-        },
+        my_param: { type: "string", description: "What this parameter is for." },
       },
       required: ["my_param"],
     },
   },
-  systemPrompt:
-    "my_tool_name — One-liner injected into the role system prompt. Keep it under 20 words.",
   execute,
 };
 ```
 
-### 2. Register the tool
-
-Open `apps/server/src/tools/index.ts` and add two things:
+**2. Register it** in `apps/server/src/tools/index.ts`:
 
 ```ts
-// 1. Import it
 import { myTool } from "./my-tool.js";
 
-// 2. Add it to REGISTRY
-const REGISTRY: EmberTool[] = [
-  terminalTool,
-  readFileTool,
-  // ...
-  myTool,   // ← add here
-];
-```
+const REGISTRY: EmberTool[] = [...existingTools, myTool];
 
-### 3. Grant role access (optional)
-
-In `ROLE_TOOLS` inside `index.ts`, add your tool to whichever roles should have it:
-
-```ts
 const ROLE_TOOLS: Record<Role, EmberTool[]> = {
-  coder: [readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, myTool],
+  coordinator: [...existingTools, myTool],
   // ...
 };
 ```
 
-That's it. The system automatically:
-- Sends the tool's JSON schema to the LLM
-- Injects `myTool.systemPrompt` into the system prompt for roles that have it
-- Routes `handleToolCall("my_tool_name", input)` to your `execute()` function
+**3. Add a skill file** at `skills/my-tool-name/SKILL.md`:
+
+```markdown
+---
+name: my-tool-name
+description: What this tool does and when to use it.
+roles: [coordinator, director]
+tools: [my_tool_name]
+---
+
+## My Tool
+
+Guidance that gets injected into the system prompt whenever my_tool_name
+is in the active tool set for the role...
+```
+
+### Option B: MCP Server
+
+For tools backed by an external MCP server — browser automation, databases, APIs, etc.
+No TypeScript needed. Declare the server in a config file; Ember discovers tools at startup.
+
+**1. Add to the config file** for the appropriate scope:
+
+| File | Scope |
+|------|-------|
+| `apps/server/mcp.default.json` | Bundled default (shipped with Ember) |
+| `~/.ember/mcp.json` | User-level override |
+| `.ember/mcp.json` | Project-level override (highest priority) |
+
+```json
+{
+  "mcpServers": {
+    "my-server": {
+      "command": "npx",
+      "args": ["-y", "my-mcp-package"],
+      "roles": ["coordinator", "director"],
+      "timeout": 30000
+    }
+  }
+}
+```
+
+The `roles` field controls which Ember roles receive the server's tools in their tool list.
+Omit it (or use `[]`) to make tools callable but not auto-listed for any role.
+
+**2. Tools are auto-discovered** at startup and registered as `mcp__<serverName>__<toolName>`.
+No code changes needed — restart the server to pick up config changes.
+
+**3. Add a skill file** at `skills/<skill-name>/SKILL.md` gated on one of the tool names:
+
+```markdown
+---
+name: my-mcp-skill
+description: Workflow guide for my-server tools.
+roles: [coordinator, director]
+tools: [mcp__my-server__main_tool]
+---
+
+## My MCP Server Tools
+
+Workflow guidance...
+```
 
 ---
 
 ## How tools are sent to each provider
 
 ### Anthropic API
-Tools are sent as the `tools` array in the request body using Anthropic's native format:
 ```json
 { "name": "...", "description": "...", "input_schema": { ... } }
 ```
-Tool results come back as `tool_result` content blocks in a `user` message.
-The streaming loop detects `stop_reason: "tool_use"` to know when to execute tools.
+Tool results come back as `tool_result` content blocks. The loop detects
+`stop_reason: "tool_use"` to know when to execute.
 
-### OpenAI-compatible (local models, OpenAI, etc.)
-Tools are sent as the `tools` array using OpenAI's function-calling format:
+### OpenAI-compatible (local Qwen, OpenAI, etc.)
 ```json
 { "type": "function", "function": { "name": "...", "description": "...", "parameters": { ... } } }
 ```
-Tool results come back as `role: "tool"` messages with `tool_call_id`.
-The streaming loop detects `finish_reason: "tool_calls"` to know when to execute tools.
-
-### Codex CLI
-Codex CLI runs as a local process and receives the conversation as a text prompt.
-EMBER exposes tools to Codex through a text-based tool protocol and executes the requested
-tool server-side before continuing the loop.
+Tool results come back as `role: "tool"` messages. The loop detects
+`finish_reason: "tool_calls"`.
 
 ---
 
 ## Per-role tool access
 
-| Role        | Tools                                                                                                                      |
-|-------------|----------------------------------------------------------------------------------------------------------------------------|
-| dispatch    | none (classification only)                                                                                                 |
-| coordinator | project_overview, git_inspect, list_directory, search_files, read_file, write_file, edit_file, run_terminal_command, web_search, http_request, fetch_page, browser, handoff |
-| advisor     | project_overview, git_inspect, list_directory, search_files, read_file, run_terminal_command, web_search, http_request, fetch_page, browser, handoff |
-| director    | project_overview, git_inspect, list_directory, search_files, read_file, write_file, edit_file, run_terminal_command, web_search, http_request, fetch_page, browser, handoff |
-| inspector   | project_overview, git_inspect, list_directory, search_files, read_file, run_terminal_command, web_search, http_request, fetch_page, browser, handoff |
-| ops         | project_overview, git_inspect, list_directory, search_files, read_file, write_file, edit_file, http_request, handoff     |
+Browser automation is provided by the bundled `@playwright/mcp` server and registered
+as `mcp__playwright__browser_*` tools at startup. The table below shows native tools only;
+MCP tools from `mcp.default.json` and user/project overrides are appended at boot.
+
+| Role        | Native tools                                                                                                              |
+|-------------|---------------------------------------------------------------------------------------------------------------------------|
+| dispatch    | none (classification only)                                                                                                |
+| coordinator | project_overview, git_inspect, list_directory, search_files, read_file, write_file, edit_file, run_terminal_command, web_search, http_request, fetch_page, handoff + MCP |
+| advisor     | project_overview, git_inspect, list_directory, search_files, read_file, run_terminal_command, web_search, http_request, fetch_page, handoff + MCP |
+| director    | project_overview, git_inspect, list_directory, search_files, read_file, write_file, edit_file, run_terminal_command, web_search, http_request, fetch_page, handoff + MCP |
+| inspector   | project_overview, git_inspect, list_directory, search_files, read_file, run_terminal_command, web_search, http_request, fetch_page, handoff + MCP |
+| ops         | project_overview, git_inspect, list_directory, search_files, read_file, write_file, edit_file, http_request, handoff (no MCP) |
+
+---
+
+## Skill files
+
+Every tool should have a companion `skills/<name>/SKILL.md` that documents the
+workflow. Skills are injected into the system prompt at runtime — no code changes
+needed to update model guidance.
+
+- **Tool-gated skills** (`tools: [...]`) — injected when any listed tool is active for the role
+- **Role-scoped skills** (no `tools` field) — always injected for the listed roles
+
+See `docs/SKILLS.md` for the full skill format specification and examples.
 
 ---
 
@@ -142,12 +195,14 @@ tool server-side before continuing the loop.
 
 - **Return plain text.** The LLM reads the return value directly. Avoid JSON unless the LLM
   specifically needs to parse it.
-- **Optimize for small models.** Prefer compact snapshots, short status text, stable IDs, and a few high-leverage parameters over large raw dumps.
+- **Optimize for small models.** Prefer compact output, stable IDs, and a few high-leverage
+  parameters over large raw dumps.
 - **Fail loudly with a clear message.** Return `"Error: ..."` strings — don't throw. The LLM
   will see the error and can try a different approach.
-- **Cap output size.** Large outputs waste context window. Truncate at ~100 KB for file reads,
-  and summarize or paginate for API responses.
-- **Design for cross-platform execution.** Prefer Node APIs or well-supported binaries with clear fallbacks so tools behave on macOS, Linux, and Windows.
-- **Log what you do.** Use `console.log(`[tool:name] ...`)` so server logs are useful.
+- **Cap output size.** Large outputs waste context window. Truncate at reasonable limits and
+  offer pagination (offset/limit) for large resources.
+- **Design for cross-platform execution.** Prefer Node APIs or well-supported binaries with
+  clear fallbacks so tools behave on macOS, Linux, and Windows.
+- **Log what you do.** Use `console.log('[tool:name] ...')` so server logs are useful.
 - **Keep execute() focused.** One tool, one job. If you need two things, make two tools.
 - **async is fine.** `execute` can be `async` — the system awaits it.

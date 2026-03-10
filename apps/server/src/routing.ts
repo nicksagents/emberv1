@@ -1,4 +1,4 @@
-import type { ChatRequest, Role } from "@ember/core";
+import { getHistorySummaryMessage, isHistorySummaryMessage, type ChatRequest, type Role } from "@ember/core";
 
 export type RoutedRole = Exclude<Role, "dispatch" | "ops">;
 
@@ -26,6 +26,7 @@ const ROUTED_ROLES: RoutedRole[] = ["coordinator", "advisor", "director", "inspe
 
 const DISPATCH_MAX_MESSAGES = 8;
 const DISPATCH_CONTEXT_CHAR_BUDGET = 2200;
+const DISPATCH_SUMMARY_CHAR_LIMIT = 900;
 const DISPATCH_MESSAGE_CHAR_LIMIT = 500;
 const MIN_DISPATCH_CONFIDENCE = 0.55;
 
@@ -130,7 +131,10 @@ function formatDispatchMessage(message: ChatRequest["conversation"][number]): st
 }
 
 export function buildDispatchInput(request: ChatRequest): string {
-  const recentMessages = request.conversation.slice(-DISPATCH_MAX_MESSAGES);
+  const historySummary = getHistorySummaryMessage(request.conversation);
+  const recentMessages = request.conversation
+    .filter((message) => !isHistorySummaryMessage(message))
+    .slice(-DISPATCH_MAX_MESSAGES);
   const alreadyHasLatest =
     recentMessages.at(-1)?.role === "user" &&
     recentMessages.at(-1)?.content.trim() === request.content.trim();
@@ -152,6 +156,9 @@ export function buildDispatchInput(request: ChatRequest): string {
   const latestUserRequest = alreadyHasLatest ? recentMessages.at(-1)?.content ?? request.content : request.content;
 
   return [
+    historySummary
+      ? `<compacted_history>\n${historySummary.content.slice(0, DISPATCH_SUMMARY_CHAR_LIMIT)}\n</compacted_history>`
+      : "",
     recentTranscript ? `<recent_conversation>\n${recentTranscript}\n</recent_conversation>` : "",
     `<latest_user_request>\n${latestUserRequest}\n</latest_user_request>`,
     'Return strict JSON only: {"role":"coordinator|advisor|director|inspector","confidence":0.0,"reason":"brief explanation"}',

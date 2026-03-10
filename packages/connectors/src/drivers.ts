@@ -6,6 +6,8 @@ import path from "node:path";
 
 import {
   type ChatAttachment,
+  getHistorySummaryMessage,
+  isHistorySummaryMessage,
   type ConnectorTypeId,
   getProviderCapabilities,
   type ChatMessage,
@@ -545,25 +547,29 @@ function toOpenAiMessages(
     ];
   }
 
-  const recentConversation = conversation.slice(-12);
+  const historySummary = getHistorySummaryMessage(conversation);
+  const recentConversation = conversation.filter((message) => !isHistorySummaryMessage(message)).slice(-12);
   const alreadyHasLatest =
     recentConversation.at(-1)?.role === "user" &&
     recentConversation.at(-1)?.content.trim() === content.trim();
 
   return [
     { role: "system", content: systemContent },
+    ...(historySummary ? [toOpenAiMessage(historySummary)] : []),
     ...recentConversation.map((message) => toOpenAiMessage(message)),
     ...(alreadyHasLatest ? [] : [{ role: "user", content }]),
   ];
 }
 
 function toAnthropicMessages(conversation: ChatMessage[], content: string) {
-  const recentConversation = conversation.slice(-12);
+  const historySummary = getHistorySummaryMessage(conversation);
+  const recentConversation = conversation.filter((message) => !isHistorySummaryMessage(message)).slice(-12);
   const alreadyHasLatest =
     recentConversation.at(-1)?.role === "user" &&
     recentConversation.at(-1)?.content.trim() === content.trim();
 
   return [
+    ...(historySummary ? [toAnthropicMessage(historySummary)] : []),
     ...recentConversation.map((message) => toAnthropicMessage(message)),
     ...(alreadyHasLatest
       ? []
@@ -689,7 +695,8 @@ function formatCliConversation(
     return [...systemParts, `User: ${content}`].join("\n\n");
   }
 
-  const recentConversation = conversation.slice(-10);
+  const historySummary = getHistorySummaryMessage(conversation);
+  const recentConversation = conversation.filter((message) => !isHistorySummaryMessage(message)).slice(-10);
   const alreadyHasLatest =
     recentConversation.at(-1)?.role === "user" &&
     recentConversation.at(-1)?.content.trim() === content.trim();
@@ -702,6 +709,7 @@ function formatCliConversation(
 
   return [
     ...systemParts,
+    ...(historySummary ? [`Conversation memory:\n${historySummary.content}`] : []),
     transcript ? `Conversation so far:\n${transcript}` : "",
     ...(alreadyHasLatest ? [] : [`User: ${content}`]),
     "Respond as the assigned role. Keep the answer direct and user-facing.",
@@ -762,8 +770,8 @@ function buildCodexToolProtocol(tools: ToolDefinition[]): string {
   }
 
   const toolLines = tools.map((tool) => {
-    const fields = Object.entries(tool.inputSchema.properties)
-      .map(([name, spec]) => `${name}: ${spec.type}`)
+    const fields = Object.entries(tool.inputSchema.properties ?? {})
+      .map(([name, spec]) => `${name}: ${typeof spec === "object" && spec !== null && "type" in spec ? String((spec as Record<string, unknown>).type) : "unknown"}`)
       .join(", ");
     return `- ${tool.name}(${fields || "no arguments"}) — ${tool.description}`;
   });

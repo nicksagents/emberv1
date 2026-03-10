@@ -220,7 +220,5 @@ export const projectOverviewTool: EmberTool = {
       },
     },
   },
-  systemPrompt:
-    "project_overview - Get oriented in a repo quickly before searching files or running shell commands.",
   execute,
 };

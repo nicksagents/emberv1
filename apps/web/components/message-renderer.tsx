@@ -1,6 +1,8 @@
-import { Fragment, type ReactNode, useState, useCallback } from "react";
+"use client";
 
-import type { ChatAttachment, ChatMessage } from "@ember/core/client";
+import { Fragment, type ReactNode, useState, useCallback, useEffect, useRef } from "react";
+
+import type { ChatAttachment, ChatMessage, ToolCall } from "@ember/core/client";
 
 type MarkdownBlock =
   | { type: "heading"; level: 1 | 2 | 3 | 4 | 5 | 6; text: string }
@@ -9,6 +11,40 @@ type MarkdownBlock =
   | { type: "blockquote"; blocks: MarkdownBlock[] }
   | { type: "list"; ordered: boolean; items: string[] }
   | { type: "table"; headers: string[]; rows: string[][] };
+
+// Funny loading words that cycle instead of boring "..."
+const FUNNY_LOADING_WORDS = [
+  "Pondering",
+  "Contemplating",
+  "Brainstorming",
+  "Computing",
+  "Calculating",
+  "Processing",
+  "Deciphering",
+  "Analyzing",
+  "Synthesizing",
+  "Formulating",
+  "Constructing",
+  "Architecting",
+  "Orchestrating",
+  "Harmonizing",
+  "Wiggling neurons",
+  "Consulting the oracle",
+  "Summoning ideas",
+  "Aligning chakras",
+  "Brewing thoughts",
+  "Stirring the pot",
+  "Connecting dots",
+  "Chasing rabbits",
+  "Herding cats",
+  "Warming up tensors",
+  "Polishing bits",
+  "Feeding hamsters",
+  "Untangling strings",
+  "Bribing electrons",
+  "Tickling circuits",
+  "Convincing pixels",
+];
 
 function formatMessageTime(value: string): string {
   const date = new Date(value);
@@ -341,6 +377,37 @@ export function StreamingContent({ content }: { content: string }) {
   );
 }
 
+// Funny cycling loader that shows random words instead of boring "..."
+export function FunnyLoader({ className = "" }: { className?: string }) {
+  const [wordIndex, setWordIndex] = useState(() => Math.floor(Math.random() * FUNNY_LOADING_WORDS.length));
+  const [isVisible, setIsVisible] = useState(true);
+
+  useEffect(() => {
+    const wordInterval = setInterval(() => {
+      setIsVisible(false);
+      setTimeout(() => {
+        setWordIndex((prev) => (prev + 1) % FUNNY_LOADING_WORDS.length);
+        setIsVisible(true);
+      }, 150);
+    }, 2000);
+
+    return () => clearInterval(wordInterval);
+  }, []);
+
+  return (
+    <span 
+      className={`funny-loader ${className}`}
+      style={{ 
+        opacity: isVisible ? 1 : 0,
+        transition: "opacity 150ms ease"
+      }}
+    >
+      {FUNNY_LOADING_WORDS[wordIndex]}
+    </span>
+  );
+}
+
+// Collapsible panel for thinking content
 export function ThinkingPanel({
   content,
   live = false,
@@ -354,13 +421,161 @@ export function ThinkingPanel({
   }
 
   return (
-    <details className={`thinking-panel${live ? " live" : ""}`} open>
+    <details className={`reasoning-panel${live ? " live" : ""}`} open={live}>
       <summary>
-        <span>Thinking</span>
-        {live ? <span className="thinking-live-badge">Live</span> : null}
+        <div className="reasoning-panel-header">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 2a10 10 0 1 0 10 10 4 4 0 0 1-5-5 4 4 0 0 1-5-5" />
+            <path d="M8.5 8.5A9.9 9.9 0 0 0 12 21a9.9 9.9 0 0 0 3.5-12.5" />
+          </svg>
+          <span>Thinking</span>
+        </div>
+        {live ? <span className="reasoning-live-badge">Live</span> : null}
+        <div className="reasoning-chevron">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="m6 9 6 6 6-6" />
+          </svg>
+        </div>
       </summary>
-      <div className="thinking-panel-body">
-        <pre className="thinking-content">{trimmed}</pre>
+      <div className="reasoning-panel-body">
+        <pre className="reasoning-content">{trimmed}</pre>
+      </div>
+    </details>
+  );
+}
+
+// Tool call badge/icon mapping
+const TOOL_ICONS: Record<string, string> = {
+  search: "🔍",
+  read: "📄",
+  write: "✏️",
+  edit: "📝",
+  fetch: "🌐",
+  terminal: "💻",
+  bash: "⚡",
+  git: "🌿",
+  file: "📁",
+  default: "🔧",
+};
+
+function getToolIcon(name: string): string {
+  for (const [key, icon] of Object.entries(TOOL_ICONS)) {
+    if (name.toLowerCase().includes(key)) return icon;
+  }
+  return TOOL_ICONS.default;
+}
+
+function formatDuration(startedAt: string, endedAt?: string): string {
+  const start = new Date(startedAt).getTime();
+  const end = endedAt ? new Date(endedAt).getTime() : Date.now();
+  const duration = end - start;
+  
+  if (duration < 1000) return `${duration}ms`;
+  return `${(duration / 1000).toFixed(1)}s`;
+}
+
+// Individual tool call item
+function ToolCallItem({ tool, defaultOpen = false }: { tool: ToolCall; defaultOpen?: boolean }) {
+  const [isOpen, setIsOpen] = useState(defaultOpen);
+  const isRunning = tool.status === "running" || tool.status === "pending";
+  const isError = tool.status === "error";
+  const isComplete = tool.status === "complete";
+
+  return (
+    <div className={`tool-call-item ${tool.status}`}>
+      <button 
+        className="tool-call-header"
+        onClick={() => setIsOpen(!isOpen)}
+        type="button"
+      >
+        <div className="tool-call-icon">
+          {isRunning ? (
+            <span className="tool-spinner" />
+          ) : (
+            <span>{getToolIcon(tool.name)}</span>
+          )}
+        </div>
+        <div className="tool-call-info">
+          <span className="tool-call-name">{tool.name}</span>
+          <span className="tool-call-status">
+            {isRunning && "Running..."}
+            {isComplete && `Done in ${formatDuration(tool.startedAt, tool.endedAt)}`}
+            {isError && "Failed"}
+          </span>
+        </div>
+        <div className={`tool-call-chevron ${isOpen ? "open" : ""}`}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="m6 9 6 6 6-6" />
+          </svg>
+        </div>
+      </button>
+      
+      {isOpen && (
+        <div className="tool-call-body">
+          <div className="tool-call-section">
+            <div className="tool-call-section-title">Arguments</div>
+            <pre className="tool-call-code">
+              {JSON.stringify(tool.arguments, null, 2)}
+            </pre>
+          </div>
+          {tool.result && (
+            <div className="tool-call-section">
+              <div className="tool-call-section-title">Result</div>
+              <pre className={`tool-call-code ${isError ? "error" : ""}`}>
+                {tool.result}
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Collapsible panel for tool calls
+export function ToolCallsPanel({
+  tools,
+  live = false,
+}: {
+  tools: ToolCall[];
+  live?: boolean;
+}) {
+  if (tools.length === 0) {
+    return null;
+  }
+
+  const runningCount = tools.filter((t) => t.status === "running" || t.status === "pending").length;
+  const completedCount = tools.filter((t) => t.status === "complete").length;
+  const errorCount = tools.filter((t) => t.status === "error").length;
+
+  return (
+    <details className={`tools-panel${live ? " live" : ""}`} open={live}>
+      <summary>
+        <div className="tools-panel-header">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
+          </svg>
+          <span>Tools</span>
+          <span className="tools-count">
+            {tools.length} {tools.length === 1 ? "call" : "calls"}
+          </span>
+          {runningCount > 0 && (
+            <span className="tools-status running">{runningCount} running</span>
+          )}
+          {errorCount > 0 && !live && (
+            <span className="tools-status error">{errorCount} failed</span>
+          )}
+        </div>
+        <div className="tools-chevron">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="m6 9 6 6 6-6" />
+          </svg>
+        </div>
+      </summary>
+      <div className="tools-panel-body">
+        {tools.map((tool) => (
+          <ToolCallItem key={tool.id} tool={tool} defaultOpen={live && tool.status === "running"} />
+        ))}
       </div>
     </details>
   );
@@ -450,6 +665,11 @@ export function MessageRenderer({
         
         {/* Thinking panel for assistant */}
         {!isUser && <ThinkingPanel content={message.thinking ?? ""} />}
+        
+        {/* Tool calls panel for assistant */}
+        {!isUser && message.toolCalls && message.toolCalls.length > 0 && (
+          <ToolCallsPanel tools={message.toolCalls} />
+        )}
         
         {/* Message bubble */}
         <div className={`message-bubble ${isUser ? "user" : "assistant"}`}>

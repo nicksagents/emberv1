@@ -98,6 +98,23 @@ export interface ProviderSecrets {
   [providerId: string]: Record<string, string>;
 }
 
+export interface ToolCall {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+  result?: string;
+  status: "pending" | "running" | "complete" | "error";
+  startedAt: string;
+  endedAt?: string;
+}
+
+export interface ChatHistorySummaryMeta {
+  kind: "history-summary";
+  sourceMessageCount: number;
+  sourceToolCallCount: number;
+  generatedAt: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "system" | "assistant";
@@ -106,12 +123,14 @@ export interface ChatMessage {
   content: string;
   attachments?: ChatAttachment[];
   thinking?: string | null;
+  toolCalls?: ToolCall[];
   createdAt: string;
   providerId?: string | null;
   providerName?: string | null;
   modelId?: string | null;
   routedTo?: Role | null;
   blocks?: UiBlock[];
+  historySummary?: ChatHistorySummaryMeta | null;
 }
 
 export interface ChatRequest {
@@ -150,6 +169,10 @@ export type ChatStreamEvent =
   | {
       type: "thinking";
       text: string;
+    }
+  | {
+      type: "toolCall";
+      toolCall: ToolCall;
     }
   | {
       type: "content";
@@ -193,10 +216,18 @@ export interface ConversationSummary {
 export interface ToolDefinition {
   name: string;
   description: string;
+  /**
+   * JSON Schema describing the tool's input parameters.
+   * `properties` accepts the full JSON Schema property definition so MCP tools
+   * with nested types, enums, and anyOf can round-trip without stripping.
+   * The connectors package maps this to `input_schema` (Anthropic) or
+   * `parameters` (OpenAI-compatible) when sending to the LLM API.
+   */
   inputSchema: {
     type: "object";
-    properties: Record<string, { type: string; description: string }>;
+    properties?: Record<string, unknown>;
     required?: string[];
+    [key: string]: unknown;
   };
 }
 

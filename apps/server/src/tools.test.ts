@@ -2,10 +2,20 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 
-import { browserTool } from "./tools/browser.js";
+import { skillManager } from "@ember/core/skills";
+
+// Point the SkillManager at the bundled skills directory so skill injection
+// works in tests exactly as it does at runtime.
+const __testDir = dirname(fileURLToPath(import.meta.url));
+skillManager.initialize({
+  bundledDir: join(__testDir, "..", "..", "..", "skills"),
+});
+
 import { editFileTool, listDirectoryTool, readFileTool, writeFileTool } from "./tools/files.js";
 import { fetchPageTool } from "./tools/fetch-page.js";
 import { gitInspectTool } from "./tools/git-inspect.js";
@@ -238,41 +248,65 @@ test("project_overview summarizes repo structure and scripts", async () => {
   assert.match(result, /Workspace packages:\n- @demo\/web \(apps\/web\)/);
 });
 
-test("browser tool supports snapshot ids and semantic fill hints for auth forms", () => {
-  const properties = browserTool.definition.inputSchema.properties;
-
-  assert.ok("element_id" in properties);
-  assert.ok("label" in properties);
-  assert.ok("placeholder" in properties);
-  assert.ok("name" in properties);
-  assert.match(properties.action.description, /snapshot/);
-  assert.match(properties.action.description, /auth_snapshot/);
-  assert.match(properties.action.description, /auth_fill_email/);
-  assert.match(properties.action.description, /submit_form/);
-  assert.match(browserTool.systemPrompt, /snapshot to get a compact page map/i);
-  assert.match(browserTool.systemPrompt, /element_id/);
-  assert.match(browserTool.systemPrompt, /open_sign_in, auth_snapshot, auth_fill_email, auth_fill_code, and submit_form/i);
-  assert.match(browserTool.systemPrompt, /one-time code \/ OTP widgets/i);
+test("playwright-browser skill documents accessibility-tree workflow and auth patterns", () => {
+  const skill = skillManager.loadSkill("playwright-browser");
+  assert.ok(skill, "playwright-browser skill must exist");
+  assert.match(skill!.body, /browser_navigate/);
+  assert.match(skill!.body, /browser_snapshot/);
+  assert.match(skill!.body, /browser_fill_form/);
+  assert.match(skill!.body, /accessibility tree/i);
+  assert.deepEqual(skill!.roles, ["coordinator", "advisor", "director", "inspector"]);
+  // Auth flow pattern documented
+  assert.match(skill!.body, /browser_fill_form.*fields/is);
 });
 
-test("tool schemas expose small-model-friendly aliases and defaults", () => {
-  assert.ok("file" in readFileTool.definition.inputSchema.properties);
-  assert.ok("text" in searchFilesTool.definition.inputSchema.properties);
-  assert.ok("literal" in searchFilesTool.definition.inputSchema.properties);
-  assert.ok("json" in httpRequestTool.definition.inputSchema.properties);
-  assert.ok("action" in terminalTool.definition.inputSchema.properties);
+test("tool schemas expose small-model-friendly aliases; skills inject correctly by role", () => {
+  assert.ok("file" in (readFileTool.definition.inputSchema.properties ?? {}));
+  assert.ok("text" in (searchFilesTool.definition.inputSchema.properties ?? {}));
+  assert.ok("literal" in (searchFilesTool.definition.inputSchema.properties ?? {}));
+  assert.ok("json" in (httpRequestTool.definition.inputSchema.properties ?? {}));
+  assert.ok("action" in (terminalTool.definition.inputSchema.properties ?? {}));
 
-  const prompt = getToolSystemPrompt([
-    browserTool.definition,
+  // Fake a playwright MCP tool definition to trigger playwright-browser + browser-small-model skills
+  const playwrightNavTool: import("@ember/core").ToolDefinition = {
+    name: "mcp__playwright__browser_navigate",
+    description: "Navigate to a URL",
+    inputSchema: { type: "object", properties: {} },
+  };
+
+  // Without a role: tool-gated skills fire, role-scoped skills do not
+  const promptNoRole = getToolSystemPrompt([
+    playwrightNavTool,
     readFileTool.definition,
     searchFilesTool.definition,
     httpRequestTool.definition,
     terminalTool.definition,
   ]);
 
-  assert.match(prompt, /Small-Model Defaults/);
-  assert.match(prompt, /navigate -> snapshot -> act with element_id -> snapshot/);
-  assert.match(prompt, /search_files with literal=true/);
+  // playwright-browser skill body injected (gated on mcp__playwright__browser_navigate)
+  assert.match(promptNoRole, /Playwright Browser Tools/i);
+  assert.match(promptNoRole, /browser_snapshot/);
+  // Workflow hint for playwright present
+  assert.match(promptNoRole, /navigate.*snapshot/i);
+
+  // With a coordinator role, role-scoped skills are also injected
+  const promptWithRole = getToolSystemPrompt(
+    [
+      playwrightNavTool,
+      readFileTool.definition,
+      searchFilesTool.definition,
+      httpRequestTool.definition,
+      terminalTool.definition,
+    ],
+    "coordinator",
+  );
+
+  // Role-scoped skills injected for coordinator
+  assert.match(promptWithRole, /Loop Prevention/);
+  // browser-small-model injected (coordinator + mcp__playwright__browser_navigate active)
+  assert.match(promptWithRole, /snapshot-first loop/i);
+  // coordinator-behavior skill injected
+  assert.match(promptWithRole, /Coordinator Extended Behavior/);
 });
 
 test("git_inspect reports status and diff stats", async () => {

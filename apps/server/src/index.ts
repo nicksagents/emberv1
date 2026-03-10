@@ -10,6 +10,7 @@ import {
   streamProviderChat,
 } from "@ember/connectors";
 import {
+  compactConversationHistory,
   type ConnectorTypeId,
   ensureDataFiles,
   getProviderCapabilities,
@@ -47,7 +48,13 @@ import {
   routeAutoRequestPolicy,
   type AutoRouteDecision,
 } from "./routing.js";
-import { createToolHandler, getToolsForRole, getToolSystemPrompt, setToolConfig } from "./tools/index.js";
+import { createToolHandler, getToolsForRole, getToolSystemPrompt, registerMcpTools, setToolConfig } from "./tools/index.js";
+import { skillManager } from "@ember/core/skills";
+import { McpClientManager } from "./mcp/mcp-client-manager.js";
+import type { McpConfig } from "@ember/core/mcp";
+import { fileURLToPath } from "node:url";
+import { join, dirname } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
 
 const host = process.env.EMBER_RUNTIME_HOST ?? "0.0.0.0";
 const port = Number(process.env.EMBER_RUNTIME_PORT ?? "3005");
@@ -226,6 +233,18 @@ function resolveBrowserSessionKey(request: ChatRequest): string {
   );
 }
 
+function compactChatRequest(request: ChatRequest): ChatRequest {
+  const result = compactConversationHistory(request.conversation);
+  if (!result.didCompact) {
+    return request;
+  }
+
+  return {
+    ...request,
+    conversation: result.messages,
+  };
+}
+
 interface ExecutionContext {
   mode: ChatMode;
   settings: Awaited<ReturnType<typeof readSettings>>;
@@ -294,7 +313,7 @@ function buildHandoffContext(source: ExecutionContext, targetRole: ExecutionRole
     assignment?.modelId ?? provider?.config.defaultModelId ?? provider?.availableModels[0] ?? null;
   const tools = provider && !provider.capabilities.canUseTools ? [] : getToolsForRole(targetRole);
   const promptStack = getPromptStack(source.settings, targetRole);
-  promptStack.tools = getToolSystemPrompt(tools);
+  promptStack.tools = getToolSystemPrompt(tools, targetRole);
   return {
     ...source,
     activeRole: targetRole,
@@ -397,7 +416,7 @@ async function prepareExecution(request: ChatRequest): Promise<ExecutionContext>
   const provider = providers.find((candidate) => candidate.id === assignment?.providerId) ?? null;
   const tools = provider && !provider.capabilities.canUseTools ? [] : getToolsForRole(activeRole);
   const promptStack = getPromptStack(settings, activeRole);
-  promptStack.tools = getToolSystemPrompt(tools);
+  promptStack.tools = getToolSystemPrompt(tools, activeRole);
   const responseModelId =
     assignment?.modelId ?? provider?.config.defaultModelId ?? provider?.availableModels[0] ?? null;
   const routeNote = routeDecision
@@ -463,13 +482,14 @@ async function persistConversationFromResult(
 async function buildExecution(
   request: ChatRequest,
 ): Promise<ChatExecutionResult> {
-  const context = await prepareExecution(request);
+  const compactedRequest = compactChatRequest(request);
+  const context = await prepareExecution(compactedRequest);
   const provider = context.provider;
   if (!provider || provider.status !== "connected" || !providerCanChat(provider)) {
     resolveExecutionGuard(context);
   }
 
-  if (requestHasImageAttachments(request) && !provider.capabilities.canUseImages) {
+  if (requestHasImageAttachments(compactedRequest) && !provider.capabilities.canUseImages) {
     throw createStatusError(
       409,
       `${provider.name} does not accept image inputs. Switch to an image-capable provider or remove the image.`,
@@ -479,8 +499,8 @@ async function buildExecution(
   const messages: ChatMessage[] = [];
   const visitCounts = new Map<string, number>();
   let currentCtx = context;
-  let currentConversation = request.conversation;
-  let currentContent = request.content;
+  let currentConversation = compactedRequest.conversation;
+  let currentContent = compactedRequest.content;
 
   for (let iteration = 0; iteration < MAX_AGENT_LOOP; iteration++) {
     const iterProvider = currentCtx.provider;
@@ -556,6 +576,46 @@ const app = Fastify({
 });
 
 await ensureDataFiles();
+
+// ── Startup: skills + MCP ─────────────────────────────────────────────────
+const __serverDir = dirname(fileURLToPath(import.meta.url));
+
+// Initialize the SkillManager so skill bodies are available for all roles.
+// Bundled skills live in skills/ at the repo root; user + project overrides
+// are discovered automatically from ~/.ember/skills/ and .ember/skills/.
+skillManager.initialize({
+  bundledDir: join(__serverDir, "..", "..", "..", "skills"),
+});
+
+// Load the built-in default MCP config shipped with the server.
+// Phase 3 populates this with @playwright/mcp. For now it may not exist.
+function loadDefaultMcpConfig(): McpConfig | null {
+  const path = join(__serverDir, "..", "mcp.default.json");
+  if (!existsSync(path)) return null;
+  try {
+    return JSON.parse(readFileSync(path, "utf8")) as McpConfig;
+  } catch {
+    console.warn("[mcp] Could not parse mcp.default.json — skipping default config.");
+    return null;
+  }
+}
+
+// Start MCP servers and register their tools into the Ember tool registry.
+// Failure of individual servers is isolated — the main process continues.
+const mcpManager = new McpClientManager({
+  defaultConfig: loadDefaultMcpConfig(),
+  workspaceDir: process.cwd(),
+});
+
+await mcpManager.start();
+registerMcpTools(mcpManager.getTools());
+
+// Graceful shutdown: close all MCP server subprocesses so we don't leave
+// orphaned child processes behind when the server exits.
+const stopMcp = () => { mcpManager.stop().catch(console.error); };
+process.once("SIGTERM", stopMcp);
+process.once("SIGINT",  stopMcp);
+process.once("exit",    stopMcp);
 
 await app.register(cors, {
   origin: true,
@@ -987,6 +1047,7 @@ app.post("/api/chat", async (request) => {
 
 app.post("/api/chat/stream", async (request, reply) => {
   const body = request.body as ChatRequest;
+  const compactedBody = compactChatRequest(body);
 
   reply.hijack();
   reply.raw.writeHead(200, {
@@ -1018,7 +1079,7 @@ app.post("/api/chat/stream", async (request, reply) => {
   });
 
   try {
-    const context = await prepareExecution(body);
+    const context = await prepareExecution(compactedBody);
 
     if (context.routeDecision) {
       sendStreamEvent(send, {
@@ -1033,7 +1094,7 @@ app.post("/api/chat/stream", async (request, reply) => {
 
     const provider = context.provider;
 
-    if (requestHasImageAttachments(body) && provider && !provider.capabilities.canUseImages) {
+    if (requestHasImageAttachments(compactedBody) && provider && !provider.capabilities.canUseImages) {
       throw createStatusError(
         409,
         `${provider.name} does not accept image inputs. Switch to an image-capable provider or remove the image.`,
@@ -1043,8 +1104,8 @@ app.post("/api/chat/stream", async (request, reply) => {
     const resultMessages: ChatMessage[] = [];
     const streamVisitCounts = new Map<string, number>();
     let streamCtx = context;
-    let streamConversation = [...body.conversation];
-    let streamContent = body.content;
+    let streamConversation = [...compactedBody.conversation];
+    let streamContent = compactedBody.content;
 
     for (let iteration = 0; iteration < MAX_AGENT_LOOP; iteration++) {
       const iterProvider = streamCtx.provider;

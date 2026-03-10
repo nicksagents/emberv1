@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { streamProviderChat } from "../../../packages/connectors/src/drivers";
-import type { PromptStack, Provider, ToolDefinition } from "@ember/core";
+import type { ChatMessage, PromptStack, Provider, ToolDefinition } from "@ember/core";
 
 function makeProvider(): Provider {
   const now = new Date().toISOString();
@@ -268,6 +268,81 @@ test("streamProviderChat does not re-execute an identical structured tool call i
       JSON.stringify((secondMessages as Array<unknown>).at(-1)),
       /Do not repeat the same tool call immediately\./,
     );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("streamProviderChat keeps the compacted history summary in the provider prompt", async () => {
+  const originalFetch = globalThis.fetch;
+  const fetchBodies: Array<Record<string, unknown>> = [];
+  const promptStack: PromptStack = { shared: "", role: "", tools: "" };
+  const now = new Date().toISOString();
+  const conversation: ChatMessage[] = [
+    {
+      id: "summary_1",
+      role: "assistant" as const,
+      authorRole: "coordinator" as const,
+      mode: "auto" as const,
+      content: "Conversation memory summary. Earlier work covered auth migration decisions and tool history.",
+      createdAt: now,
+      historySummary: {
+        kind: "history-summary" as const,
+        sourceMessageCount: 20,
+        sourceToolCallCount: 5,
+        generatedAt: now,
+      },
+    },
+    ...Array.from({ length: 14 }, (_, index): ChatMessage => {
+      const isUser = index % 2 === 0;
+      return {
+        id: `msg_${index}`,
+        role: isUser ? "user" : "assistant",
+        authorRole: isUser ? "user" : "director",
+        mode: "auto" as const,
+        content: `Recent message ${index + 1}`,
+        createdAt: now,
+      };
+    }),
+  ];
+
+  globalThis.fetch = (async (_input, init) => {
+    fetchBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+    return sseResponse([
+      {
+        choices: [
+          {
+            delta: {
+              content: "Provider reply.",
+            },
+          },
+        ],
+      },
+      {
+        choices: [
+          {
+            delta: {},
+            finish_reason: "stop",
+          },
+        ],
+      },
+    ]);
+  }) as typeof fetch;
+
+  try {
+    const result = await streamProviderChat(makeProvider(), {}, {
+      modelId: null,
+      promptStack,
+      conversation,
+      content: "Continue.",
+    }, {});
+
+    assert.equal(result.content, "Provider reply.");
+
+    const firstBody = fetchBodies[0];
+    const messages = firstBody.messages as Array<{ role?: string; content?: unknown }>;
+    assert.ok(Array.isArray(messages));
+    assert.match(String(messages[1]?.content ?? ""), /Conversation memory summary/);
   } finally {
     globalThis.fetch = originalFetch;
   }

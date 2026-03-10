@@ -1,0 +1,18 @@
+{
+  "_comment": "Default MCP servers bundled with Ember. User ~/.ember/mcp.json and project .ember/mcp.json take precedence.",
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@playwright/mcp",
+        "--browser", "chromium",
+        "--viewport-size", "1280x800",
+        "--snapshot-mode", "incremental"
+      ],
+      "roles": ["coordinator", "advisor", "director", "inspector"],
+      "timeout": 60000,
+      "_comment": "Override headless/headed per environment via project .ember/mcp.json. Add --no-sandbox in Docker/CI. Add --caps vision for screenshot-heavy flows."
+    }
+  }
+}
