@@ -1,0 +1,29 @@
+{
+  "id": "react-vite-app",
+  "title": "React + Vite App",
+  "description": "Client-side React application scaffold with a distinctive starter layout and local agent guidance.",
+  "stack": "react",
+  "kind": "app",
+  "tags": ["frontend", "vite", "spa"],
+  "defaults": {
+    "package_manager": "pnpm",
+    "port": 5173
+  },
+  "options": [
+    {
+      "key": "app_title",
+      "label": "App title",
+      "description": "Main title shown in the starter UI.",
+      "type": "string",
+      "required": false,
+      "default": "Signal Board"
+    }
+  ],
+  "setupCommands": ["{{package_manager_install}}"],
+  "followUpCommands": ["{{package_manager_run_dev}}", "{{package_manager_run_build}}"],
+  "entrypoints": ["src/App.tsx", "src/main.tsx", "AGENTS.md"],
+  "directorNotes": [
+    "Turn the starter shell into the requested experience instead of keeping demo cards.",
+    "Preserve Vite + React simplicity and add additional files only when needed."
+  ]
+}

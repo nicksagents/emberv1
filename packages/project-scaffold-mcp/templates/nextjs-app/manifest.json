@@ -1,0 +1,39 @@
+{
+  "id": "nextjs-app",
+  "title": "Next.js App Router Starter",
+  "description": "Full-stack Next.js App Router scaffold with AGENTS guidance and a local Ember skill for future coding passes.",
+  "stack": "nextjs",
+  "kind": "app",
+  "tags": ["frontend", "fullstack", "react", "app-router"],
+  "defaults": {
+    "package_manager": "pnpm",
+    "port": 3000
+  },
+  "options": [
+    {
+      "key": "app_title",
+      "label": "App title",
+      "description": "Human-facing title shown in the landing page and metadata.",
+      "type": "string",
+      "required": false,
+      "default": "Project Dashboard"
+    },
+    {
+      "key": "package_manager",
+      "label": "Package manager",
+      "description": "Package manager used in setup commands and package metadata.",
+      "type": "enum",
+      "required": false,
+      "default": "pnpm",
+      "enumValues": ["pnpm", "npm", "yarn", "bun"]
+    }
+  ],
+  "setupCommands": ["{{package_manager_install}}"],
+  "followUpCommands": ["{{package_manager_run_dev}}", "{{package_manager_run_build}}"],
+  "entrypoints": ["src/app/page.tsx", "src/app/layout.tsx", "AGENTS.md"],
+  "directorNotes": [
+    "Replace the placeholder landing page with the requested product flow.",
+    "Keep App Router conventions intact and add features under src/app.",
+    "Use the local project skill before introducing new framework patterns."
+  ]
+}

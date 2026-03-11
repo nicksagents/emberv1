@@ -1,0 +1,19 @@
+{
+  "id": "node-http-service",
+  "title": "Node HTTP Service",
+  "description": "Plain Node.js service starter without framework lock-in, suited for small APIs or webhooks.",
+  "stack": "node",
+  "kind": "service",
+  "tags": ["backend", "node", "http"],
+  "defaults": {
+    "package_manager": "pnpm",
+    "port": 3000
+  },
+  "setupCommands": ["{{package_manager_install}}"],
+  "followUpCommands": ["{{package_manager_run_dev}}", "{{package_manager_run_test}}"],
+  "entrypoints": ["src/server.js", "AGENTS.md"],
+  "directorNotes": [
+    "Decide deliberately whether to stay on core http or move to a framework after requirements clarify.",
+    "Replace the placeholder routes with the requested API or automation behavior."
+  ]
+}

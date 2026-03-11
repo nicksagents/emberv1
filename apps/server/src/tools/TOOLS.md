@@ -123,6 +123,11 @@ No TypeScript needed. Declare the server in a config file; Ember discovers tools
 The `roles` field controls which Ember roles receive the server's tools in their tool list.
 Omit it (or use `[]`) to make tools callable but not auto-listed for any role.
 
+Bundled defaults currently include:
+
+- `playwright` → browser automation for coordinator/advisor/director/inspector
+- `scaffold` → deterministic project scaffolding for coordinator/director/ops
+
 **2. Tools are auto-discovered** at startup and registered as `mcp__<serverName>__<toolName>`.
 No code changes needed — restart the server to pick up config changes.
 
@@ -167,6 +172,10 @@ Browser automation is provided by the bundled `@playwright/mcp` server and regis
 as `mcp__playwright__browser_*` tools at startup. The table below shows native tools only;
 MCP tools from `mcp.default.json` and user/project overrides are appended at boot.
 
+Project scaffolding is provided by the bundled `@ember/project-scaffold-mcp` server and
+registered as `mcp__scaffold__*`. Coordinator and Director now share that same scaffold
+tool surface; the difference between the roles is execution strategy, not tool access.
+
 | Role        | Native tools                                                                                                              |
 |-------------|---------------------------------------------------------------------------------------------------------------------------|
 | dispatch    | none (classification only)                                                                                                |
@@ -174,7 +183,7 @@ MCP tools from `mcp.default.json` and user/project overrides are appended at boo
 | advisor     | project_overview, git_inspect, list_directory, search_files, read_file, run_terminal_command, web_search, http_request, fetch_page, handoff + MCP |
 | director    | project_overview, git_inspect, list_directory, search_files, read_file, write_file, edit_file, run_terminal_command, web_search, http_request, fetch_page, handoff + MCP |
 | inspector   | project_overview, git_inspect, list_directory, search_files, read_file, run_terminal_command, web_search, http_request, fetch_page, handoff + MCP |
-| ops         | project_overview, git_inspect, list_directory, search_files, read_file, write_file, edit_file, http_request, handoff (no MCP) |
+| ops         | edit_file, delete_file |
 
 ---
 

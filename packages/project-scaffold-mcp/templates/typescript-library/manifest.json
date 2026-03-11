@@ -1,0 +1,18 @@
+{
+  "id": "typescript-library",
+  "title": "TypeScript Library",
+  "description": "Strict TypeScript package scaffold with a narrow public entrypoint and starter tests.",
+  "stack": "typescript",
+  "kind": "library",
+  "tags": ["library", "typescript", "package"],
+  "defaults": {
+    "package_manager": "pnpm"
+  },
+  "setupCommands": ["{{package_manager_install}}"],
+  "followUpCommands": ["{{package_manager_run_build}}", "{{package_manager_run_test}}"],
+  "entrypoints": ["src/index.ts", "test/smoke.test.ts", "AGENTS.md"],
+  "directorNotes": [
+    "Keep the public API intentional and small.",
+    "Replace the placeholder utility with domain-specific behavior and tests."
+  ]
+}

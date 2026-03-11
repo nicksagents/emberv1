@@ -16,7 +16,7 @@ skillManager.initialize({
   bundledDir: join(__testDir, "..", "..", "..", "skills"),
 });
 
-import { editFileTool, listDirectoryTool, readFileTool, writeFileTool } from "./tools/files.js";
+import { deleteFileTool, editFileTool, listDirectoryTool, readFileTool, writeFileTool } from "./tools/files.js";
 import { fetchPageTool } from "./tools/fetch-page.js";
 import { gitInspectTool } from "./tools/git-inspect.js";
 import { httpRequestTool } from "./tools/http-request.js";
@@ -79,6 +79,24 @@ test("write_file can append and edit_file can replace all", async () => {
 
   assert.match(editResult, /2 replacements/);
   assert.equal(final, "a!b!");
+});
+
+test("delete_file removes files and requires recursive flag for directories", async () => {
+  const dir = tempDir();
+  const filePath = path.join(dir, "obsolete.txt");
+  const nestedDir = path.join(dir, "nested");
+  const nestedFile = path.join(nestedDir, "child.txt");
+  writeFileSync(filePath, "old", "utf8");
+  mkdirSync(nestedDir, { recursive: true });
+  writeFileSync(nestedFile, "child", "utf8");
+
+  const fileDelete = expectText(await deleteFileTool.execute({ path: filePath }));
+  const dirDeleteWithoutRecursive = expectText(await deleteFileTool.execute({ path: nestedDir }));
+  const dirDeleteRecursive = expectText(await deleteFileTool.execute({ path: nestedDir, recursive: true }));
+
+  assert.match(fileDelete, /Deleted:/);
+  assert.match(dirDeleteWithoutRecursive, /Set recursive=true/);
+  assert.match(dirDeleteRecursive, /Deleted:/);
 });
 
 test("list_directory supports recursive listing", async () => {
@@ -260,6 +278,25 @@ test("playwright-browser skill documents accessibility-tree workflow and auth pa
   assert.match(skill!.body, /browser_fill_form.*fields/is);
 });
 
+test("project-scaffold skill teaches small roles to scaffold then hand off", () => {
+  const skill = skillManager.loadSkill("project-scaffold");
+  assert.ok(skill, "project-scaffold skill must exist");
+  assert.deepEqual(skill!.roles, ["coordinator", "ops"]);
+  assert.deepEqual(skill!.tools, ["mcp__scaffold__list_templates", "mcp__scaffold__scaffold_project"]);
+  assert.match(skill!.body, /scaffold_project/);
+  assert.match(skill!.body, /hand off to `director`/i);
+});
+
+test("ops cleanup skill exists and generic file skill excludes ops", () => {
+  const opsSkill = skillManager.loadSkill("ops-file-cleanup");
+  const filesSkill = skillManager.loadSkill("files");
+  assert.ok(opsSkill, "ops-file-cleanup skill must exist");
+  assert.ok(filesSkill, "files skill must exist");
+  assert.deepEqual(opsSkill!.roles, ["ops"]);
+  assert.match(opsSkill!.body, /delete_file/);
+  assert.deepEqual(filesSkill!.roles, ["coordinator", "advisor", "director", "inspector"]);
+});
+
 test("tool schemas expose small-model-friendly aliases; skills inject correctly by role", () => {
   assert.ok("file" in (readFileTool.definition.inputSchema.properties ?? {}));
   assert.ok("text" in (searchFilesTool.definition.inputSchema.properties ?? {}));
@@ -273,10 +310,22 @@ test("tool schemas expose small-model-friendly aliases; skills inject correctly 
     description: "Navigate to a URL",
     inputSchema: { type: "object", properties: {} },
   };
+  const scaffoldTool: import("@ember/core").ToolDefinition = {
+    name: "mcp__scaffold__scaffold_project",
+    description: "Create a project from a curated template",
+    inputSchema: { type: "object", properties: {} },
+  };
+  const scaffoldListTool: import("@ember/core").ToolDefinition = {
+    name: "mcp__scaffold__list_templates",
+    description: "List scaffold templates",
+    inputSchema: { type: "object", properties: {} },
+  };
 
   // Without a role: tool-gated skills fire, role-scoped skills do not
   const promptNoRole = getToolSystemPrompt([
     playwrightNavTool,
+    scaffoldTool,
+    scaffoldListTool,
     readFileTool.definition,
     searchFilesTool.definition,
     httpRequestTool.definition,
@@ -288,11 +337,15 @@ test("tool schemas expose small-model-friendly aliases; skills inject correctly 
   assert.match(promptNoRole, /browser_snapshot/);
   // Workflow hint for playwright present
   assert.match(promptNoRole, /navigate.*snapshot/i);
+  // Scaffold workflow hint present
+  assert.match(promptNoRole, /list_templates.*scaffold_project.*director/i);
 
   // With a coordinator role, role-scoped skills are also injected
   const promptWithRole = getToolSystemPrompt(
     [
       playwrightNavTool,
+      scaffoldTool,
+      scaffoldListTool,
       readFileTool.definition,
       searchFilesTool.definition,
       httpRequestTool.definition,
@@ -307,6 +360,19 @@ test("tool schemas expose small-model-friendly aliases; skills inject correctly 
   assert.match(promptWithRole, /snapshot-first loop/i);
   // coordinator-behavior skill injected
   assert.match(promptWithRole, /Coordinator Extended Behavior/);
+  // project-scaffold skill injected for coordinator
+  assert.match(promptWithRole, /Project Scaffolding/);
+  assert.match(promptWithRole, /curated templates/);
+
+  const promptForOps = getToolSystemPrompt(
+    [
+      editFileTool.definition,
+      deleteFileTool.definition,
+    ],
+    "ops",
+  );
+  assert.match(promptForOps, /Ops File Cleanup/);
+  assert.doesNotMatch(promptForOps, /### `read_file`/);
 });
 
 test("git_inspect reports status and diff stats", async () => {

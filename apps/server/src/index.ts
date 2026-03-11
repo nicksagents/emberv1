@@ -687,6 +687,7 @@ function loadDefaultMcpConfig(): McpConfig | null {
     const pkgDir = join(serverNodeModules, ...pkgArg.split("/"));
 
     let cliPath: string | null = null;
+    let sourcePath: string | null = null;
     try {
       const pkgJson = JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf8")) as Record<string, unknown>;
       const bin = pkgJson.bin;
@@ -695,6 +696,10 @@ function loadDefaultMcpConfig(): McpConfig | null {
       } else if (bin && typeof bin === "object") {
         const firstBin = Object.values(bin as Record<string, string>)[0];
         if (firstBin) cliPath = join(pkgDir, firstBin);
+      }
+      const candidateSourcePath = join(pkgDir, "src", "index.ts");
+      if (existsSync(candidateSourcePath)) {
+        sourcePath = candidateSourcePath;
       }
     } catch {
       // package.json not found — not installed locally, leave npx command as-is
@@ -709,6 +714,14 @@ function loadDefaultMcpConfig(): McpConfig | null {
         args: [cliPath, ...cliArgs],
       };
       console.log(`[mcp] resolved "${name}" to local CLI: ${cliPath}`);
+    } else if (sourcePath) {
+      const cliArgs = server.args.filter((a) => a !== "-y" && a !== "--yes" && a !== pkgArg);
+      cfg.mcpServers[name] = {
+        ...server,
+        command: process.execPath,
+        args: ["--import", "tsx", sourcePath, ...cliArgs],
+      };
+      console.log(`[mcp] resolved "${name}" to TypeScript source: ${sourcePath}`);
     }
   }
 

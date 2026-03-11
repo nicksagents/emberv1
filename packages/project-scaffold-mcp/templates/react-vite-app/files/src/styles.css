@@ -1,0 +1,59 @@
+:root {
+  font-family: "Manrope", system-ui, sans-serif;
+  color: #172033;
+  background:
+    radial-gradient(circle at top, rgba(16, 185, 129, 0.25), transparent 30rem),
+    linear-gradient(180deg, #fdf8ef, #ede5d4);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+.frame {
+  min-height: 100vh;
+  width: min(70rem, calc(100vw - 2rem));
+  margin: 0 auto;
+  padding: 3rem 0 4rem;
+}
+
+.masthead,
+.cards article {
+  border-radius: 1.25rem;
+  border: 1px solid rgba(23, 32, 51, 0.08);
+  background: rgba(255, 255, 255, 0.76);
+  box-shadow: 0 20px 60px rgba(23, 32, 51, 0.08);
+}
+
+.masthead {
+  padding: 2rem;
+}
+
+.masthead p,
+.masthead span {
+  margin: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 0.75rem;
+}
+
+.masthead h1 {
+  margin: 0.5rem 0;
+  font-size: clamp(2.4rem, 6vw, 4.2rem);
+}
+
+.cards {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  margin-top: 1rem;
+}
+
+.cards article {
+  padding: 1.25rem;
+  line-height: 1.7;
+}

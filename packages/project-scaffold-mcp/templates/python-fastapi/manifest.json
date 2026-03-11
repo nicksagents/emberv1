@@ -1,0 +1,27 @@
+{
+  "id": "python-fastapi",
+  "title": "Python FastAPI Service",
+  "description": "FastAPI backend starter with basic health routes, tests, and local agent guidance.",
+  "stack": "python",
+  "kind": "api",
+  "tags": ["backend", "api", "fastapi"],
+  "defaults": {
+    "port": 8000
+  },
+  "options": [
+    {
+      "key": "module_name",
+      "label": "Python module name",
+      "description": "Import name for the service package if you want something other than the default slug.",
+      "type": "string",
+      "required": false
+    }
+  ],
+  "setupCommands": ["python3 -m venv .venv", "source .venv/bin/activate", "pip install -e ."],
+  "followUpCommands": ["pytest", "uvicorn app.main:app --reload --port {{port}}"],
+  "entrypoints": ["app/main.py", "tests/test_health.py", "AGENTS.md"],
+  "directorNotes": [
+    "Replace the placeholder health payload with real domain routes and schemas.",
+    "Keep the service thin and typed; add routers only when the first feature warrants it."
+  ]
+}

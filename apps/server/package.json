@@ -14,6 +14,7 @@
   "dependencies": {
     "@ember/connectors": "workspace:*",
     "@ember/core": "workspace:*",
+    "@ember/project-scaffold-mcp": "workspace:*",
     "@ember/prompts": "workspace:*",
     "@fastify/cors": "^11.0.1",
     "@modelcontextprotocol/sdk": "^1.27.1",

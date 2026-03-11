@@ -1,0 +1,11 @@
+{
+  "name": "{{package_name}}",
+  "private": true,
+  "packageManager": "{{package_manager_field}}",
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "test": "node --test"
+  }
+}

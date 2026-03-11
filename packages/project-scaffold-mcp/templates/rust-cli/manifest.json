@@ -1,0 +1,15 @@
+{
+  "id": "rust-cli",
+  "title": "Rust CLI",
+  "description": "Simple Rust command-line starter with a single entrypoint and agent guidance.",
+  "stack": "rust",
+  "kind": "cli",
+  "tags": ["backend", "cli", "rust"],
+  "setupCommands": ["cargo check"],
+  "followUpCommands": ["cargo run", "cargo test"],
+  "entrypoints": ["src/main.rs", "Cargo.toml", "AGENTS.md"],
+  "directorNotes": [
+    "Keep the CLI narrow and explicit before pulling in heavy crates.",
+    "Move logic into modules only after main.rs stops fitting in one screen."
+  ]
+}

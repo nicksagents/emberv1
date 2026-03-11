@@ -1,0 +1,14 @@
+{
+  "name": "{{package_name}}",
+  "private": true,
+  "packageManager": "{{package_manager_field}}",
+  "type": "module",
+  "scripts": {
+    "build": "tsc --project tsconfig.json",
+    "test": "node --import tsx --test test/**/*.test.ts"
+  },
+  "devDependencies": {
+    "tsx": "latest",
+    "typescript": "latest"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "name": "{{package_name}}",
+  "private": true,
+  "packageManager": "{{package_manager_field}}",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js"
+  }
+}

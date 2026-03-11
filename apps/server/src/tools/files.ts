@@ -1,4 +1,4 @@
-import { Dirent, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { Dirent, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 import type { EmberTool } from "./types.js";
@@ -113,6 +113,31 @@ function executeEditFile(input: Record<string, unknown>): string {
     return `Edited: ${filePath} (${replaceAll ? count : 1} replacement${replaceAll || count !== 1 ? "s" : ""})`;
   } catch (err) {
     return `Error editing file: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
+function executeDeleteFile(input: Record<string, unknown>): string {
+  const filePath =
+    typeof input.path === "string" && input.path.trim()
+      ? input.path
+      : typeof input.file === "string"
+        ? input.file
+        : "";
+  const recursive = input.recursive === true;
+
+  if (!filePath.trim()) return "Error: no path provided.";
+
+  console.log(`[tool:delete_file] ${filePath}${recursive ? " (recursive)" : ""}`);
+
+  try {
+    const stats = statSync(filePath);
+    if (stats.isDirectory() && !recursive) {
+      return `Error: ${filePath} is a directory. Set recursive=true to delete directories.`;
+    }
+    rmSync(filePath, { recursive, force: false });
+    return `Deleted: ${filePath}`;
+  } catch (err) {
+    return `Error deleting file: ${err instanceof Error ? err.message : String(err)}`;
   }
 }
 
@@ -327,4 +352,32 @@ export const listDirectoryTool: EmberTool = {
     },
   },
   execute: executeListDirectory,
+};
+
+export const deleteFileTool: EmberTool = {
+  definition: {
+    name: "delete_file",
+    description:
+      "Delete a file at the given path. Can also delete a directory only when recursive=true is set. " +
+      "Use with care for cleanup passes and remove only paths you are confident should be deleted.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Absolute or relative path to the file to delete.",
+        },
+        file: {
+          type: "string",
+          description: "Alias for path.",
+        },
+        recursive: {
+          type: "boolean",
+          description: "Set to true to delete a directory recursively.",
+        },
+      },
+      required: ["path"],
+    },
+  },
+  execute: executeDeleteFile,
 };

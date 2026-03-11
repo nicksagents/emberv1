@@ -1,0 +1,18 @@
+{
+  "id": "javascript-starter",
+  "title": "JavaScript Starter",
+  "description": "Minimal JavaScript starter for scripts or small utilities without a framework commitment.",
+  "stack": "javascript",
+  "kind": "app",
+  "tags": ["javascript", "starter", "script"],
+  "defaults": {
+    "package_manager": "pnpm"
+  },
+  "setupCommands": ["{{package_manager_install}}"],
+  "followUpCommands": ["{{package_manager_run_start}}"],
+  "entrypoints": ["src/index.js", "AGENTS.md"],
+  "directorNotes": [
+    "Decide the real runtime shape early: script, CLI, or small service.",
+    "Replace the placeholder log output with the requested behavior."
+  ]
+}

@@ -5,7 +5,7 @@ import { skillManager } from "@ember/core/skills";
 // See apps/server/mcp.default.json and skills/playwright-browser/SKILL.md.
 // To roll back: re-import browserTool and add it to REGISTRY + ROLE_TOOLS.
 import { fetchPageTool } from "./fetch-page.js";
-import { editFileTool, listDirectoryTool, readFileTool, writeFileTool } from "./files.js";
+import { deleteFileTool, editFileTool, listDirectoryTool, readFileTool, writeFileTool } from "./files.js";
 import { gitInspectTool } from "./git-inspect.js";
 import { handoffTool } from "./handoff.js";
 import { httpRequestTool } from "./http-request.js";
@@ -31,6 +31,7 @@ const REGISTRY: EmberTool[] = [
   readFileTool,
   writeFileTool,
   editFileTool,
+  deleteFileTool,
   webSearchTool,
   httpRequestTool,
   fetchPageTool,
@@ -56,7 +57,7 @@ const ROLE_TOOLS: Record<Role, EmberTool[]> = {
   advisor:     [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, handoffTool],
   director:    [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, handoffTool],
   inspector:   [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, handoffTool],
-  ops:         [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, httpRequestTool, handoffTool],
+  ops:         [editFileTool, deleteFileTool],
 };
 
 // ─── Handoff state ────────────────────────────────────────────────────────────
@@ -198,6 +199,11 @@ export function getToolSystemPrompt(tools: ToolDefinition[], role?: Role): strin
   }
   if (toolNames.has("run_terminal_command")) {
     workflows.push("Use the terminal for commands or interactive workflows only after a narrower tool would not be enough.");
+  }
+  if (toolNames.has("mcp__scaffold__scaffold_project")) {
+    workflows.push(
+      "For new projects: list_templates → get_template_options → scaffold_project → post_setup, then hand off to director for real implementation.",
+    );
   }
 
   // ── Assemble ──────────────────────────────────────────────────────────────

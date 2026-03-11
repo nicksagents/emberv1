@@ -1,6 +1,16 @@
 {
   "_comment": "Default MCP servers bundled with Ember. User ~/.ember/mcp.json and project .ember/mcp.json take precedence.",
   "mcpServers": {
+    "scaffold": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@ember/project-scaffold-mcp"
+      ],
+      "roles": ["coordinator", "director", "ops"],
+      "timeout": 30000,
+      "_comment": "Deterministic project scaffolding for coordinator, director, and ops. Coordinators can scaffold first and then hand off when deeper implementation is needed."
+    },
     "playwright": {
       "command": "npx",
       "args": [

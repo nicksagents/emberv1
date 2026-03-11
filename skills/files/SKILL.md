@@ -1,7 +1,7 @@
 ---
 name: files
 description: File system read, write, edit, and directory listing tools.
-roles: [coordinator, advisor, director, inspector, ops]
+roles: [coordinator, advisor, director, inspector]
 tools: [read_file, write_file, edit_file, list_directory]
 ---
 
