@@ -588,16 +588,64 @@ skillManager.initialize({
 });
 
 // Load the built-in default MCP config shipped with the server.
-// Phase 3 populates this with @playwright/mcp. For now it may not exist.
+// Resolves any `npx -y <pkg>` commands to the locally-installed CLI path so
+// MCP servers start correctly regardless of the working directory (pnpm
+// workspaces installs @playwright/mcp under apps/server/node_modules, not
+// the monorepo root, so plain `npx` from the root won't find it).
 function loadDefaultMcpConfig(): McpConfig | null {
   const path = join(__serverDir, "..", "mcp.default.json");
   if (!existsSync(path)) return null;
+  let cfg: McpConfig;
   try {
-    return JSON.parse(readFileSync(path, "utf8")) as McpConfig;
+    cfg = JSON.parse(readFileSync(path, "utf8")) as McpConfig;
   } catch {
     console.warn("[mcp] Could not parse mcp.default.json — skipping default config.");
     return null;
   }
+
+  // For each server configured with `npx -y <pkg>`, check whether the package
+  // is installed locally under apps/server/node_modules and rewrite the command
+  // to `node <cli-path>` so it bypasses npx resolution entirely.
+  const serverNodeModules = join(__serverDir, "..", "node_modules");
+  for (const [name, server] of Object.entries(cfg.mcpServers)) {
+    if (server.command !== "npx") continue;
+    // Find the package name: first arg that looks like a package (skip flags like -y)
+    const pkgArg = server.args.find((a) => !a.startsWith("-"));
+    if (!pkgArg) continue;
+
+    // Convert @scope/pkg → scope/pkg for filesystem path lookup
+    const pkgPath = pkgArg.startsWith("@")
+      ? pkgArg.slice(1).replace("/", "/")
+      : pkgArg;
+    const pkgDir = join(serverNodeModules, ...pkgArg.split("/"));
+
+    let cliPath: string | null = null;
+    try {
+      const pkgJson = JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf8")) as Record<string, unknown>;
+      const bin = pkgJson.bin;
+      if (typeof bin === "string") {
+        cliPath = join(pkgDir, bin);
+      } else if (bin && typeof bin === "object") {
+        const firstBin = Object.values(bin as Record<string, string>)[0];
+        if (firstBin) cliPath = join(pkgDir, firstBin);
+      }
+    } catch {
+      // package.json not found — not installed locally, leave npx command as-is
+    }
+
+    if (cliPath && existsSync(cliPath)) {
+      // Strip the npx flags and package name, keep the rest as args to the CLI
+      const cliArgs = server.args.filter((a) => a !== "-y" && a !== "--yes" && a !== pkgArg);
+      cfg.mcpServers[name] = {
+        ...server,
+        command: process.execPath, // node
+        args: [cliPath, ...cliArgs],
+      };
+      console.log(`[mcp] resolved "${name}" to local CLI: ${cliPath}`);
+    }
+  }
+
+  return cfg;
 }
 
 // Start MCP servers and register their tools into the Ember tool registry.

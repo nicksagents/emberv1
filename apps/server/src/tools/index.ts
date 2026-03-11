@@ -232,7 +232,29 @@ export async function handleToolCall(
   name: string,
   input: Record<string, unknown>,
 ): Promise<import("@ember/core").ToolResult> {
-  const tool = TOOL_MAP.get(name);
+  let tool = TOOL_MAP.get(name);
+
+  // Alias resolution: local models (e.g. Qwen GGUF) may call MCP tools by their
+  // base name (e.g. "browser_navigate") instead of the full namespaced name
+  // (e.g. "mcp__playwright__browser_navigate"). If the exact name is not found,
+  // scan the registry for a unique tool whose name ends with "__<name>".
+  if (!tool && !name.includes("__")) {
+    const suffix = `__${name}`;
+    const matches: EmberTool[] = [];
+    for (const [registeredName, registeredTool] of TOOL_MAP) {
+      if (registeredName.endsWith(suffix)) {
+        matches.push(registeredTool);
+      }
+    }
+    if (matches.length === 1) {
+      console.log(`[tools] alias resolved: "${name}" → "${matches[0].definition.name}"`);
+      tool = matches[0];
+    } else if (matches.length > 1) {
+      const candidates = matches.map((t) => t.definition.name).join(", ");
+      return `Ambiguous tool name "${name}" — matches multiple registered tools: ${candidates}. Use the full tool name.`;
+    }
+  }
+
   if (!tool) return `Unknown tool: ${name}`;
   return tool.execute(input);
 }

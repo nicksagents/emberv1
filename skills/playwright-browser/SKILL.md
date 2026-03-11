@@ -30,10 +30,10 @@ or visual verification are required. Prefer `http_request` for pure JSON/REST AP
 ### Required workflow — always follow this order
 
 ```
-1. browser_navigate        → go to the target URL
-2. browser_snapshot        → read the accessibility tree; note element refs
-3. browser_click / browser_fill_form / browser_press_key   → act using refs
-4. browser_snapshot        → verify the action succeeded before continuing
+1. mcp__playwright__browser_navigate        → go to the target URL
+2. mcp__playwright__browser_snapshot        → read the accessibility tree; note element refs
+3. mcp__playwright__browser_click / mcp__playwright__browser_fill_form / mcp__playwright__browser_press_key   → act using refs
+4. mcp__playwright__browser_snapshot        → verify the action succeeded before continuing
 ```
 
 Never assume an action succeeded. Always take a fresh snapshot (or verify via
@@ -56,31 +56,31 @@ snapshot:
 
 Use the ref directly in subsequent tool calls:
 ```
-browser_click(ref=5)
-browser_fill_form(fields=[{ref: 8, value: "user@example.com"}])
+mcp__playwright__browser_click(ref=5)
+mcp__playwright__browser_fill_form(fields=[{ref: 8, value: "user@example.com"}])
 ```
 
 ### Auth flows — step-by-step pattern
 
 ```
-1. browser_navigate(url)
-2. browser_snapshot                         ← find the "Sign in" link/button ref
-3. browser_click(ref=N)                     ← open the sign-in form
-4. browser_snapshot                         ← find email and password refs
-5. browser_fill_form(fields=[               ← fill all auth fields in one call
+1. mcp__playwright__browser_navigate(url)
+2. mcp__playwright__browser_snapshot                         ← find the "Sign in" link/button ref
+3. mcp__playwright__browser_click(ref=N)                     ← open the sign-in form
+4. mcp__playwright__browser_snapshot                         ← find email and password refs
+5. mcp__playwright__browser_fill_form(fields=[               ← fill all auth fields in one call
      {ref: emailRef, value: "..."},
      {ref: passwordRef, value: "..."}
    ])
-6. browser_click(ref=submitRef)             ← submit
-7. browser_snapshot or browser_wait_for     ← verify logged in
+6. mcp__playwright__browser_click(ref=submitRef)             ← submit
+7. mcp__playwright__browser_snapshot or mcp__playwright__browser_wait_for     ← verify logged in
 ```
 
 For verification / OTP flows (email code, SMS code):
 ```
-8. browser_snapshot                         ← find the code input ref
-9. browser_fill_form(fields=[{ref: codeRef, value: "123456"}])
-10. browser_click(ref=submitRef)
-11. browser_wait_for(text="Welcome")        ← confirm success
+8. mcp__playwright__browser_snapshot                         ← find the code input ref
+9. mcp__playwright__browser_fill_form(fields=[{ref: codeRef, value: "123456"}])
+10. mcp__playwright__browser_click(ref=submitRef)
+11. mcp__playwright__browser_wait_for(text="Welcome")        ← confirm success
 ```
 
 ### Filling forms efficiently
@@ -89,7 +89,7 @@ For verification / OTP flows (email code, SMS code):
 over calling `browser_click` + `browser_type` per field:
 
 ```json
-browser_fill_form(fields=[
+mcp__playwright__browser_fill_form(fields=[
   {"ref": 8, "value": "alice@example.com"},
   {"ref": 9, "value": "my-password"}
 ])

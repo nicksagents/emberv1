@@ -90,15 +90,23 @@ export class McpClientManager {
   private servers = new Map<string, ActiveServer>();
   private defaultConfig: McpConfig | null;
   private workspaceDir: string;
+  private extraBinDirs: string[];
 
   constructor(options: {
     /** Pre-loaded default config (e.g. from apps/server/mcp.default.json). */
     defaultConfig?: McpConfig | null;
     /** The workspace root used to resolve .ember/mcp.json. Defaults to cwd. */
     workspaceDir?: string;
+    /**
+     * Extra directories to prepend to PATH when spawning MCP subprocesses.
+     * Pass the server package's node_modules/.bin so that `npx` can resolve
+     * locally-installed MCP packages regardless of the working directory.
+     */
+    extraBinDirs?: string[];
   } = {}) {
     this.defaultConfig = options.defaultConfig ?? null;
     this.workspaceDir = options.workspaceDir ?? process.cwd();
+    this.extraBinDirs = options.extraBinDirs ?? [];
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -178,10 +186,22 @@ export class McpClientManager {
     let client: Client;
 
     try {
+      // Build PATH with any extra bin directories prepended so that npx can
+      // resolve locally-installed packages (e.g. @playwright/mcp in the server's
+      // node_modules) even when the working directory is the monorepo root.
+      const extraPath = this.extraBinDirs.join(":");
+      const resolvedPath = extraPath
+        ? [extraPath, process.env.PATH].filter(Boolean).join(":")
+        : (process.env.PATH ?? "");
+
       transport = new StdioClientTransport({
         command: config.command,
         args: config.args,
-        env: { ...process.env, ...(config.env ?? {}) } as Record<string, string>,
+        env: {
+          ...process.env,
+          PATH: resolvedPath,
+          ...(config.env ?? {}),
+        } as Record<string, string>,
       });
 
       client = new Client({ name: "ember", version: "0.1.0" });
