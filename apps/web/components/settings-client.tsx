@@ -11,7 +11,7 @@ import type {
   RuntimeState,
   Settings,
 } from "@ember/core/client";
-import { ROLES } from "@ember/core/client";
+import { isLocalOpenAiCompatibleBaseUrl, ROLES } from "@ember/core/client";
 
 import { clientApiPath } from "../lib/api";
 import { Surface } from "./surface";
@@ -24,6 +24,7 @@ interface ProviderEditorState {
   name: string;
   baseUrl: string;
   defaultModelId: string;
+  contextWindowTokens: string;
   apiKey: string;
 }
 
@@ -382,6 +383,24 @@ function getProviderSummary(provider: ProviderView, modelCount: number): string 
   return "Run a connection check to discover available models.";
 }
 
+function getProviderContextWindowLabel(provider: Provider): string {
+  if (provider.typeId === "codex-cli" || provider.typeId === "anthropic-api") {
+    return "Auto 300k window";
+  }
+
+  if (provider.typeId === "openai-compatible") {
+    if (isLocalOpenAiCompatibleBaseUrl(provider.config.baseUrl)) {
+      return provider.config.contextWindowTokens?.trim()
+        ? `${provider.config.contextWindowTokens.trim()} token window`
+        : "Local default 100k window";
+    }
+
+    return "Auto 300k window";
+  }
+
+  return "Auto";
+}
+
 function deriveProviderName(typeId: ConnectorTypeId, baseUrl: string): string {
   if (typeId === "codex-cli") {
     return "Codex CLI";
@@ -428,6 +447,7 @@ function createProviderEditorState(provider: Provider): ProviderEditorState {
     name: provider.name,
     baseUrl: provider.config.baseUrl ?? PROVIDER_PRESETS["openai-compatible"].baseUrl ?? "",
     defaultModelId: provider.config.defaultModelId ?? "",
+    contextWindowTokens: provider.config.contextWindowTokens ?? "",
     apiKey: "",
   };
 }
@@ -462,6 +482,7 @@ export function SettingsClient({
   const [apiKey, setApiKey] = useState("");
   const [baseUrl, setBaseUrl] = useState(PROVIDER_PRESETS["openai-compatible"].baseUrl ?? "");
   const [defaultModelId, setDefaultModelId] = useState("");
+  const [contextWindowTokens, setContextWindowTokens] = useState("");
   const [creatingProvider, setCreatingProvider] = useState(false);
   const [editingProviderId, setEditingProviderId] = useState<string | null>(null);
   const [providerEditor, setProviderEditor] = useState<ProviderEditorState | null>(null);
@@ -567,6 +588,7 @@ export function SettingsClient({
     setApiKey("");
     setBaseUrl(PROVIDER_PRESETS["openai-compatible"].baseUrl ?? "");
     setDefaultModelId("");
+    setContextWindowTokens("");
   }
 
   function startEditingProvider(provider: Provider) {
@@ -589,6 +611,19 @@ export function SettingsClient({
           ...current.systemPrompts.roles,
           [role]: value,
         },
+      },
+    }));
+  }
+
+  function updateCompressionSetting(
+    key: keyof Settings["compression"],
+    value: number | boolean,
+  ) {
+    setSettings((current) => ({
+      ...current,
+      compression: {
+        ...current.compression,
+        [key]: value,
       },
     }));
   }
@@ -759,6 +794,9 @@ export function SettingsClient({
     try {
       const config: Record<string, string> = {};
       const secrets: Record<string, string> = {};
+      const isLocalEndpoint =
+        provider.typeId === "openai-compatible" &&
+        isLocalOpenAiCompatibleBaseUrl(providerEditor.baseUrl);
 
       if (provider.typeId === "openai-compatible") {
         config.baseUrl = providerEditor.baseUrl.trim();
@@ -768,6 +806,12 @@ export function SettingsClient({
         config.defaultModelId = providerEditor.defaultModelId.trim();
       } else {
         config.defaultModelId = "";
+      }
+
+      if (provider.typeId === "openai-compatible" && isLocalEndpoint) {
+        config.contextWindowTokens = providerEditor.contextWindowTokens.trim();
+      } else {
+        config.contextWindowTokens = "";
       }
 
       if (providerEditor.apiKey.trim()) {
@@ -835,6 +879,9 @@ export function SettingsClient({
     try {
       const config: Record<string, string> = {};
       const secrets: Record<string, string> = {};
+      const isLocalEndpoint =
+        selectedProviderType === "openai-compatible" &&
+        isLocalOpenAiCompatibleBaseUrl(baseUrl.trim());
 
       if (
         selectedProviderType === "codex-cli" &&
@@ -847,6 +894,9 @@ export function SettingsClient({
         config.baseUrl = baseUrl.trim();
         if (defaultModelId.trim()) {
           config.defaultModelId = defaultModelId.trim();
+        }
+        if (isLocalEndpoint && contextWindowTokens.trim()) {
+          config.contextWindowTokens = contextWindowTokens.trim();
         }
         if (apiKey.trim()) {
           secrets.apiKey = apiKey.trim();
@@ -1067,6 +1117,120 @@ export function SettingsClient({
 
                 <section className="settings-block">
                   <div className="settings-block-head">
+                    <h3>Context compression</h3>
+                    <p className="helper-copy">
+                      Use conservative estimated tokens so smaller models keep recent turns verbatim and older context compressed.
+                    </p>
+                  </div>
+                  <div className="settings-inline-grid">
+                    <label className="field">
+                      <span>Compression enabled</span>
+                      <select
+                        value={settings.compression.enabled ? "true" : "false"}
+                        onChange={(event) =>
+                          updateCompressionSetting("enabled", event.target.value === "true")
+                        }
+                      >
+                        <option value="true">Enabled</option>
+                        <option value="false">Disabled</option>
+                      </select>
+                    </label>
+
+                    <label className="field">
+                      <span>Model context window</span>
+                      <input
+                        type="number"
+                        min={4000}
+                        step={1000}
+                        value={settings.compression.contextWindowTokens}
+                        onChange={(event) =>
+                          updateCompressionSetting(
+                            "contextWindowTokens",
+                            Math.max(4000, Number(event.target.value) || 4000),
+                          )
+                        }
+                      />
+                    </label>
+
+                    <label className="field">
+                      <span>Response headroom</span>
+                      <input
+                        type="number"
+                        min={512}
+                        step={500}
+                        value={settings.compression.responseHeadroomTokens}
+                        onChange={(event) =>
+                          updateCompressionSetting(
+                            "responseHeadroomTokens",
+                            Math.max(512, Number(event.target.value) || 512),
+                          )
+                        }
+                      />
+                    </label>
+
+                    <label className="field">
+                      <span>Safety reserve</span>
+                      <input
+                        type="number"
+                        min={512}
+                        step={500}
+                        value={settings.compression.safetyMarginTokens}
+                        onChange={(event) =>
+                          updateCompressionSetting(
+                            "safetyMarginTokens",
+                            Math.max(512, Number(event.target.value) || 512),
+                          )
+                        }
+                      />
+                    </label>
+
+                    <label className="field">
+                      <span>Preferred recent messages</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={24}
+                        value={settings.compression.preserveRecentMessages}
+                        onChange={(event) =>
+                          updateCompressionSetting(
+                            "preserveRecentMessages",
+                            Math.max(1, Number(event.target.value) || 1),
+                          )
+                        }
+                      />
+                    </label>
+
+                    <label className="field">
+                      <span>Minimum recent messages</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={24}
+                        value={settings.compression.minimumRecentMessages}
+                        onChange={(event) =>
+                          updateCompressionSetting(
+                            "minimumRecentMessages",
+                            Math.max(1, Number(event.target.value) || 1),
+                          )
+                        }
+                      />
+                    </label>
+
+                    <div className="settings-inline-note">
+                      <span className="section-label">Recommended</span>
+                      <p>
+                        Derived prompt budget: about {settings.compression.maxPromptTokens.toLocaleString()} max,
+                        targeting {settings.compression.targetPromptTokens.toLocaleString()} after compaction.
+                      </p>
+                      <p>
+                        Ember derives this from window minus response reserve minus safety reserve, then compacts against the real role prompt including tool and skill text.
+                      </p>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="settings-block">
+                  <div className="settings-block-head">
                     <h3>Model discovery</h3>
                     <p className="helper-copy">
                       These rules control how models appear in provider and role pickers.
@@ -1131,6 +1295,7 @@ export function SettingsClient({
                               setSelectedProviderType(preset.typeId);
                               setBaseUrl(preset.baseUrl ?? PROVIDER_PRESETS["openai-compatible"].baseUrl ?? "");
                               setDefaultModelId(preset.defaultModelSuggestion ?? "");
+                              setContextWindowTokens("");
                               setApiKey("");
                               setProviderName(preset.label);
                             }}
@@ -1152,6 +1317,8 @@ export function SettingsClient({
                       const qp = QUICK_PRESETS.find((p) => p.id === selectedQuickPresetId)!;
                       const isCli = selectedProviderType === "codex-cli";
                       const isOpenAI = selectedProviderType === "openai-compatible";
+                      const isLocalEndpoint =
+                        isOpenAI && isLocalOpenAiCompatibleBaseUrl(baseUrl.trim());
                       return (
                         <div className="provider-quick-form">
                           <label className="field">
@@ -1164,14 +1331,33 @@ export function SettingsClient({
                           </label>
 
                           {isOpenAI ? (
-                            <label className="field">
-                              <span>Endpoint URL</span>
-                              <input
-                                value={baseUrl}
-                                onChange={(event) => setBaseUrl(event.target.value)}
-                                placeholder="http://127.0.0.1:11434/v1"
-                              />
-                            </label>
+                            <>
+                              <label className="field">
+                                <span>Endpoint URL</span>
+                                <input
+                                  value={baseUrl}
+                                  onChange={(event) => setBaseUrl(event.target.value)}
+                                  placeholder="http://127.0.0.1:11434/v1"
+                                />
+                              </label>
+                              {isLocalEndpoint ? (
+                                <label className="field">
+                                  <span>Local model context window</span>
+                                  <input
+                                    type="number"
+                                    min={4000}
+                                    step={1000}
+                                    value={contextWindowTokens}
+                                    onChange={(event) => setContextWindowTokens(event.target.value)}
+                                    placeholder="100000"
+                                  />
+                                </label>
+                              ) : (
+                                <div className="provider-quick-note">
+                                  <span>Remote API endpoints use the automatic 300k context window policy.</span>
+                                </div>
+                              )}
+                            </>
                           ) : null}
 
                           {!isCli ? (
@@ -1295,6 +1481,7 @@ export function SettingsClient({
                               <span>{models.length} model{models.length === 1 ? "" : "s"}</span>
                               <span>{canAssign ? "Role ready" : "Needs setup"}</span>
                               {defaultModel ? <span>Default: {defaultModel}</span> : null}
+                              <span>{getProviderContextWindowLabel(provider)}</span>
                             </div>
 
                             {provider.lastError ? (
@@ -1337,20 +1524,48 @@ export function SettingsClient({
                                   </label>
 
                                   {provider.typeId === "openai-compatible" ? (
-                                    <label className="field">
-                                      <span>Endpoint URL</span>
-                                      <input
-                                        value={providerEditor.baseUrl}
-                                        onChange={(event) =>
-                                          setProviderEditor((current) =>
-                                            current
-                                              ? { ...current, baseUrl: event.target.value }
-                                              : current,
-                                          )
-                                        }
-                                        placeholder="http://127.0.0.1:11434/v1"
-                                      />
-                                    </label>
+                                    <>
+                                      <label className="field">
+                                        <span>Endpoint URL</span>
+                                        <input
+                                          value={providerEditor.baseUrl}
+                                          onChange={(event) =>
+                                            setProviderEditor((current) =>
+                                              current
+                                                ? { ...current, baseUrl: event.target.value }
+                                                : current,
+                                            )
+                                          }
+                                          placeholder="http://127.0.0.1:11434/v1"
+                                        />
+                                      </label>
+                                      {isLocalOpenAiCompatibleBaseUrl(providerEditor.baseUrl.trim()) ? (
+                                        <label className="field">
+                                          <span>Local model context window</span>
+                                          <input
+                                            type="number"
+                                            min={4000}
+                                            step={1000}
+                                            value={providerEditor.contextWindowTokens}
+                                            onChange={(event) =>
+                                              setProviderEditor((current) =>
+                                                current
+                                                  ? {
+                                                      ...current,
+                                                      contextWindowTokens: event.target.value,
+                                                    }
+                                                  : current,
+                                              )
+                                            }
+                                            placeholder="100000"
+                                          />
+                                        </label>
+                                      ) : (
+                                        <div className="provider-quick-note">
+                                          <span>Remote API endpoints use the automatic 300k context window policy.</span>
+                                        </div>
+                                      )}
+                                    </>
                                   ) : null}
 
                                   <label className="field">

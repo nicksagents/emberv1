@@ -14,6 +14,8 @@ import {
   type ConnectorTypeId,
   ensureDataFiles,
   getProviderCapabilities,
+  sanitizeProviderConfig,
+  resolveProviderContextWindowTokens,
   readConnectorTypes,
   readConversations,
   readProviderSecrets,
@@ -233,8 +235,19 @@ function resolveBrowserSessionKey(request: ChatRequest): string {
   );
 }
 
-function compactChatRequest(request: ChatRequest): ChatRequest {
-  const result = compactConversationHistory(request.conversation);
+function compactChatRequest(
+  request: ChatRequest,
+  settings: Awaited<ReturnType<typeof readSettings>>,
+  promptStack: ReturnType<typeof getPromptStack>,
+  provider: Provider | null,
+): ChatRequest {
+  const result = compactConversationForContext(
+    request.conversation,
+    request.content,
+    settings,
+    promptStack,
+    provider,
+  );
   if (!result.didCompact) {
     return request;
   }
@@ -245,7 +258,46 @@ function compactChatRequest(request: ChatRequest): ChatRequest {
   };
 }
 
+function compactConversationForContext(
+  conversation: ChatMessage[],
+  content: string,
+  settings: Awaited<ReturnType<typeof readSettings>>,
+  promptStack: ReturnType<typeof getPromptStack>,
+  provider: Provider | null,
+) {
+  const providerContextWindowTokens = resolveProviderContextWindowTokens(provider, settings);
+  const compressionSettings = {
+    ...settings.compression,
+    contextWindowTokens: providerContextWindowTokens,
+    maxPromptTokens: Math.max(
+      1_000,
+      providerContextWindowTokens -
+        settings.compression.responseHeadroomTokens -
+        settings.compression.safetyMarginTokens,
+    ),
+  };
+  compressionSettings.targetPromptTokens = Math.max(
+    1_000,
+    Math.min(
+      compressionSettings.maxPromptTokens,
+      compressionSettings.maxPromptTokens -
+        Math.min(8_000, Math.max(2_000, Math.floor(compressionSettings.maxPromptTokens * 0.12))),
+    ),
+  );
+
+  return compactConversationHistory(conversation, {
+    enabled: compressionSettings.enabled,
+    maxPromptTokens: compressionSettings.maxPromptTokens,
+    targetPromptTokens: compressionSettings.targetPromptTokens,
+    preserveRecentMessages: compressionSettings.preserveRecentMessages,
+    minimumRecentMessages: compressionSettings.minimumRecentMessages,
+    promptStack,
+    currentUserContent: content,
+  });
+}
+
 interface ExecutionContext {
+  compactedRequest: ChatRequest;
   mode: ChatMode;
   settings: Awaited<ReturnType<typeof readSettings>>;
   providers: Provider[];
@@ -403,12 +455,18 @@ async function prepareExecution(request: ChatRequest): Promise<ExecutionContext>
   const assignmentMap = new Map<Role, RoleAssignment>(
     assignments.map((assignment) => [assignment.role, assignment]),
   );
+  const routerAssignment = assignmentMap.get("dispatch");
+  const routerProvider =
+    providers.find((candidate) => candidate.id === routerAssignment?.providerId) ?? null;
 
   setToolConfig({ sudoPassword: settings.sudoPassword ?? "" });
 
+  const dispatchPromptStack = getPromptStack(settings, "dispatch");
+  const routingRequest =
+    mode === "auto" ? compactChatRequest(request, settings, dispatchPromptStack, routerProvider) : request;
   const routeDecision =
     mode === "auto"
-      ? await resolveAutoRouteDecision(request, settings, providers, assignmentMap, secrets)
+      ? await resolveAutoRouteDecision(routingRequest, settings, providers, assignmentMap, secrets)
       : null;
   const routedTo = mode === "auto" ? resolveSpeakingRole(routeDecision?.role ?? null) : null;
   const activeRole = mode === "auto" ? routedTo ?? "coordinator" : resolveSpeakingRole(mode);
@@ -417,6 +475,7 @@ async function prepareExecution(request: ChatRequest): Promise<ExecutionContext>
   const tools = provider && !provider.capabilities.canUseTools ? [] : getToolsForRole(activeRole);
   const promptStack = getPromptStack(settings, activeRole);
   promptStack.tools = getToolSystemPrompt(tools, activeRole);
+  const compactedRequest = compactChatRequest(request, settings, promptStack, provider);
   const responseModelId =
     assignment?.modelId ?? provider?.config.defaultModelId ?? provider?.availableModels[0] ?? null;
   const routeNote = routeDecision
@@ -424,6 +483,7 @@ async function prepareExecution(request: ChatRequest): Promise<ExecutionContext>
     : null;
 
   return {
+    compactedRequest,
     mode,
     settings,
     providers,
@@ -482,8 +542,8 @@ async function persistConversationFromResult(
 async function buildExecution(
   request: ChatRequest,
 ): Promise<ChatExecutionResult> {
-  const compactedRequest = compactChatRequest(request);
-  const context = await prepareExecution(compactedRequest);
+  const context = await prepareExecution(request);
+  const compactedRequest = context.compactedRequest;
   const provider = context.provider;
   if (!provider || provider.status !== "connected" || !providerCanChat(provider)) {
     resolveExecutionGuard(context);
@@ -511,6 +571,13 @@ async function buildExecution(
     }
 
     const handler = createToolHandler({ browserSessionKey: currentCtx.browserSessionKey });
+    const compactedConversation = compactConversationForContext(
+      currentConversation,
+      currentContent,
+      currentCtx.settings,
+      currentCtx.promptStack,
+      iterProvider,
+    ).messages;
     let iterContent: string;
     let iterThinking: string | null;
     let iterModelId: string | null;
@@ -520,7 +587,7 @@ async function buildExecution(
         modelId: currentCtx.assignment?.modelId ?? null,
         promptStack: currentCtx.promptStack,
         role: currentCtx.activeRole,
-        conversation: currentConversation,
+        conversation: compactedConversation,
         content: currentContent,
         tools: currentCtx.tools,
         onToolCall: handler.onToolCall,
@@ -552,7 +619,7 @@ async function buildExecution(
     visitCounts.set(handoff.role, visits);
     console.log(`[loop] ${currentCtx.activeRole} → handoff: ${handoff.role} (visit ${visits})`);
 
-    currentConversation = [...currentConversation, iterMsg];
+    currentConversation = [...compactedConversation, iterMsg];
     currentContent = handoff.message;
     currentCtx = buildHandoffContext(currentCtx, handoff.role as ExecutionRole);
   }
@@ -658,12 +725,47 @@ const mcpManager = new McpClientManager({
 await mcpManager.start();
 registerMcpTools(mcpManager.getTools());
 
-// Graceful shutdown: close all MCP server subprocesses so we don't leave
-// orphaned child processes behind when the server exits.
-const stopMcp = () => { mcpManager.stop().catch(console.error); };
-process.once("SIGTERM", stopMcp);
-process.once("SIGINT",  stopMcp);
-process.once("exit",    stopMcp);
+let shuttingDown = false;
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function shutdown(signal: NodeJS.Signals | "exit"): Promise<void> {
+  if (shuttingDown) {
+    return;
+  }
+  shuttingDown = true;
+
+  await Promise.race([
+    Promise.allSettled([
+      app.close(),
+      mcpManager.stop(),
+    ]),
+    delay(1_500),
+  ]);
+
+  if (signal !== "exit") {
+    process.exit(0);
+  }
+}
+
+// Graceful shutdown: close the Fastify listener and MCP subprocesses so
+// tsx watch restarts and Ctrl-C do not leave the old server bound to 3005.
+process.once("SIGTERM", () => {
+  shutdown("SIGTERM").catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+});
+process.once("SIGINT", () => {
+  shutdown("SIGINT").catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+});
+process.once("exit", () => {
+  void shutdown("exit");
+});
 
 await app.register(cors, {
   origin: true,
@@ -801,7 +903,7 @@ app.post("/api/providers", async (request, reply) => {
     name: body.name.trim(),
     typeId: body.typeId,
     status: "idle",
-    config: body.config ?? {},
+    config: sanitizeProviderConfig(body.typeId, sanitizeRecord(body.config)),
     availableModels: [],
     capabilities: getProviderCapabilities(body.typeId),
     lastError: null,
@@ -812,8 +914,9 @@ app.post("/api/providers", async (request, reply) => {
   providers.unshift(provider);
   await writeProviders(providers);
 
-  if (body.secrets && Object.keys(body.secrets).length > 0) {
-    secrets[provider.id] = body.secrets;
+  const sanitizedSecrets = sanitizeRecord(body.secrets);
+  if (Object.keys(sanitizedSecrets).length > 0) {
+    secrets[provider.id] = sanitizedSecrets;
     await writeProviderSecrets(secrets);
   }
 
@@ -846,10 +949,10 @@ app.put("/api/providers/:id", async (request, reply) => {
     return { error: "Provider name cannot be empty." };
   }
 
-  const nextConfig = {
+  const nextConfig = sanitizeProviderConfig(provider.typeId, {
     ...provider.config,
     ...sanitizeRecord(body?.config),
-  };
+  });
 
   if (body?.config) {
     for (const [key, value] of Object.entries(body.config)) {
@@ -1095,7 +1198,6 @@ app.post("/api/chat", async (request) => {
 
 app.post("/api/chat/stream", async (request, reply) => {
   const body = request.body as ChatRequest;
-  const compactedBody = compactChatRequest(body);
 
   reply.hijack();
   reply.raw.writeHead(200, {
@@ -1127,7 +1229,8 @@ app.post("/api/chat/stream", async (request, reply) => {
   });
 
   try {
-    const context = await prepareExecution(compactedBody);
+    const context = await prepareExecution(body);
+    const compactedBody = context.compactedRequest;
 
     if (context.routeDecision) {
       sendStreamEvent(send, {
@@ -1184,6 +1287,13 @@ app.post("/api/chat/stream", async (request, reply) => {
       }
 
       const handler = createToolHandler({ browserSessionKey: streamCtx.browserSessionKey });
+      const compactedConversation = compactConversationForContext(
+        streamConversation,
+        streamContent,
+        streamCtx.settings,
+        streamCtx.promptStack,
+        iterProvider,
+      ).messages;
       let iterThinking = "";
       let iterContent = "";
 
@@ -1195,7 +1305,7 @@ app.post("/api/chat/stream", async (request, reply) => {
             modelId: streamCtx.assignment?.modelId ?? null,
             promptStack: streamCtx.promptStack,
             role: streamCtx.activeRole,
-            conversation: streamConversation,
+            conversation: compactedConversation,
             content: streamContent,
             tools: streamCtx.tools,
             onToolCall: handler.onToolCall,
@@ -1239,7 +1349,7 @@ app.post("/api/chat/stream", async (request, reply) => {
         streamVisitCounts.set(handoff.role, visits);
         console.log(`[loop] ${streamCtx.activeRole} → handoff: ${handoff.role} (visit ${visits})`);
 
-        streamConversation = [...streamConversation, iterMsg];
+        streamConversation = [...compactedConversation, iterMsg];
         streamContent = handoff.message;
         streamCtx = buildHandoffContext(streamCtx, handoff.role as ExecutionRole);
       } catch (chainError) {

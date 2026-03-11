@@ -9,6 +9,9 @@ import type {
 } from "./types";
 import { ROLES } from "./types";
 
+const REMOTE_PROVIDER_CONTEXT_WINDOW_TOKENS = 300_000;
+const DEFAULT_LOCAL_PROVIDER_CONTEXT_WINDOW_TOKENS = 100_000;
+
 export const defaultConnectorTypes: ConnectorType[] = [
   {
     id: "codex-cli",
@@ -48,6 +51,16 @@ export const defaultSettings = (workspaceRoot: string): Settings => ({
   themePreference: "ember-night",
   tailscaleStatus: "Not configured",
   sudoPassword: "",
+  compression: {
+    enabled: true,
+    contextWindowTokens: 100_000,
+    responseHeadroomTokens: 24_000,
+    safetyMarginTokens: 12_000,
+    maxPromptTokens: 64_000,
+    targetPromptTokens: 56_000,
+    preserveRecentMessages: 6,
+    minimumRecentMessages: 4,
+  },
   systemPrompts: {
     shared: "",
     roles: {
@@ -70,10 +83,55 @@ export function normalizeSettings(
   workspaceRoot: string,
 ): Settings {
   const defaults = defaultSettings(workspaceRoot);
+  const compression = {
+    ...defaults.compression,
+    ...settings.compression,
+  };
+  const contextWindowTokens = Math.max(
+    4_000,
+    Math.floor(compression.contextWindowTokens),
+  );
+  const responseHeadroomTokens = Math.max(
+    512,
+    Math.floor(compression.responseHeadroomTokens),
+  );
+  const safetyMarginTokens = Math.max(
+    512,
+    Math.floor(compression.safetyMarginTokens),
+  );
+  const derivedMaxPromptTokens = Math.max(
+    1_000,
+    contextWindowTokens - responseHeadroomTokens - safetyMarginTokens,
+  );
+  const derivedTargetPromptTokens = Math.max(
+    1_000,
+    Math.min(
+      derivedMaxPromptTokens,
+      derivedMaxPromptTokens - Math.min(8_000, Math.max(2_000, Math.floor(derivedMaxPromptTokens * 0.12))),
+    ),
+  );
+  const preserveRecentMessages = Math.max(
+    1,
+    Math.floor(compression.preserveRecentMessages),
+  );
+  const minimumRecentMessages = Math.max(
+    1,
+    Math.min(preserveRecentMessages, Math.floor(compression.minimumRecentMessages)),
+  );
 
   return {
     ...defaults,
     ...settings,
+    compression: {
+      ...compression,
+      contextWindowTokens,
+      responseHeadroomTokens,
+      safetyMarginTokens,
+      preserveRecentMessages,
+      minimumRecentMessages,
+      maxPromptTokens: derivedMaxPromptTokens,
+      targetPromptTokens: derivedTargetPromptTokens,
+    },
     systemPrompts: {
       ...defaults.systemPrompts,
       ...settings.systemPrompts,
@@ -123,9 +181,101 @@ export function getProviderCapabilities(
 }
 
 export function normalizeProvider(provider: Provider): Provider {
+  const normalizedConfig = sanitizeProviderConfig(provider.typeId, provider.config);
+
   return {
     ...provider,
+    config: normalizedConfig,
     availableModels: provider.availableModels ?? [],
     capabilities: getProviderCapabilities(provider.typeId),
   };
+}
+
+export function isLocalOpenAiCompatibleBaseUrl(baseUrl: string | undefined): boolean {
+  const trimmed = baseUrl?.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  try {
+    const url = new URL(trimmed);
+    const host = url.hostname.toLowerCase();
+    if (
+      host === "localhost" ||
+      host === "0.0.0.0" ||
+      host === "::1" ||
+      host === "127.0.0.1" ||
+      host === "host.docker.internal" ||
+      host.endsWith(".local")
+    ) {
+      return true;
+    }
+
+    if (/^10\./.test(host) || /^192\.168\./.test(host)) {
+      return true;
+    }
+
+    const private172 = host.match(/^172\.(\d{1,3})\./);
+    if (private172) {
+      const second = Number(private172[1]);
+      return second >= 16 && second <= 31;
+    }
+
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+export function isLocalProvider(provider: Provider): boolean {
+  return (
+    provider.typeId === "openai-compatible" &&
+    isLocalOpenAiCompatibleBaseUrl(provider.config.baseUrl)
+  );
+}
+
+export function sanitizeProviderConfig(
+  typeId: ConnectorTypeId,
+  config: Record<string, string> | undefined,
+): Record<string, string> {
+  const normalizedConfig = { ...(config ?? {}) };
+
+  if (typeId !== "openai-compatible") {
+    delete normalizedConfig.contextWindowTokens;
+    return normalizedConfig;
+  }
+
+  if (!isLocalOpenAiCompatibleBaseUrl(normalizedConfig.baseUrl)) {
+    delete normalizedConfig.contextWindowTokens;
+    return normalizedConfig;
+  }
+
+  const parsed = Number(normalizedConfig.contextWindowTokens ?? "");
+  if (Number.isFinite(parsed) && parsed > 0) {
+    normalizedConfig.contextWindowTokens = String(Math.floor(parsed));
+  } else {
+    delete normalizedConfig.contextWindowTokens;
+  }
+
+  return normalizedConfig;
+}
+
+export function resolveProviderContextWindowTokens(
+  provider: Provider | null,
+  settings: Settings,
+): number {
+  if (!provider) {
+    return settings.compression.contextWindowTokens;
+  }
+
+  if (!isLocalProvider(provider)) {
+    return REMOTE_PROVIDER_CONTEXT_WINDOW_TOKENS;
+  }
+
+  const configured = Number(provider.config.contextWindowTokens ?? "");
+  if (Number.isFinite(configured) && configured > 0) {
+    return Math.floor(configured);
+  }
+
+  return DEFAULT_LOCAL_PROVIDER_CONTEXT_WINDOW_TOKENS;
 }

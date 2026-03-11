@@ -17,6 +17,58 @@ const localWebUrl = "http://127.0.0.1:3000";
 const localApiUrl = "http://127.0.0.1:3005";
 const bindHost = process.env.EMBER_BIND_HOST ?? "0.0.0.0";
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isProcessAlive(pid: number | null | undefined): boolean {
+  if (!pid) {
+    return false;
+  }
+
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function sendSignal(pid: number, signal: NodeJS.Signals): void {
+  if (process.platform !== "win32") {
+    try {
+      process.kill(-pid, signal);
+      return;
+    } catch {
+      // Fall through to direct PID signaling.
+    }
+  }
+
+  try {
+    process.kill(pid, signal);
+  } catch {
+    // Ignore stale processes.
+  }
+}
+
+async function terminateProcess(pid: number | null | undefined): Promise<void> {
+  if (!pid || !isProcessAlive(pid)) {
+    return;
+  }
+
+  sendSignal(pid, "SIGTERM");
+  for (let index = 0; index < 10; index += 1) {
+    if (!isProcessAlive(pid)) {
+      return;
+    }
+    await delay(200);
+  }
+
+  if (isProcessAlive(pid)) {
+    sendSignal(pid, "SIGKILL");
+  }
+}
+
 function openLogFile(repoRoot: string, fileName: string): number {
   const target = path.join(repoRoot, "data", fileName);
   return openSync(target, "a");
@@ -59,6 +111,7 @@ function spawnForegroundWithLogs(
     cwd: options.cwd,
     env: options.env,
     stdio: ["ignore", "pipe", "pipe"],
+    detached: process.platform !== "win32",
   });
 
   const prefix = `[${options.label}] `;
@@ -143,13 +196,7 @@ async function stopRuntimeChildren(
   runtime = defaultRuntime(),
 ) {
   for (const pid of [runtime.serverPid, runtime.webPid]) {
-    if (pid) {
-      try {
-        process.kill(pid);
-      } catch {
-        // Ignore stale PIDs.
-      }
-    }
+    await terminateProcess(pid);
   }
   await writeRuntime(defaultRuntime());
 }
@@ -219,13 +266,7 @@ async function runForeground(
     }
     shuttingDown = true;
     for (const child of [server, web]) {
-      if (child.pid) {
-        try {
-          child.kill("SIGTERM");
-        } catch {
-          // Ignore.
-        }
-      }
+      await terminateProcess(child.pid);
     }
     await writeRuntime(defaultRuntime());
   };

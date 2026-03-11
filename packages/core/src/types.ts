@@ -75,6 +75,16 @@ export interface Settings {
   themePreference: string;
   tailscaleStatus: string;
   sudoPassword: string;
+  compression: {
+    enabled: boolean;
+    contextWindowTokens: number;
+    responseHeadroomTokens: number;
+    safetyMarginTokens: number;
+    maxPromptTokens: number;
+    targetPromptTokens: number;
+    preserveRecentMessages: number;
+    minimumRecentMessages: number;
+  };
   systemPrompts: {
     shared: string;
     roles: Record<Role, string>;

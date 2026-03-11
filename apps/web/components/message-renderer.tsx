@@ -76,7 +76,9 @@ function isOrderedListLine(line: string): boolean {
 
 function isTableSeparator(line: string): boolean {
   const trimmed = line.trim();
-  return /^:?-{3,}:?(?:\s*\|\s*:?-{3,}:?)+$/.test(trimmed);
+  // Handle both "|------|------|" and "------|------" formats
+  const withoutPipes = trimmed.replace(/^\|/, "").replace(/\|$/, "");
+  return /^:?-{3,}:?(?:\s*\|\s*:?-{3,}:?)*$/.test(withoutPipes);
 }
 
 function splitTableRow(line: string): string[] {
@@ -360,21 +362,147 @@ export function MessageContent({ content }: { content: string }) {
 }
 
 /**
- * Used during streaming. Renders plain paragraphs split on blank lines — no
- * markdown parsing — so partial tables/lists never flash as raw pipe characters.
- * Once streaming completes the finalized ChatMessage switches to MessageContent.
+ * Parse streaming content into blocks, handling partial/incomplete content gracefully.
+ * Unlike parseMarkdown, this doesn't wait for complete blocks - it formats what it can
+ * and renders partial blocks as plain text with inline formatting.
+ */
+function parseStreamingMarkdown(content: string): MarkdownBlock[] {
+  const lines = content.replace(/\r\n/g, "\n").split("\n");
+  const blocks: MarkdownBlock[] = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const rawLine = lines[index];
+    const line = rawLine.trimEnd();
+    const trimmed = line.trim();
+
+    if (!trimmed) {
+      index += 1;
+      continue;
+    }
+
+    // Code block - only render if we see the closing fence
+    const fenceMatch = trimmed.match(/^```([\w.-]+)?\s*$/);
+    if (fenceMatch) {
+      index += 1;
+      const codeLines: string[] = [];
+      let closed = false;
+      while (index < lines.length) {
+        if (lines[index].trim().startsWith("```")) {
+          closed = true;
+          index += 1;
+          break;
+        }
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+      // Only add as code block if closed, otherwise treat as plain text
+      if (closed) {
+        blocks.push({
+          type: "code",
+          code: codeLines.join("\n"),
+          language: fenceMatch[1] ?? null,
+        });
+      } else {
+        // Partial code block - render as plain text with backticks
+        blocks.push({
+          type: "paragraph",
+          text: "```" + (fenceMatch[1] ?? "") + "\n" + codeLines.join("\n"),
+        });
+      }
+      continue;
+    }
+
+    // Heading - always safe to render immediately
+    const headingMatch = trimmed.match(/^(#{1,6})\s+(.*)$/);
+    if (headingMatch) {
+      blocks.push({
+        type: "heading",
+        level: headingMatch[1].length as 1 | 2 | 3 | 4 | 5 | 6,
+        text: headingMatch[2].trim(),
+      });
+      index += 1;
+      continue;
+    }
+
+    // Table - only render if we have header + separator + at least one row
+    if (isTableStart(lines, index)) {
+      const headers = splitTableRow(lines[index]);
+      const rows: string[][] = [];
+      index += 2; // Skip header and separator
+
+      while (index < lines.length && lines[index].includes("|") && lines[index].trim()) {
+        rows.push(splitTableRow(lines[index]));
+        index += 1;
+      }
+
+      blocks.push({ type: "table", headers, rows });
+      continue;
+    }
+
+    // Blockquote
+    if (/^>\s?/.test(trimmed)) {
+      const quoteLines: string[] = [];
+      while (index < lines.length && /^>\s?/.test(lines[index].trim())) {
+        quoteLines.push(lines[index].trim().replace(/^>\s?/, ""));
+        index += 1;
+      }
+      blocks.push({
+        type: "blockquote",
+        blocks: parseStreamingMarkdown(quoteLines.join("\n")),
+      });
+      continue;
+    }
+
+    // List - render what we have so far, even if incomplete
+    if (isUnorderedListLine(trimmed) || isOrderedListLine(trimmed)) {
+      const ordered = isOrderedListLine(trimmed);
+      const items: string[] = [];
+      while (index < lines.length) {
+        const current = lines[index].trim();
+        if (!current) {
+          break;
+        }
+        // Check if next line starts a new list item
+        if (ordered && !isOrderedListLine(current) && !current.startsWith(" ")) {
+          break;
+        }
+        if (!ordered && !isUnorderedListLine(current) && !current.startsWith(" ")) {
+          break;
+        }
+        items.push(current.replace(ordered ? /^\d+\.\s+/ : /^[-*+]\s+/, ""));
+        index += 1;
+      }
+      blocks.push({ type: "list", ordered, items });
+      continue;
+    }
+
+    // Paragraph - accumulate lines until we hit a block boundary
+    const paragraphLines: string[] = [];
+    while (index < lines.length && !isBlockBoundary(lines, index)) {
+      paragraphLines.push(lines[index].trim());
+      index += 1;
+    }
+    if (paragraphLines.length > 0) {
+      blocks.push({
+        type: "paragraph",
+        text: paragraphLines.join(" "),
+      });
+    }
+  }
+
+  return blocks;
+}
+
+/**
+ * Used during streaming. Formats markdown live while handling partial content gracefully.
+ * - Renders complete blocks (closed code fences, complete tables) with full formatting
+ * - Renders incomplete blocks as plain text with inline formatting
+ * - Always applies inline formatting (bold, italic, code, links)
  */
 export function StreamingContent({ content }: { content: string }) {
-  const paragraphs = content.split(/\n{2,}/);
-  return (
-    <div className="message-markdown">
-      {paragraphs.map((p, i) => (
-        <p key={i} style={{ whiteSpace: "pre-wrap" }}>
-          {p}
-        </p>
-      ))}
-    </div>
-  );
+  const blocks = parseStreamingMarkdown(content);
+  return <div className="message-markdown">{renderBlocks(blocks, "stream")}</div>;
 }
 
 // Funny cycling loader that shows random words instead of boring "..."
@@ -407,6 +535,21 @@ export function FunnyLoader({ className = "" }: { className?: string }) {
   );
 }
 
+// Format thinking content - add newlines after periods if missing
+function formatThinkingContent(content: string): string {
+  // First, normalize any existing newlines
+  let formatted = content.replace(/\r\n/g, '\n');
+  
+  // Add newlines after periods that are followed by capital letters (likely sentence boundaries)
+  // This handles cases where sentences run together: "...there.The page..."
+  formatted = formatted.replace(/\.(?=[A-Z])/g, '.\n');
+  
+  // Also add newlines after periods followed by quotes and capital letters
+  formatted = formatted.replace(/\."(?=[A-Z])/g, '."\n');
+  
+  return formatted;
+}
+
 // Collapsible panel for thinking content
 export function ThinkingPanel({
   content,
@@ -419,6 +562,8 @@ export function ThinkingPanel({
   if (!trimmed) {
     return null;
   }
+
+  const formattedContent = formatThinkingContent(trimmed);
 
   return (
     <details className={`reasoning-panel${live ? " live" : ""}`} open={live}>
@@ -438,7 +583,7 @@ export function ThinkingPanel({
         </div>
       </summary>
       <div className="reasoning-panel-body">
-        <pre className="reasoning-content">{trimmed}</pre>
+        <pre className="reasoning-content">{formattedContent}</pre>
       </div>
     </details>
   );

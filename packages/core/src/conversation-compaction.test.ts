@@ -7,6 +7,12 @@ import {
 } from "./conversation-compaction.js";
 import type { ChatMessage, ToolCall } from "./types.js";
 
+const PROMPT_STACK = {
+  shared: "You are Ember. Keep strong long-term memory.",
+  role: "Act as the coding role for this workspace.",
+  tools: "Tool use is available.",
+};
+
 function makeToolCall(overrides: Partial<ToolCall> = {}): ToolCall {
   return {
     id: `tool_${Math.random().toString(36).slice(2, 8)}`,
@@ -27,20 +33,22 @@ function makeMessage(overrides: Partial<ChatMessage> & Pick<ChatMessage, "id" | 
 }
 
 test("compactConversationHistory preserves recent turns and summarizes tool history", () => {
+  const longBody =
+    "Implement a long-running auth migration without breaking tests. Preserve the API behavior, keep the CLI stable, and remember every tool result and regression note. ";
   const conversation: ChatMessage[] = [
     makeMessage({
       id: "u1",
       role: "user",
       authorRole: "user",
       mode: "auto",
-      content: "Implement a long-running auth migration without breaking tests.",
+      content: longBody.repeat(12),
     }),
     makeMessage({
       id: "a1",
       role: "assistant",
       authorRole: "director",
       mode: "auto",
-      content: "I reviewed the auth flow and mapped the affected files.",
+      content: "I reviewed the auth flow and mapped the affected files. ".repeat(12),
       toolCalls: [makeToolCall()],
     }),
     makeMessage({
@@ -48,14 +56,14 @@ test("compactConversationHistory preserves recent turns and summarizes tool hist
       role: "user",
       authorRole: "user",
       mode: "auto",
-      content: "Please preserve the current CLI behavior and keep tool usage visible.",
+      content: "Please preserve the current CLI behavior and keep tool usage visible. ".repeat(10),
     }),
     makeMessage({
       id: "a2",
       role: "assistant",
       authorRole: "inspector",
       mode: "auto",
-      content: "I validated the current behavior and noted the regression risks.",
+      content: "I validated the current behavior and noted the regression risks. ".repeat(10),
     }),
     makeMessage({
       id: "u3",
@@ -69,7 +77,7 @@ test("compactConversationHistory preserves recent turns and summarizes tool hist
       role: "assistant",
       authorRole: "director",
       mode: "auto",
-      content: "I updated the plan and still need to patch the provider formatting.",
+      content: "I updated the plan and still need to patch the provider formatting. ".repeat(8),
     }),
     makeMessage({
       id: "u4",
@@ -88,8 +96,12 @@ test("compactConversationHistory preserves recent turns and summarizes tool hist
   ];
 
   const result = compactConversationHistory(conversation, {
+    promptStack: PROMPT_STACK,
+    currentUserContent: "Continue the migration without losing earlier context.",
+    maxPromptTokens: 1_200,
+    targetPromptTokens: 700,
     preserveRecentMessages: 4,
-    triggerMessageCount: 6,
+    minimumRecentMessages: 4,
   });
 
   assert.equal(result.didCompact, true);
@@ -106,65 +118,79 @@ test("compactConversationHistory preserves recent turns and summarizes tool hist
   assert.match(summary.content, /Tool and action memory:/);
   assert.match(summary.content, /search_files/);
   assert.equal(summary.historySummary?.sourceMessageCount, 4);
+  assert.ok(result.compactedTokenCount < result.originalTokenCount);
+  assert.ok(result.compactedTokenCount <= 1_200);
 });
 
-test("compactConversationHistory is idempotent once a summary exists", () => {
-  const firstPass = compactConversationHistory(
-    [
+test("compactConversationHistory can roll an existing summary forward with newer history", () => {
+  const conversation: ChatMessage[] = [
+    makeMessage({
+      id: "summary_1",
+      role: "assistant",
+      authorRole: "coordinator",
+      mode: "auto",
+      content:
+        "Conversation memory summary. Goal: migrate auth. Decisions: API behavior stays stable. Open threads: patch provider formatting.",
+      historySummary: {
+        kind: "history-summary",
+        sourceMessageCount: 6,
+        sourceToolCallCount: 2,
+        generatedAt: new Date().toISOString(),
+      },
+    }),
+    ...Array.from({ length: 6 }, (_, index): ChatMessage =>
       makeMessage({
-        id: "u1",
-        role: "user",
-        authorRole: "user",
+        id: `roll_${index}`,
+        role: index % 2 === 0 ? "user" : "assistant",
+        authorRole: index % 2 === 0 ? "user" : "director",
         mode: "auto",
-        content: "First request.",
+        content:
+          `Rolling memory message ${index + 1}. ` +
+          "Keep the prior summary merged forward and preserve old auth decisions. ".repeat(24),
       }),
-      makeMessage({
-        id: "a1",
-        role: "assistant",
-        authorRole: "coordinator",
-        mode: "auto",
-        content: "First answer.",
-      }),
-      makeMessage({
-        id: "u2",
-        role: "user",
-        authorRole: "user",
-        mode: "auto",
-        content: "Second request.",
-      }),
-      makeMessage({
-        id: "a2",
-        role: "assistant",
-        authorRole: "director",
-        mode: "auto",
-        content: "Second answer.",
-      }),
-      makeMessage({
-        id: "u3",
-        role: "user",
-        authorRole: "user",
-        mode: "auto",
-        content: "Third request.",
-      }),
-      makeMessage({
-        id: "a3",
-        role: "assistant",
-        authorRole: "director",
-        mode: "auto",
-        content: "Third answer.",
-      }),
-    ],
-    {
-      preserveRecentMessages: 2,
-      triggerMessageCount: 4,
-    },
-  );
+    ),
+  ];
 
-  const secondPass = compactConversationHistory(firstPass.messages, {
+  const secondPass = compactConversationHistory(conversation, {
+    promptStack: PROMPT_STACK,
+    currentUserContent: "Continue the implementation.",
+    maxPromptTokens: 500,
+    targetPromptTokens: 320,
     preserveRecentMessages: 2,
-    triggerMessageCount: 4,
+    minimumRecentMessages: 2,
   });
 
-  assert.equal(secondPass.didCompact, false);
-  assert.deepEqual(secondPass.messages, firstPass.messages);
+  assert.equal(secondPass.didCompact, true);
+  const summary = getHistorySummaryMessage(secondPass.messages);
+  assert.ok(summary);
+  assert.ok((summary.historySummary?.sourceMessageCount ?? 0) >= 6);
+  assert.match(summary.content, /Prior compacted memory|Open threads|Decisions and completed work/);
+});
+
+test("compactConversationHistory can reduce recent tail down to the configured minimum", () => {
+  const conversation = Array.from({ length: 10 }, (_, index): ChatMessage =>
+    makeMessage({
+      id: `msg_${index}`,
+      role: index % 2 === 0 ? "user" : "assistant",
+      authorRole: index % 2 === 0 ? "user" : "director",
+      mode: "auto",
+      content: `Long message ${index + 1}. ${"Token heavy content. ".repeat(36)}`,
+    }),
+  );
+
+  const result = compactConversationHistory(conversation, {
+    promptStack: PROMPT_STACK,
+    currentUserContent: "Continue with the current task.",
+    maxPromptTokens: 700,
+    targetPromptTokens: 420,
+    preserveRecentMessages: 6,
+    minimumRecentMessages: 4,
+  });
+
+  assert.equal(result.didCompact, true);
+  assert.deepEqual(
+    result.messages.slice(1).map((message) => message.id),
+    ["msg_6", "msg_7", "msg_8", "msg_9"],
+  );
+  assert.ok(result.compactedTokenCount < result.originalTokenCount);
 });

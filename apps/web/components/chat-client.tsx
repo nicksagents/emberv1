@@ -155,13 +155,28 @@ export function ChatClient({
   const autoScrollRef = useRef(true);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
 
-  const scrollToLatest = (behavior: ScrollBehavior = "auto") => {
+  const scrollToLatest = (behavior: ScrollBehavior = "auto", retries = 3) => {
     const scrollEl = messagesScrollRef.current;
-    if (!scrollEl) {
-      return;
-    }
+    
+    if (!scrollEl) return;
 
-    scrollEl.scrollTo({ top: scrollEl.scrollHeight, behavior });
+    const tryScroll = (attempt: number) => {
+      const targetScroll = scrollEl.scrollHeight - scrollEl.clientHeight;
+      scrollEl.scrollTop = targetScroll;
+      
+      // Retry if not at bottom and we have retries left
+      if (scrollEl.scrollTop < targetScroll - 5 && attempt > 0) {
+        setTimeout(() => tryScroll(attempt - 1), 50);
+      }
+    };
+    
+    // Immediate scroll
+    tryScroll(retries);
+    
+    // And another after a frame to catch any layout shifts
+    requestAnimationFrame(() => {
+      tryScroll(retries);
+    });
   };
 
   const assignmentMap = useMemo(
@@ -309,19 +324,18 @@ export function ChatClient({
     setShowScrollToBottom(false);
   }, [selectedConversationId]);
 
+  // Scroll when messages change (but not during streaming since that has its own handler)
   useEffect(() => {
-    if (loadingConversation) {
+    if (loadingConversation || streamingPreview) {
       return;
     }
 
-    if (messages.length === 0 || !autoScrollRef.current) {
+    if (messages.length === 0) {
       return;
     }
 
-    requestAnimationFrame(() => {
-      scrollToLatest("auto");
-    });
-  }, [selectedConversationId, loadingConversation, messages.length]);
+    scrollToLatest("instant");
+  }, [selectedConversationId, loadingConversation, messages.length, streamingPreview]);
 
   useEffect(() => {
     if (!autoScrollRef.current) {
@@ -333,15 +347,15 @@ export function ChatClient({
     });
   }, [messages]);
 
+  // Auto-scroll during streaming - always scroll to show latest content
   useEffect(() => {
-    if (!streamingPreview || !autoScrollRef.current) {
+    if (!streamingPreview) {
       return;
     }
 
-    requestAnimationFrame(() => {
-      scrollToLatest("auto");
-    });
-  }, [streamingPreview]);
+    // Always scroll during streaming, regardless of user scroll position
+    scrollToLatest("instant");
+  });
 
   useEffect(() => {
     if (!roleMenuOpen) {
@@ -406,6 +420,10 @@ export function ChatClient({
     setSending(true);
     autoScrollRef.current = true;
     setShowScrollToBottom(false);
+    
+    // Force scroll to bottom immediately after user message is added
+    scrollToLatest("instant");
+    
     setStreamingPreview({
       content: "",
       thinking: "",

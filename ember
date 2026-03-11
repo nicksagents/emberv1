@@ -68,13 +68,92 @@ WEB_PID=$!
 OPEN_PID=$!
 
 # ── Graceful shutdown ──────────────────────────────────────────────────────
+is_running() {
+  local pid="$1"
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+kill_tree() {
+  local pid="$1"
+  [ -n "$pid" ] || return 0
+
+  local children child
+  children="$(pgrep -P "$pid" 2>/dev/null || true)"
+  for child in $children; do
+    kill_tree "$child"
+  done
+
+  kill "$pid" 2>/dev/null || true
+}
+
+terminate_process() {
+  local pid="$1"
+  [ -n "$pid" ] || return 0
+  is_running "$pid" || return 0
+
+  kill_tree "$pid"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if ! is_running "$pid"; then
+      return 0
+    fi
+    sleep 0.2
+  done
+
+  kill -9 "$pid" 2>/dev/null || true
+}
+
+port_listener_pids() {
+  local port="$1"
+  lsof -nP -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true
+}
+
+is_ember_process() {
+  local pid="$1"
+  local cwd_line
+  cwd_line="$(lsof -nP -a -p "$pid" -d cwd 2>/dev/null | tail -n +2 || true)"
+  [ -n "$cwd_line" ] || return 1
+  [[ "$cwd_line" == *"$ROOT_DIR"* ]]
+}
+
+clear_stale_port() {
+  local port="$1"
+  local label="$2"
+  local pid
+  for pid in $(port_listener_pids "$port"); do
+    if is_ember_process "$pid"; then
+      warn "Clearing stale Ember ${label} listener on port ${port} (pid ${pid})"
+      terminate_process "$pid"
+    fi
+  done
+}
+
+clear_stale_port "$SERVER_PORT" "server"
+clear_stale_port "$WEB_PORT" "web"
+
 cleanup() {
+  trap - INT TERM EXIT
   echo ""
   log "Shutting down Ember..."
-  kill "$SERVER_PID" "$WEB_PID" "$OPEN_PID" 2>/dev/null || true
+  terminate_process "$SERVER_PID"
+  terminate_process "$WEB_PID"
+  terminate_process "$OPEN_PID"
   wait "$SERVER_PID" "$WEB_PID" 2>/dev/null || true
   ok "Stopped."
 }
 trap cleanup INT TERM EXIT
 
-wait "$SERVER_PID" "$WEB_PID"
+while true; do
+  if ! is_running "$SERVER_PID"; then
+    wait "$SERVER_PID" 2>/dev/null || true
+    cleanup
+    exit 1
+  fi
+
+  if ! is_running "$WEB_PID"; then
+    wait "$WEB_PID" 2>/dev/null || true
+    cleanup
+    exit 1
+  fi
+
+  sleep 1
+done
