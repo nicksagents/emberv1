@@ -1,16 +1,78 @@
+import { readSettings } from "@ember/core";
+
 import type { EmberTool } from "./types.js";
+
+interface SearchResult {
+  title: string;
+  snippet: string;
+  url: string;
+}
+
+// ── Brave Search API ────────────────────────────────────────────────────────
+
+interface BraveWebResult {
+  title: string;
+  url: string;
+  description?: string;
+  extra_snippets?: string[];
+}
+
+interface BraveSearchResponse {
+  web?: {
+    results?: BraveWebResult[];
+  };
+  query?: {
+    original?: string;
+  };
+}
+
+async function fetchBraveResults(
+  query: string,
+  maxResults: number,
+  apiKey: string,
+): Promise<SearchResult[]> {
+  const url = new URL("https://api.search.brave.com/res/v1/web/search");
+  url.searchParams.set("q", query);
+  url.searchParams.set("count", String(Math.min(maxResults, 20)));
+  url.searchParams.set("result_filter", "web");
+
+  const res = await fetch(url.toString(), {
+    headers: {
+      Accept: "application/json",
+      "Accept-Encoding": "gzip",
+      "X-Subscription-Token": apiKey,
+    },
+    signal: AbortSignal.timeout(10_000),
+  });
+
+  if (!res.ok) {
+    throw new Error(`Brave Search API returned ${res.status}: ${await res.text()}`);
+  }
+
+  const data = (await res.json()) as BraveSearchResponse;
+  const raw = data.web?.results ?? [];
+
+  return raw.slice(0, maxResults).map((r) => ({
+    title: r.title,
+    url: r.url,
+    snippet: r.description ?? r.extra_snippets?.[0] ?? "",
+  }));
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+function truncateSnippet(text: string, max = 180): string {
+  if (text.length <= max) return text;
+  return text.slice(0, max).replace(/\s+\S*$/, "") + "…";
+}
+
+// ── DuckDuckGo fallback ─────────────────────────────────────────────────────
 
 interface InstantAnswer {
   Answer?: string;
   AbstractText?: string;
   AbstractSource?: string;
   AbstractURL?: string;
-}
-
-interface SearchResult {
-  title: string;
-  snippet: string;
-  url: string;
 }
 
 function normalizeDomain(domain: string): string {
@@ -38,9 +100,7 @@ function stripHtml(html: string): string {
 function parseDdgHtml(html: string, maxResults: number): SearchResult[] {
   const results: SearchResult[] = [];
 
-  // Extract title links — DDG wraps them in <a class="result__a" href="...">
   const titleRegex = /<a[^>]+class="result__a"[^>]+href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g;
-  // Extract snippets — DDG wraps them in <a class="result__snippet" ...>
   const snippetRegex = /<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
 
   const titles: Array<{ url: string; text: string }> = [];
@@ -53,7 +113,6 @@ function parseDdgHtml(html: string, maxResults: number): SearchResult[] {
     const text = stripHtml(m[2] ?? "");
     if (!text) continue;
 
-    // DDG redirects via /l/?uddg=ENCODED_REAL_URL&...
     let url = href;
     const uddg = href.match(/[?&]uddg=([^&]+)/);
     if (uddg) {
@@ -66,7 +125,6 @@ function parseDdgHtml(html: string, maxResults: number): SearchResult[] {
       url = `https://duckduckgo.com${href}`;
     }
 
-    // Skip DDG-internal and ad links
     if (url.includes("duckduckgo.com") && !url.includes("uddg=")) continue;
 
     titles.push({ url, text });
@@ -87,7 +145,7 @@ function parseDdgHtml(html: string, maxResults: number): SearchResult[] {
   return results;
 }
 
-async function fetchInstantAnswer(query: string): Promise<string | null> {
+async function fetchDdgInstantAnswer(query: string): Promise<string | null> {
   try {
     const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
     const res = await fetch(url, {
@@ -109,7 +167,7 @@ async function fetchInstantAnswer(query: string): Promise<string | null> {
   }
 }
 
-async function fetchWebResults(
+async function fetchDdgResults(
   query: string,
   maxResults: number,
   region: string,
@@ -127,31 +185,60 @@ async function fetchWebResults(
   if (!res.ok) throw new Error(`DDG HTML search returned ${res.status}`);
   const html = await res.text();
   const seen = new Set<string>();
-  return parseDdgHtml(html, maxResults * 2).filter((result) => {
-    const key = normalizeDomain(result.url) + "|" + result.title.toLowerCase();
-    if (seen.has(key)) {
-      return false;
-    }
-    seen.add(key);
-    return true;
-  }).slice(0, maxResults);
+  return parseDdgHtml(html, maxResults * 2)
+    .filter((result) => {
+      const key = normalizeDomain(result.url) + "|" + result.title.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, maxResults);
 }
+
+// ── Main execute ────────────────────────────────────────────────────────────
 
 async function execute(input: Record<string, unknown>): Promise<string> {
   const query = typeof input.query === "string" ? input.query.trim() : "";
   const maxResults = typeof input.max_results === "number" ? Math.min(input.max_results, 10) : 6;
   const site = typeof input.site === "string" ? normalizeDomain(input.site) : "";
-  const region = typeof input.region === "string" && input.region.trim() ? input.region.trim() : "us-en";
+  const region =
+    typeof input.region === "string" && input.region.trim() ? input.region.trim() : "us-en";
+
   if (!query) return "Error: no query provided.";
 
   const effectiveQuery = site ? `${query} site:${site}` : query;
 
-  console.log(`[tool:web_search] "${effectiveQuery}" (max ${maxResults}, region ${region})`);
+  // Check for Brave API key in settings
+  const settings = await readSettings();
+  const braveApiKey = settings.braveApiKey?.trim() ?? "";
 
-  // Fire both requests concurrently
+  if (braveApiKey) {
+    // ── Brave Search ──────────────────────────────────────────────────────
+    console.log(`[tool:web_search] Brave "${effectiveQuery}" (max ${maxResults})`);
+    try {
+      const results = await fetchBraveResults(effectiveQuery, maxResults, braveApiKey);
+      if (results.length === 0) {
+        return `No results found for "${query}". Try rephrasing or breaking the query into simpler terms.`;
+      }
+      const items = results
+        .map((r, i) => {
+          const snippet = r.snippet ? `\n   ${truncateSnippet(r.snippet)}` : "";
+          return `${i + 1}. ${r.title}${snippet}\n   ${r.url}`;
+        })
+        .join("\n\n");
+      return `Web results${site ? ` (site:${site})` : ""}:\n\n${items}`;
+    } catch (err) {
+      console.warn(`[tool:web_search] Brave API failed, falling back to DDG: ${err}`);
+      // fall through to DDG below
+    }
+  }
+
+  // ── DuckDuckGo fallback ─────────────────────────────────────────────────
+  console.log(`[tool:web_search] DDG "${effectiveQuery}" (max ${maxResults}, region ${region})`);
+
   const [instant, webResults] = await Promise.allSettled([
-    fetchInstantAnswer(effectiveQuery),
-    fetchWebResults(effectiveQuery, maxResults, region),
+    fetchDdgInstantAnswer(effectiveQuery),
+    fetchDdgResults(effectiveQuery, maxResults, region),
   ]);
 
   const sections: string[] = [];
@@ -163,13 +250,13 @@ async function execute(input: Record<string, unknown>): Promise<string> {
   if (webResults.status === "fulfilled" && webResults.value.length > 0) {
     const items = webResults.value
       .map((r, i) => {
-        const snippet = r.snippet ? `\n   ${r.snippet}` : "";
+        const snippet = r.snippet ? `\n   ${truncateSnippet(r.snippet)}` : "";
         return `${i + 1}. ${r.title}${snippet}\n   ${r.url}`;
       })
       .join("\n\n");
     sections.push(`Web results${site ? ` (site:${site})` : ""}:\n\n${items}`);
   } else if (webResults.status === "rejected") {
-    console.warn(`[tool:web_search] HTML fetch failed: ${webResults.reason}`);
+    console.warn(`[tool:web_search] DDG HTML fetch failed: ${webResults.reason}`);
   }
 
   if (!sections.length) {
@@ -183,27 +270,26 @@ export const webSearchTool: EmberTool = {
   definition: {
     name: "web_search",
     description:
-      "Search the web using DuckDuckGo and return real web results (title, snippet, URL) plus instant answers. " +
-      "Use this to find current information, documentation, news, packages, or anything you are unsure about. " +
-      "After getting results, use fetch_page to read the full content of the most relevant URL.",
+      "Search the web for current information, documentation, news, or packages. " +
+      "Returns titles, snippets, and URLs. Always follow up with fetch_page to read the full content.",
     inputSchema: {
       type: "object",
       properties: {
         query: {
           type: "string",
-          description: "The search query. Be specific — use keywords, not questions.",
+          description: "Search keywords. Specific terms work better than full sentences.",
         },
         max_results: {
           type: "number",
-          description: "Maximum number of web results to return (default 6, max 10).",
+          description: "Number of results to return. Default 6, max 10.",
         },
         site: {
           type: "string",
-          description: "Optional domain filter such as 'docs.openai.com' or 'github.com'.",
+          description: "Limit results to this domain, e.g. 'github.com'.",
         },
         region: {
           type: "string",
-          description: "Optional DuckDuckGo region code such as 'us-en' or 'ca-en'. Default us-en.",
+          description: "Region code, e.g. 'us-en'. Only applies when Brave API is not configured.",
         },
       },
       required: ["query"],

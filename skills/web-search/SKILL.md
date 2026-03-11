@@ -1,35 +1,37 @@
 ---
 name: web-search
-description: Search the web for current or external information. Always follow up with fetch_page.
+description: Search the web for current information. Always follow up with fetch_page to read results.
 roles: [coordinator, advisor, director, inspector]
 tools: [web_search]
 ---
 
 ## Web Search
 
-Use `web_search` for current events, library documentation, error messages, or
-anything that is not in the local codebase.
+**Step 1:** `web_search` — get URLs and snippets.
+**Step 2:** `fetch_page` on the best URL — read the actual content.
 
-### Workflow
+Snippets are never enough. Always fetch the page.
 
-1. `web_search` with a specific query
-2. `fetch_page` on the most relevant result — snippets are never enough evidence
+### Use web_search for
 
-### Writing good queries
+- Current events, release notes, changelogs
+- Documentation for external libraries
+- Error messages that may have known solutions
+- Package names, versions, compatibility
 
-- Use specific, literal terms from the error or topic
-- Wrap exact phrases in `"quotes"` for precise matching
-- Include version numbers when searching for library-specific issues
-- If the first results are unhelpful, rephrase before giving up — try synonyms
-  or remove qualifiers
+### Do not use web_search when
 
-### When to search vs. when not to
+- The answer is already in local files or conversation context
+- You already have the relevant documentation
 
-**Search when:**
-- The question involves current events, release notes, or changelogs
-- You need documentation for an external library
-- You have an error message that may have a known solution
+### Query tips
 
-**Do not search when:**
-- The answer is available from local files or the codebase
-- You already have the necessary documentation in context
+- Use specific keywords, not full sentences
+- Wrap exact phrases in "quotes"
+- Include version numbers for library issues
+- If results are unhelpful, rephrase with different keywords
+
+### After getting results
+
+Use `fetch_page` — not the browser. The browser is only needed if the page
+requires login or JavaScript interaction. `fetch_page` handles all public URLs.

@@ -14,7 +14,6 @@ import type {
 import { isLocalOpenAiCompatibleBaseUrl, ROLES } from "@ember/core/client";
 
 import { clientApiPath } from "../lib/api";
-import { Surface } from "./surface";
 
 interface ProviderView extends Provider {
   connectorType: ConnectorType | null;
@@ -68,7 +67,6 @@ interface QuickPreset {
   id: string;
   label: string;
   tagline: string;
-  iconBg: string;
   typeId: ConnectorTypeId;
   baseUrl?: string;
   apiKeyPlaceholder?: string;
@@ -79,62 +77,56 @@ interface QuickPreset {
 function ProviderIcon({ id }: { id: string }) {
   switch (id) {
     case "claude-api":
-      // Anthropic logo: 5 vertical bars of varying heights
       return (
-        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
-          <rect x="2.5"  y="8"  width="2.6" height="8"  rx="1.3" fill="white" />
-          <rect x="6.8"  y="4"  width="2.6" height="16" rx="1.3" fill="white" />
-          <rect x="11.1" y="2"  width="2.6" height="20" rx="1.3" fill="white" />
-          <rect x="15.4" y="4"  width="2.6" height="16" rx="1.3" fill="white" />
-          <rect x="19.7" y="8"  width="2.6" height="8"  rx="1.3" fill="white" />
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+          <rect x="2.5" y="8" width="2.6" height="8" rx="1.3" fill="currentColor" />
+          <rect x="6.8" y="4" width="2.6" height="16" rx="1.3" fill="currentColor" />
+          <rect x="11.1" y="2" width="2.6" height="20" rx="1.3" fill="currentColor" />
+          <rect x="15.4" y="4" width="2.6" height="16" rx="1.3" fill="currentColor" />
+          <rect x="19.7" y="8" width="2.6" height="8" rx="1.3" fill="currentColor" />
         </svg>
       );
     case "gemini":
-      // Google Gemini: 4-pointed sparkle
       return (
-        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
           <path
             d="M12 2C11.4 6.5 9.2 9.2 6 12c3.2 2.8 5.4 5.5 6 10 .6-4.5 2.8-7.2 6-10-3.2-2.8-5.4-5.5-6-10z"
-            fill="white"
+            fill="currentColor"
           />
         </svg>
       );
     case "kimi":
-      // Moonshot: crescent moon
       return (
-        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
           <path
             d="M21 12.79A9 9 0 1 1 11.21 3a7 7 0 1 0 9.79 9.79z"
-            fill="white"
+            fill="currentColor"
           />
         </svg>
       );
     case "deepseek":
-      // DeepSeek: stylised whale / D shape
       return (
-        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
           <path
             d="M5 5h6a7 7 0 0 1 0 14H5V5zm3.5 3v8H11a3.5 3.5 0 0 0 0-7H8.5z M15.5 16.5a1.5 1.5 0 1 0 3 0 1.5 1.5 0 0 0-3 0z"
-            fill="white"
+            fill="currentColor"
           />
         </svg>
       );
     case "codex":
-      // OpenAI Codex: terminal prompt / code brackets
       return (
-        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
-          <path d="M8 8 4 12l4 4" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-          <path d="M16 8l4 4-4 4" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-          <path d="M14 5l-4 14" stroke="white" strokeWidth="2" strokeLinecap="round" />
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" aria-hidden="true">
+          <path d="M8 8 4 12l4 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          <path d="M16 8l4 4-4 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          <path d="M14 5l-4 14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
         </svg>
       );
     case "local":
-      // Local: server/computer
       return (
-        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
-          <rect x="2" y="3" width="20" height="13" rx="2" stroke="white" strokeWidth="2" />
-          <path d="M8 21h8M12 16v5" stroke="white" strokeWidth="2" strokeLinecap="round" />
-          <circle cx="12" cy="9.5" r="2" fill="white" />
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" aria-hidden="true">
+          <rect x="2" y="3" width="20" height="13" rx="2" stroke="currentColor" strokeWidth="2" />
+          <path d="M8 21h8M12 16v5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+          <circle cx="12" cy="9.5" r="2" fill="currentColor" />
         </svg>
       );
     default:
@@ -147,7 +139,6 @@ const QUICK_PRESETS: QuickPreset[] = [
     id: "claude-api",
     label: "Claude",
     tagline: "Anthropic API",
-    iconBg: "#7b61ff",
     typeId: "anthropic-api",
     apiKeyPlaceholder: "sk-ant-...",
     defaultModelSuggestion: "claude-sonnet-4-5",
@@ -157,7 +148,6 @@ const QUICK_PRESETS: QuickPreset[] = [
     id: "gemini",
     label: "Gemini",
     tagline: "Google AI",
-    iconBg: "#4285f4",
     typeId: "openai-compatible",
     baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai/",
     apiKeyPlaceholder: "AIza...",
@@ -168,7 +158,6 @@ const QUICK_PRESETS: QuickPreset[] = [
     id: "kimi",
     label: "Kimi",
     tagline: "Moonshot AI",
-    iconBg: "#0f2744",
     typeId: "openai-compatible",
     baseUrl: "https://api.moonshot.cn/v1",
     apiKeyPlaceholder: "sk-...",
@@ -179,7 +168,6 @@ const QUICK_PRESETS: QuickPreset[] = [
     id: "deepseek",
     label: "DeepSeek",
     tagline: "DeepSeek AI",
-    iconBg: "#1248cc",
     typeId: "openai-compatible",
     baseUrl: "https://api.deepseek.com/v1",
     apiKeyPlaceholder: "sk-...",
@@ -190,7 +178,6 @@ const QUICK_PRESETS: QuickPreset[] = [
     id: "codex",
     label: "Codex",
     tagline: "CLI · browser login",
-    iconBg: "#10a37f",
     typeId: "codex-cli",
     apiKeyRequired: false,
   },
@@ -198,7 +185,6 @@ const QUICK_PRESETS: QuickPreset[] = [
     id: "local",
     label: "Local",
     tagline: "Ollama · LM Studio",
-    iconBg: "#2d8a4e",
     typeId: "openai-compatible",
     baseUrl: "http://127.0.0.1:11434/v1",
     apiKeyRequired: false,
@@ -242,22 +228,22 @@ const SETTINGS_PANELS: Array<{
   {
     id: "general",
     label: "General",
-    description: "Profile and workspace defaults",
+    description: "Profile and workspace",
   },
   {
     id: "providers",
     label: "Providers",
-    description: "Connections and model discovery",
+    description: "Connections and models",
   },
   {
     id: "roles",
     label: "Roles",
-    description: "Provider and model routing",
+    description: "Provider routing",
   },
   {
     id: "prompts",
     label: "Prompts",
-    description: "System prompt overrides",
+    description: "System overrides",
   },
 ];
 
@@ -318,29 +304,23 @@ function getProviderModels(
 function getStatusLabel(provider: Provider, modelCount: number): string {
   if (provider.status === "connected") {
     if (modelCount > 0 && provider.capabilities.canChat) {
-      return `${modelCount} discovered models`;
+      return `${modelCount} models`;
     }
-
     if (modelCount > 0 && !provider.capabilities.canChat) {
-      return `${modelCount} discovered models, role execution pending`;
+      return `${modelCount} models, pending`;
     }
-
     return "Connected";
   }
-
   if (provider.status === "needs-auth") {
-    return "Authentication required";
+    return "Auth required";
   }
-
   if (provider.status === "missing") {
-    return "Local connector not installed";
+    return "Not installed";
   }
-
   if (provider.status === "error") {
-    return "Connection error";
+    return "Error";
   }
-
-  return "Not checked yet";
+  return "Unchecked";
 }
 
 function getProviderTypeLabel(provider: ProviderView): string {
@@ -351,53 +331,44 @@ function getProviderAuthLabel(provider: Provider): string {
   if (provider.typeId === "codex-cli") {
     return "Local CLI session";
   }
-
-  return provider.capabilities.requiresBrowserAuth ? "Browser sign-in" : "API key / endpoint";
+  return provider.capabilities.requiresBrowserAuth ? "Browser sign-in" : "API key";
 }
 
 function getProviderSummary(provider: ProviderView, modelCount: number): string {
   if (provider.status === "connected") {
     if (modelCount > 0) {
       return provider.capabilities.canChat
-        ? "Connected and ready to use."
-        : "Connected. Models found, but chat is not available yet.";
+        ? "Connected and ready to use"
+        : "Connected. Models found, chat pending";
     }
-
-    return "Connected. Refresh after authentication to discover models.";
+    return "Connected. Refresh after authentication";
   }
-
   if (provider.status === "needs-auth") {
     return provider.capabilities.requiresBrowserAuth
-      ? "Finish sign-in to discover models."
-      : "Add credentials and refresh to discover models.";
+      ? "Finish sign-in to discover models"
+      : "Add credentials and refresh";
   }
-
   if (provider.status === "missing") {
-    return "Install the required local connector on this machine.";
+    return "Install the required local connector";
   }
-
   if (provider.status === "error") {
-    return "Connection check failed. Review the error below.";
+    return "Connection check failed";
   }
-
-  return "Run a connection check to discover available models.";
+  return "Run a connection check to discover models";
 }
 
 function getProviderContextWindowLabel(provider: Provider): string {
   if (provider.typeId === "codex-cli" || provider.typeId === "anthropic-api") {
     return "Auto 300k window";
   }
-
   if (provider.typeId === "openai-compatible") {
     if (isLocalOpenAiCompatibleBaseUrl(provider.config.baseUrl)) {
       return provider.config.contextWindowTokens?.trim()
-        ? `${provider.config.contextWindowTokens.trim()} token window`
-        : "Local default 100k window";
+        ? `${provider.config.contextWindowTokens.trim()} tokens`
+        : "Local default 100k";
     }
-
     return "Auto 300k window";
   }
-
   return "Auto";
 }
 
@@ -405,11 +376,9 @@ function deriveProviderName(typeId: ConnectorTypeId, baseUrl: string): string {
   if (typeId === "codex-cli") {
     return "Codex CLI";
   }
-
   if (typeId === "anthropic-api") {
     return "Anthropic API";
   }
-
   try {
     const url = new URL(baseUrl);
     if (/^(localhost|127\.0\.0\.1|0\.0\.0\.0)$/i.test(url.hostname)) {
@@ -429,7 +398,6 @@ function formatStartedAt(value: string | null): string {
   if (!value) {
     return "Not running";
   }
-
   try {
     return new Intl.DateTimeFormat(undefined, {
       month: "short",
@@ -472,9 +440,7 @@ export function SettingsClient({
   const [assignments, setAssignments] = useState(initialAssignments);
   const [savingWorkspace, setSavingWorkspace] = useState(false);
   const [busyProviderId, setBusyProviderId] = useState<string | null>(null);
-  const [notice, setNotice] = useState<{ tone: "success" | "danger"; message: string } | null>(
-    null,
-  );
+  const [notice, setNotice] = useState<{ tone: "success" | "danger"; message: string } | null>(null);
 
   const [showAddProvider, setShowAddProvider] = useState(false);
   const [selectedProviderType, setSelectedProviderType] = useState<ConnectorTypeId | null>(null);
@@ -542,8 +508,7 @@ export function SettingsClient({
   }, [providerModelsMap, providers]);
 
   const selectedCliModels =
-    selectedProviderType &&
-    selectedProviderType === "codex-cli"
+    selectedProviderType && selectedProviderType === "codex-cli"
       ? normalizeModels(modelCatalog[selectedProviderType] ?? [])
       : [];
 
@@ -883,10 +848,7 @@ export function SettingsClient({
         selectedProviderType === "openai-compatible" &&
         isLocalOpenAiCompatibleBaseUrl(baseUrl.trim());
 
-      if (
-        selectedProviderType === "codex-cli" &&
-        defaultModelId.trim()
-      ) {
+      if (selectedProviderType === "codex-cli" && defaultModelId.trim()) {
         config.defaultModelId = defaultModelId.trim();
       }
 
@@ -976,6 +938,7 @@ export function SettingsClient({
 
   return (
     <div className="settings-page">
+      {/* Topbar */}
       <div className="topbar chat-topbar settings-topbar">
         <div className="chat-topbar-inner">
           <button
@@ -1006,22 +969,9 @@ export function SettingsClient({
         </div>
       </div>
 
-      <div className="settings-shell settings-shell-minimal">
-        <div className="settings-page-head">
-          <div>
-            <h1>Settings</h1>
-            <p className="helper-copy">
-              Smaller, quieter controls for providers, routing, and prompts.
-            </p>
-          </div>
-          <button className="button primary" onClick={saveWorkspace} disabled={savingWorkspace}>
-            {savingWorkspace ? "Saving..." : "Save Changes"}
-          </button>
-        </div>
-
-        {notice ? <div className={`notice-strip ${notice.tone}`}>{notice.message}</div> : null}
-
-        <div className="settings-minimal-layout">
+      <div className="settings-shell">
+        <div className="settings-layout-wrapper">
+          {/* Navigation Rail */}
           <nav className="settings-rail" aria-label="Settings sections">
             {SETTINGS_PANELS.map((panel) => (
               <button
@@ -1036,252 +986,268 @@ export function SettingsClient({
             ))}
           </nav>
 
+          {/* Content Area */}
           <div className="settings-content">
-            {activePanel === "general" ? (
-              <Surface className="settings-pane">
+            {/* Notice */}
+            {notice ? <div className={`notice-strip ${notice.tone}`}>{notice.message}</div> : null}
+
+            {/* General Panel */}
+            {activePanel === "general" && (
+              <div className="settings-pane">
                 <div className="settings-pane-head">
                   <div>
                     <h2>General</h2>
-                    <p className="helper-copy">
-                      Workspace identity, runtime status, and default operator information.
-                    </p>
+                    <p className="helper-copy">Workspace identity, runtime status, and defaults.</p>
                   </div>
+                  <button className="button primary" onClick={saveWorkspace} disabled={savingWorkspace}>
+                    {savingWorkspace ? "Saving..." : "Save Changes"}
+                  </button>
                 </div>
 
+                {/* Profile Section */}
                 <section className="settings-block">
                   <div className="settings-block-head">
                     <h3>Profile</h3>
                     <p className="helper-copy">How Ember should refer to you inside chat.</p>
                   </div>
-                  <div className="settings-inline-grid">
-                    <label className="field">
-                      <span>Your name</span>
-                      <input
-                        value={settings.humanName}
-                        onChange={(event) =>
-                          setSettings((current) => ({ ...current, humanName: event.target.value }))
-                        }
-                        placeholder="How Ember should address you"
-                      />
-                    </label>
-                    <label className="field">
-                      <span>Sudo password</span>
-                      <input
-                        type="password"
-                        value={settings.sudoPassword ?? ""}
-                        onChange={(event) =>
-                          setSettings((current) => ({ ...current, sudoPassword: event.target.value }))
-                        }
-                        placeholder="Used for commands that need elevated access"
-                        autoComplete="new-password"
-                      />
-                    </label>
-                    <div className="settings-inline-note">
-                      <span className="section-label">Overview</span>
-                      <p>{connectedProviders.length} connected providers</p>
-                      <p>
-                        {assignedRoleCount}/{assignments.length} roles assigned
-                      </p>
+                  <div className="settings-block-content">
+                    <div className="settings-field-row">
+                      <div className="settings-field">
+                        <label>Your name</label>
+                        <input
+                          value={settings.humanName}
+                          onChange={(e) =>
+                            setSettings((c) => ({ ...c, humanName: e.target.value }))
+                          }
+                          placeholder="Your name"
+                        />
+                      </div>
+                      <div className="settings-field">
+                        <label>Sudo password</label>
+                        <input
+                          type="password"
+                          value={settings.sudoPassword ?? ""}
+                          onChange={(e) =>
+                            setSettings((c) => ({ ...c, sudoPassword: e.target.value }))
+                          }
+                          placeholder="For elevated commands"
+                          autoComplete="new-password"
+                        />
+                      </div>
+                    </div>
+                    <div className="settings-stats-grid" style={{ padding: 0 }}>
+                      <div className="settings-stat-card">
+                        <strong>{connectedProviders.length}</strong>
+                        <span className="settings-stat-label">Connected Providers</span>
+                      </div>
+                      <div className="settings-stat-card">
+                        <strong>{assignedRoleCount}/{assignments.length}</strong>
+                        <span className="settings-stat-label">Roles Assigned</span>
+                      </div>
                     </div>
                   </div>
                 </section>
 
+                {/* Search Section */}
+                <section className="settings-block">
+                  <div className="settings-block-head">
+                    <h3>Search</h3>
+                    <p className="helper-copy">
+                      Brave Search API for structured web results.{" "}
+                      <a href="https://brave.com/search/api/" target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>
+                        Get a free API key
+                      </a>
+                    </p>
+                  </div>
+                  <div className="settings-block-content">
+                    <div className="settings-field" style={{ maxWidth: "400px" }}>
+                      <label>Brave Search API key</label>
+                      <input
+                        type="password"
+                        value={settings.braveApiKey ?? ""}
+                        onChange={(e) =>
+                          setSettings((c) => ({ ...c, braveApiKey: e.target.value }))
+                        }
+                        placeholder="BSA..."
+                        autoComplete="new-password"
+                      />
+                    </div>
+                    <div className="settings-info-note" style={{ maxWidth: "400px" }}>
+                      <span className="label">Status</span>
+                      <p>{settings.braveApiKey?.trim() ? "Brave Search active" : "Using DuckDuckGo fallback"}</p>
+                    </div>
+                  </div>
+                </section>
+
+                {/* Workspace Section */}
                 <section className="settings-block">
                   <div className="settings-block-head">
                     <h3>Workspace</h3>
                     <p className="helper-copy">Current runtime and endpoint information.</p>
                   </div>
-                  <dl className="settings-definition-grid">
-                    <div>
+                  <div className="settings-definition-grid">
+                    <div className="def-item">
                       <dt>Status</dt>
                       <dd>{runtime.status}</dd>
                     </div>
-                    <div>
+                    <div className="def-item">
                       <dt>Started</dt>
                       <dd>{formatStartedAt(runtime.startedAt)}</dd>
                     </div>
-                    <div>
+                    <div className="def-item">
                       <dt>Web URL</dt>
                       <dd>{runtime.webUrl || settings.runtimeInfo.webUrl}</dd>
                     </div>
-                    <div>
+                    <div className="def-item">
                       <dt>API URL</dt>
                       <dd>{runtime.apiUrl || settings.runtimeInfo.apiUrl}</dd>
                     </div>
-                    <div className="wide">
+                    <div className="def-item wide">
                       <dt>Workspace Root</dt>
                       <dd>{settings.workspaceRoot}</dd>
                     </div>
-                  </dl>
+                  </div>
                 </section>
 
+                {/* Compression Section */}
                 <section className="settings-block">
                   <div className="settings-block-head">
-                    <h3>Context compression</h3>
-                    <p className="helper-copy">
-                      Use conservative estimated tokens so smaller models keep recent turns verbatim and older context compressed.
-                    </p>
+                    <h3>Context Compression</h3>
+                    <p className="helper-copy">Configure token estimation and context window behavior.</p>
                   </div>
-                  <div className="settings-inline-grid">
-                    <label className="field">
-                      <span>Compression enabled</span>
-                      <select
-                        value={settings.compression.enabled ? "true" : "false"}
-                        onChange={(event) =>
-                          updateCompressionSetting("enabled", event.target.value === "true")
-                        }
-                      >
-                        <option value="true">Enabled</option>
-                        <option value="false">Disabled</option>
-                      </select>
-                    </label>
-
-                    <label className="field">
-                      <span>Model context window</span>
-                      <input
-                        type="number"
-                        min={4000}
-                        step={1000}
-                        value={settings.compression.contextWindowTokens}
-                        onChange={(event) =>
-                          updateCompressionSetting(
-                            "contextWindowTokens",
-                            Math.max(4000, Number(event.target.value) || 4000),
-                          )
-                        }
-                      />
-                    </label>
-
-                    <label className="field">
-                      <span>Response headroom</span>
-                      <input
-                        type="number"
-                        min={512}
-                        step={500}
-                        value={settings.compression.responseHeadroomTokens}
-                        onChange={(event) =>
-                          updateCompressionSetting(
-                            "responseHeadroomTokens",
-                            Math.max(512, Number(event.target.value) || 512),
-                          )
-                        }
-                      />
-                    </label>
-
-                    <label className="field">
-                      <span>Safety reserve</span>
-                      <input
-                        type="number"
-                        min={512}
-                        step={500}
-                        value={settings.compression.safetyMarginTokens}
-                        onChange={(event) =>
-                          updateCompressionSetting(
-                            "safetyMarginTokens",
-                            Math.max(512, Number(event.target.value) || 512),
-                          )
-                        }
-                      />
-                    </label>
-
-                    <label className="field">
-                      <span>Preferred recent messages</span>
-                      <input
-                        type="number"
-                        min={1}
-                        max={24}
-                        value={settings.compression.preserveRecentMessages}
-                        onChange={(event) =>
-                          updateCompressionSetting(
-                            "preserveRecentMessages",
-                            Math.max(1, Number(event.target.value) || 1),
-                          )
-                        }
-                      />
-                    </label>
-
-                    <label className="field">
-                      <span>Minimum recent messages</span>
-                      <input
-                        type="number"
-                        min={1}
-                        max={24}
-                        value={settings.compression.minimumRecentMessages}
-                        onChange={(event) =>
-                          updateCompressionSetting(
-                            "minimumRecentMessages",
-                            Math.max(1, Number(event.target.value) || 1),
-                          )
-                        }
-                      />
-                    </label>
-
-                    <div className="settings-inline-note">
-                      <span className="section-label">Recommended</span>
+                  <div className="settings-block-content">
+                    <div className="settings-field-row">
+                      <div className="settings-field">
+                        <label>Compression enabled</label>
+                        <select
+                          value={settings.compression.enabled ? "true" : "false"}
+                          onChange={(e) =>
+                            updateCompressionSetting("enabled", e.target.value === "true")
+                          }
+                        >
+                          <option value="true">Enabled</option>
+                          <option value="false">Disabled</option>
+                        </select>
+                      </div>
+                      <div className="settings-field">
+                        <label>Context window tokens</label>
+                        <input
+                          type="number"
+                          min={4000}
+                          step={1000}
+                          value={settings.compression.contextWindowTokens}
+                          onChange={(e) =>
+                            updateCompressionSetting(
+                              "contextWindowTokens",
+                              Math.max(4000, Number(e.target.value) || 4000),
+                            )
+                          }
+                        />
+                      </div>
+                      <div className="settings-field">
+                        <label>Response headroom</label>
+                        <input
+                          type="number"
+                          min={512}
+                          step={500}
+                          value={settings.compression.responseHeadroomTokens}
+                          onChange={(e) =>
+                            updateCompressionSetting(
+                              "responseHeadroomTokens",
+                              Math.max(512, Number(e.target.value) || 512),
+                            )
+                          }
+                        />
+                      </div>
+                      <div className="settings-field">
+                        <label>Safety reserve</label>
+                        <input
+                          type="number"
+                          min={512}
+                          step={500}
+                          value={settings.compression.safetyMarginTokens}
+                          onChange={(e) =>
+                            updateCompressionSetting(
+                              "safetyMarginTokens",
+                              Math.max(512, Number(e.target.value) || 512),
+                            )
+                          }
+                        />
+                      </div>
+                      <div className="settings-field">
+                        <label>Preserve recent messages</label>
+                        <input
+                          type="number"
+                          min={1}
+                          max={24}
+                          value={settings.compression.preserveRecentMessages}
+                          onChange={(e) =>
+                            updateCompressionSetting(
+                              "preserveRecentMessages",
+                              Math.max(1, Number(e.target.value) || 1),
+                            )
+                          }
+                        />
+                      </div>
+                      <div className="settings-field">
+                        <label>Minimum recent</label>
+                        <input
+                          type="number"
+                          min={1}
+                          max={24}
+                          value={settings.compression.minimumRecentMessages}
+                          onChange={(e) =>
+                            updateCompressionSetting(
+                              "minimumRecentMessages",
+                              Math.max(1, Number(e.target.value) || 1),
+                            )
+                          }
+                        />
+                      </div>
+                    </div>
+                    <div className="settings-info-note">
+                      <span className="label">Recommended</span>
                       <p>
-                        Derived prompt budget: about {settings.compression.maxPromptTokens.toLocaleString()} max,
-                        targeting {settings.compression.targetPromptTokens.toLocaleString()} after compaction.
-                      </p>
-                      <p>
-                        Ember derives this from window minus response reserve minus safety reserve, then compacts against the real role prompt including tool and skill text.
+                        Max prompt: ~{settings.compression.maxPromptTokens.toLocaleString()} tokens, targeting{" "}
+                        {settings.compression.targetPromptTokens.toLocaleString()} after compaction.
                       </p>
                     </div>
                   </div>
                 </section>
+              </div>
+            )}
 
-                <section className="settings-block">
-                  <div className="settings-block-head">
-                    <h3>Model discovery</h3>
-                    <p className="helper-copy">
-                      These rules control how models appear in provider and role pickers.
-                    </p>
-                  </div>
-                  <div className="settings-rule-list">
-                    <div className="settings-rule-row">
-                      <strong>OpenAI-compatible endpoints</strong>
-                      <span>Fetch from the provider&apos;s <code>/models</code> endpoint.</span>
-                    </div>
-                    <div className="settings-rule-row">
-                      <strong>Codex CLI</strong>
-                      <span>Read models from the local Codex account metadata on this machine.</span>
-                    </div>
-                  </div>
-                </section>
-              </Surface>
-            ) : null}
-
-            {activePanel === "providers" ? (
-              <Surface className="settings-pane">
+            {/* Providers Panel */}
+            {activePanel === "providers" && (
+              <div className="settings-pane">
                 <div className="settings-pane-head">
                   <div>
                     <h2>Providers</h2>
-                    <p className="helper-copy">
-                      Add, rename, refresh, and edit provider connections with minimal friction.
-                    </p>
+                    <p className="helper-copy">Add and manage AI provider connections.</p>
                   </div>
                   <button
                     className="button"
                     onClick={() => {
                       if (showAddProvider) {
                         resetProviderBuilder();
-                        return;
+                      } else {
+                        setShowAddProvider(true);
+                        setSelectedQuickPresetId(null);
+                        setSelectedProviderType(null);
                       }
-                      setShowAddProvider(true);
-                      setSelectedQuickPresetId(null);
-                      setSelectedProviderType(null);
                     }}
                   >
                     {showAddProvider ? "Close" : "Add Provider"}
                   </button>
                 </div>
 
-                {showAddProvider ? (
+                {/* Add Provider Section */}
+                {showAddProvider && (
                   <section className="settings-block">
                     <div className="settings-block-head">
-                      <h3>Choose a provider</h3>
-                      <p className="helper-copy">Select a provider to configure, then fill in the details.</p>
+                      <h3>Choose Provider</h3>
+                      <p className="helper-copy">Select a provider type to configure.</p>
                     </div>
-
                     <div className="provider-quick-grid">
                       {QUICK_PRESETS.map((preset) => {
                         const isSelected = selectedQuickPresetId === preset.id;
@@ -1300,116 +1266,102 @@ export function SettingsClient({
                               setProviderName(preset.label);
                             }}
                           >
-                            <span
-                              className="provider-quick-badge"
-                              style={{ background: preset.iconBg }}
-                            >
+                            <span className="icon-wrap">
                               <ProviderIcon id={preset.id} />
                             </span>
-                            <strong className="provider-quick-label">{preset.label}</strong>
-                            <span className="provider-quick-tagline">{preset.tagline}</span>
+                            <strong>{preset.label}</strong>
+                            <span>{preset.tagline}</span>
                           </button>
                         );
                       })}
                     </div>
 
-                    {selectedQuickPresetId && selectedProviderType ? (() => {
+                    {selectedQuickPresetId && selectedProviderType && (() => {
                       const qp = QUICK_PRESETS.find((p) => p.id === selectedQuickPresetId)!;
                       const isCli = selectedProviderType === "codex-cli";
                       const isOpenAI = selectedProviderType === "openai-compatible";
-                      const isLocalEndpoint =
-                        isOpenAI && isLocalOpenAiCompatibleBaseUrl(baseUrl.trim());
+                      const isLocal = isOpenAI && isLocalOpenAiCompatibleBaseUrl(baseUrl.trim());
                       return (
                         <div className="provider-quick-form">
-                          <label className="field">
-                            <span>Provider name</span>
+                          <div className="settings-field">
+                            <label>Provider name</label>
                             <input
                               value={providerName}
-                              onChange={(event) => setProviderName(event.target.value)}
+                              onChange={(e) => setProviderName(e.target.value)}
                               placeholder={qp.label}
                             />
-                          </label>
+                          </div>
 
-                          {isOpenAI ? (
+                          {isOpenAI && (
                             <>
-                              <label className="field">
-                                <span>Endpoint URL</span>
+                              <div className="settings-field">
+                                <label>Endpoint URL</label>
                                 <input
                                   value={baseUrl}
-                                  onChange={(event) => setBaseUrl(event.target.value)}
+                                  onChange={(e) => setBaseUrl(e.target.value)}
                                   placeholder="http://127.0.0.1:11434/v1"
                                 />
-                              </label>
-                              {isLocalEndpoint ? (
-                                <label className="field">
-                                  <span>Local model context window</span>
+                              </div>
+                              {isLocal && (
+                                <div className="settings-field">
+                                  <label>Context window</label>
                                   <input
                                     type="number"
                                     min={4000}
                                     step={1000}
                                     value={contextWindowTokens}
-                                    onChange={(event) => setContextWindowTokens(event.target.value)}
+                                    onChange={(e) => setContextWindowTokens(e.target.value)}
                                     placeholder="100000"
                                   />
-                                </label>
-                              ) : (
-                                <div className="provider-quick-note">
-                                  <span>Remote API endpoints use the automatic 300k context window policy.</span>
                                 </div>
                               )}
                             </>
-                          ) : null}
+                          )}
 
-                          {!isCli ? (
-                            <label className="field">
-                              <span>
+                          {!isCli && (
+                            <div className="settings-field">
+                              <label>
                                 API key
-                                {!qp.apiKeyRequired ? <span className="field-optional"> (optional)</span> : null}
-                              </span>
+                                {!qp.apiKeyRequired && <span className="optional"> (optional)</span>}
+                              </label>
                               <input
                                 type="password"
                                 value={apiKey}
-                                onChange={(event) => setApiKey(event.target.value)}
+                                onChange={(e) => setApiKey(e.target.value)}
                                 placeholder={qp.apiKeyPlaceholder ?? ""}
                               />
-                            </label>
-                          ) : null}
-
-                          {isCli ? (
-                            <label className="field">
-                              <span>Preferred default model <span className="field-optional">(optional)</span></span>
-                              <select
-                                value={defaultModelId}
-                                onChange={(event) => setDefaultModelId(event.target.value)}
-                              >
-                                <option value="">Use connector default</option>
-                                {selectedCliModels.map((model) => (
-                                  <option key={model} value={model}>
-                                    {model}
-                                  </option>
-                                ))}
-                              </select>
-                            </label>
-                          ) : (
-                            <label className="field">
-                              <span>Default model <span className="field-optional">(optional)</span></span>
-                              <input
-                                value={defaultModelId}
-                                onChange={(event) => setDefaultModelId(event.target.value)}
-                                placeholder={qp.defaultModelSuggestion ?? "e.g. gpt-4o"}
-                              />
-                            </label>
+                            </div>
                           )}
 
                           {isCli ? (
-                            <div className="provider-quick-note">
-                              <span>
-                                Run `codex login` first, then save and use Refresh to pull models.
-                              </span>
+                            <div className="settings-field">
+                              <label>
+                                Default model <span className="optional">(optional)</span>
+                              </label>
+                              <select
+                                value={defaultModelId}
+                                onChange={(e) => setDefaultModelId(e.target.value)}
+                              >
+                                <option value="">Use connector default</option>
+                                {selectedCliModels.map((model) => (
+                                  <option key={model} value={model}>{model}</option>
+                                ))}
+                              </select>
                             </div>
-                          ) : null}
+                          ) : (
+                            <div className="settings-field">
+                              <label>
+                                Default model <span className="optional">(optional)</span>
+                              </label>
+                              <input
+                                value={defaultModelId}
+                                onChange={(e) => setDefaultModelId(e.target.value)}
+                                placeholder={qp.defaultModelSuggestion ?? "e.g. gpt-4o"}
+                              />
+                            </div>
+                          )}
 
-                          <div className="button-row">
+                          <div className="form-actions">
                             <button className="button ghost" onClick={resetProviderBuilder}>
                               Cancel
                             </button>
@@ -1428,22 +1380,21 @@ export function SettingsClient({
                           </div>
                         </div>
                       );
-                    })() : null}
+                    })()}
                   </section>
-                ) : null}
+                )}
 
+                {/* Providers List */}
                 <section className="settings-block">
                   <div className="settings-block-head">
-                    <h3>Connected providers</h3>
-                    <p className="helper-copy">
-                      Keep the rows small and editable. Models are discovered automatically.
-                    </p>
+                    <h3>Connected Providers</h3>
+                    <p className="helper-copy">Manage existing connections and discover models.</p>
                   </div>
 
                   {orderedProviders.length === 0 ? (
-                    <div className="settings-empty-state">
-                      <p>No providers configured yet.</p>
-                      <span>Start with Codex, Claude, Anthropic, or an OpenAI-compatible endpoint.</span>
+                    <div className="settings-empty-state" style={{ margin: "0 1.5rem 1.25rem" }}>
+                      <strong>No providers configured</strong>
+                      <span>Add Codex, Claude, or an OpenAI-compatible endpoint to get started.</span>
                     </div>
                   ) : (
                     <div className="settings-provider-list">
@@ -1459,16 +1410,15 @@ export function SettingsClient({
                         const defaultModel = provider.config.defaultModelId?.trim() ?? "";
 
                         return (
-                          <article key={provider.id} className="settings-provider-card minimal">
+                          <article key={provider.id} className="settings-provider-card">
+                            {/* Header */}
                             <div className="settings-provider-head">
                               <div className="settings-provider-title">
                                 <div className={`provider-status-dot ${provider.status}`} />
                                 <div>
-                                  <p className="section-label">{getProviderTypeLabel(provider)}</p>
+                                  <span className="type-label">{getProviderTypeLabel(provider)}</span>
                                   <h3>{provider.name}</h3>
-                                  <p className="helper-copy">
-                                    {getProviderSummary(provider, models.length)}
-                                  </p>
+                                  <p className="helper-copy">{getProviderSummary(provider, models.length)}</p>
                                 </div>
                               </div>
                               <span className={`settings-status-pill ${provider.status}`}>
@@ -1476,139 +1426,116 @@ export function SettingsClient({
                               </span>
                             </div>
 
-                            <div className="settings-provider-meta settings-provider-facts">
+                            {/* Meta */}
+                            <div className="settings-provider-meta">
                               <span>{getProviderAuthLabel(provider)}</span>
                               <span>{models.length} model{models.length === 1 ? "" : "s"}</span>
                               <span>{canAssign ? "Role ready" : "Needs setup"}</span>
-                              {defaultModel ? <span>Default: {defaultModel}</span> : null}
+                              {defaultModel && <span>Default: {defaultModel}</span>}
                               <span>{getProviderContextWindowLabel(provider)}</span>
                             </div>
 
-                            {provider.lastError ? (
-                              <div className="notice-strip danger">{provider.lastError}</div>
-                            ) : null}
+                            {/* Error */}
+                            {provider.lastError && (
+                              <div className="provider-error">{provider.lastError}</div>
+                            )}
 
+                            {/* Models */}
                             {models.length > 0 ? (
                               <div className="settings-model-pills">
                                 {featuredModels.map((model) => (
-                                  <span key={model} className="settings-model-pill">
-                                    {model}
-                                  </span>
+                                  <span key={model} className="settings-model-pill">{model}</span>
                                 ))}
-                                {models.length > featuredModels.length ? (
+                                {models.length > featuredModels.length && (
                                   <span className="settings-model-pill muted">
                                     +{models.length - featuredModels.length} more
                                   </span>
-                                ) : null}
+                                )}
                               </div>
-                            ) : (
-                              <p className="helper-copy">
-                                No models discovered yet. Refresh after authenticating this provider.
-                              </p>
-                            )}
+                            ) : null}
 
-                            {isEditing ? (
+                            {/* Editor */}
+                            {isEditing && (
                               <div className="settings-provider-editor">
                                 <div className="settings-provider-editor-grid">
-                                  <label className="field">
-                                    <span>Provider name</span>
+                                  <div className="settings-field">
+                                    <label>Provider name</label>
                                     <input
                                       value={providerEditor.name}
-                                      onChange={(event) =>
-                                        setProviderEditor((current) =>
-                                          current ? { ...current, name: event.target.value } : current,
+                                      onChange={(e) =>
+                                        setProviderEditor((c) =>
+                                          c ? { ...c, name: e.target.value } : c
                                         )
                                       }
-                                      placeholder="Provider name"
+                                      placeholder="Name"
                                     />
-                                  </label>
-
-                                  {provider.typeId === "openai-compatible" ? (
+                                  </div>
+                                  {provider.typeId === "openai-compatible" && (
                                     <>
-                                      <label className="field">
-                                        <span>Endpoint URL</span>
+                                      <div className="settings-field">
+                                        <label>Endpoint URL</label>
                                         <input
                                           value={providerEditor.baseUrl}
-                                          onChange={(event) =>
-                                            setProviderEditor((current) =>
-                                              current
-                                                ? { ...current, baseUrl: event.target.value }
-                                                : current,
+                                          onChange={(e) =>
+                                            setProviderEditor((c) =>
+                                              c ? { ...c, baseUrl: e.target.value } : c
                                             )
                                           }
                                           placeholder="http://127.0.0.1:11434/v1"
                                         />
-                                      </label>
-                                      {isLocalOpenAiCompatibleBaseUrl(providerEditor.baseUrl.trim()) ? (
-                                        <label className="field">
-                                          <span>Local model context window</span>
+                                      </div>
+                                      {isLocalOpenAiCompatibleBaseUrl(providerEditor.baseUrl.trim()) && (
+                                        <div className="settings-field">
+                                          <label>Context window</label>
                                           <input
                                             type="number"
                                             min={4000}
                                             step={1000}
                                             value={providerEditor.contextWindowTokens}
-                                            onChange={(event) =>
-                                              setProviderEditor((current) =>
-                                                current
-                                                  ? {
-                                                      ...current,
-                                                      contextWindowTokens: event.target.value,
-                                                    }
-                                                  : current,
+                                            onChange={(e) =>
+                                              setProviderEditor((c) =>
+                                                c ? { ...c, contextWindowTokens: e.target.value } : c
                                               )
                                             }
                                             placeholder="100000"
                                           />
-                                        </label>
-                                      ) : (
-                                        <div className="provider-quick-note">
-                                          <span>Remote API endpoints use the automatic 300k context window policy.</span>
                                         </div>
                                       )}
                                     </>
-                                  ) : null}
-
-                                  <label className="field">
-                                    <span>Preferred default model</span>
+                                  )}
+                                  <div className="settings-field">
+                                    <label>Default model</label>
                                     <select
                                       value={providerEditor.defaultModelId}
-                                      onChange={(event) =>
-                                        setProviderEditor((current) =>
-                                          current
-                                            ? { ...current, defaultModelId: event.target.value }
-                                            : current,
+                                      onChange={(e) =>
+                                        setProviderEditor((c) =>
+                                          c ? { ...c, defaultModelId: e.target.value } : c
                                         )
                                       }
                                     >
                                       <option value="">Use connector default</option>
                                       {models.map((model) => (
-                                        <option key={model} value={model}>
-                                          {model}
-                                        </option>
+                                        <option key={model} value={model}>{model}</option>
                                       ))}
                                     </select>
-                                  </label>
-
-                                  {provider.typeId !== "codex-cli" ? (
-                                    <label className="field">
-                                      <span>Replace API key</span>
+                                  </div>
+                                  {provider.typeId !== "codex-cli" && (
+                                    <div className="settings-field">
+                                      <label>Replace API key</label>
                                       <input
                                         type="password"
                                         value={providerEditor.apiKey}
-                                        onChange={(event) =>
-                                          setProviderEditor((current) =>
-                                            current
-                                              ? { ...current, apiKey: event.target.value }
-                                              : current,
+                                        onChange={(e) =>
+                                          setProviderEditor((c) =>
+                                            c ? { ...c, apiKey: e.target.value } : c
                                           )
                                         }
-                                        placeholder="Leave blank to keep the current key"
+                                        placeholder="Leave blank to keep current"
                                       />
-                                    </label>
-                                  ) : null}
+                                    </div>
+                                  )}
                                 </div>
-
-                                <div className="settings-provider-actions">
+                                <div className="settings-provider-actions" style={{ borderTop: "none", paddingTop: 0 }}>
                                   <button className="button ghost" onClick={stopEditingProvider}>
                                     Cancel
                                   </button>
@@ -1626,8 +1553,9 @@ export function SettingsClient({
                                   </button>
                                 </div>
                               </div>
-                            ) : null}
+                            )}
 
+                            {/* Actions */}
                             <div className="settings-provider-actions">
                               {provider.status === "connected" ? (
                                 <button
@@ -1655,8 +1583,7 @@ export function SettingsClient({
                                       : "Connect"}
                                 </button>
                               )}
-
-                              {provider.capabilities.requiresBrowserAuth ? (
+                              {provider.capabilities.requiresBrowserAuth && (
                                 <button
                                   className="button"
                                   onClick={() => void mutateProvider(provider.id, "reconnect")}
@@ -1664,9 +1591,8 @@ export function SettingsClient({
                                 >
                                   Reconnect
                                 </button>
-                              ) : null}
-
-                              {!isEditing ? (
+                              )}
+                              {!isEditing && (
                                 <button
                                   className="button"
                                   onClick={() => startEditingProvider(provider)}
@@ -1674,8 +1600,7 @@ export function SettingsClient({
                                 >
                                   Edit
                                 </button>
-                              ) : null}
-
+                              )}
                               <button
                                 className="button ghost"
                                 onClick={() => {
@@ -1694,32 +1619,35 @@ export function SettingsClient({
                     </div>
                   )}
                 </section>
-              </Surface>
-            ) : null}
+              </div>
+            )}
 
-            {activePanel === "roles" ? (
-              <Surface className="settings-pane">
+            {/* Roles Panel */}
+            {activePanel === "roles" && (
+              <div className="settings-pane">
                 <div className="settings-pane-head">
                   <div>
                     <h2>Roles</h2>
-                    <p className="helper-copy">
-                      Assign one provider and one model per role from the discovered catalogs.
-                    </p>
+                    <p className="helper-copy">Assign providers and models to each role.</p>
                   </div>
-                  <button className="button" onClick={autoAssignRoles} disabled={roleReadyProviders.length === 0}>
+                  <button
+                    className="button"
+                    onClick={autoAssignRoles}
+                    disabled={roleReadyProviders.length === 0}
+                  >
                     Auto-Assign
                   </button>
                 </div>
 
                 <section className="settings-block">
                   <div className="settings-block-head">
-                    <h3>Role routing</h3>
-                    <p className="helper-copy">Compact rows instead of cards, with the same controls.</p>
+                    <h3>Role Routing</h3>
+                    <p className="helper-copy">Map each role to a provider and model.</p>
                   </div>
 
                   {connectedProviders.length === 0 ? (
-                    <div className="settings-empty-state">
-                      <p>Connect a provider first.</p>
+                    <div className="settings-empty-state" style={{ margin: "0 1.5rem 1.25rem" }}>
+                      <strong>Connect a provider first</strong>
                       <span>Role assignment becomes available once a provider is connected.</span>
                     </div>
                   ) : (
@@ -1734,56 +1662,45 @@ export function SettingsClient({
 
                         return (
                           <article key={assignment.role} className="settings-role-row">
-                            <div className="settings-role-summary">
+                            <div className="role-info">
                               <strong>{ROLE_DETAILS[assignment.role].title}</strong>
                               <span>{ROLE_DETAILS[assignment.role].description}</span>
                             </div>
-
-                            <div className="settings-role-controls">
-                              <label className="field">
-                                <span>Provider</span>
-                                <select
-                                  value={assignment.providerId ?? ""}
-                                  onChange={(event) =>
-                                    updateRoleProvider(assignment.role, event.target.value)
-                                  }
-                                >
-                                  <option value="">Select provider...</option>
-                                  {connectedProviders
-                                    .filter((provider) => provider.capabilities.canChat)
-                                    .map((provider) => (
-                                      <option key={provider.id} value={provider.id}>
-                                        {provider.name}
-                                      </option>
-                                    ))}
-                                </select>
-                              </label>
-
-                              <label className="field">
-                                <span>Model</span>
-                                <select
-                                  value={assignment.modelId ?? ""}
-                                  onChange={(event) =>
-                                    updateRoleModel(assignment.role, event.target.value)
-                                  }
-                                  disabled={!selectedProvider || availableModels.length === 0}
-                                >
-                                  <option value="">
-                                    {selectedProvider ? "Select model..." : "Choose a provider first"}
-                                  </option>
-                                  {availableModels.map((model) => (
-                                    <option key={model} value={model}>
-                                      {model}
-                                    </option>
+                            <div className="settings-field">
+                              <label>Provider</label>
+                              <select
+                                value={assignment.providerId ?? ""}
+                                onChange={(e) => updateRoleProvider(assignment.role, e.target.value)}
+                              >
+                                <option value="">Select provider...</option>
+                                {connectedProviders
+                                  .filter((p) => p.capabilities.canChat)
+                                  .map((p) => (
+                                    <option key={p.id} value={p.id}>{p.name}</option>
                                   ))}
-                                </select>
-                              </label>
+                              </select>
                             </div>
-
+                            <div className="settings-field">
+                              <label>Model</label>
+                              <select
+                                value={assignment.modelId ?? ""}
+                                onChange={(e) => updateRoleModel(assignment.role, e.target.value)}
+                                disabled={!selectedProvider || availableModels.length === 0}
+                              >
+                                <option value="">
+                                  {selectedProvider ? "Select model..." : "Choose provider first"}
+                                </option>
+                                {availableModels.map((model) => (
+                                  <option key={model} value={model}>{model}</option>
+                                ))}
+                              </select>
+                            </div>
                             <span
-                              className={`settings-role-badge${assignment.providerId && assignment.modelId ? " assigned" : ""}`}
+                              className={`settings-role-badge${
+                                assignment.providerId && assignment.modelId ? " assigned" : ""
+                              }`}
                             >
-                              {assignment.providerId && assignment.modelId ? "Assigned" : "Needs setup"}
+                              {assignment.providerId && assignment.modelId ? "Assigned" : "Setup"}
                             </span>
                           </article>
                         );
@@ -1791,62 +1708,65 @@ export function SettingsClient({
                     </div>
                   )}
                 </section>
-              </Surface>
-            ) : null}
+              </div>
+            )}
 
-            {activePanel === "prompts" ? (
-              <Surface className="settings-pane">
+            {/* Prompts Panel */}
+            {activePanel === "prompts" && (
+              <div className="settings-pane">
                 <div className="settings-pane-head">
                   <div>
                     <h2>Prompts</h2>
-                    <p className="helper-copy">
-                      Keep these light. Only override the defaults when the workspace needs it.
-                    </p>
+                    <p className="helper-copy">Override default system prompts for specific roles.</p>
                   </div>
                 </div>
 
+                {/* Shared Prompt */}
                 <section className="settings-block">
                   <div className="settings-block-head">
-                    <h3>Shared prompt</h3>
+                    <h3>Shared Prompt</h3>
                     <p className="helper-copy">Applied to every routed role.</p>
                   </div>
-                  <label className="field">
-                    <span>Shared system prompt</span>
-                    <textarea
-                      value={settings.systemPrompts.shared}
-                      onChange={(event) =>
-                        setSettings((current) => ({
-                          ...current,
-                          systemPrompts: { ...current.systemPrompts, shared: event.target.value },
-                        }))
-                      }
-                      rows={4}
-                      placeholder="Optional instructions applied to every role"
-                    />
-                  </label>
+                  <div className="settings-block-content">
+                    <div className="settings-field">
+                      <label>Shared system prompt</label>
+                      <textarea
+                        value={settings.systemPrompts.shared}
+                        onChange={(e) =>
+                          setSettings((c) => ({
+                            ...c,
+                            systemPrompts: { ...c.systemPrompts, shared: e.target.value },
+                          }))
+                        }
+                        rows={4}
+                        placeholder="Optional instructions applied to every role"
+                      />
+                    </div>
+                  </div>
                 </section>
 
+                {/* Role Prompts */}
                 <section className="settings-block">
                   <div className="settings-block-head">
-                    <h3>Role prompts</h3>
+                    <h3>Role Prompts</h3>
                     <p className="helper-copy">Edit only the roles that need specialized behavior.</p>
                   </div>
                   <div className="settings-prompt-grid">
                     {ROLES.map((role) => (
-                      <label key={role} className="field">
-                        <span>{ROLE_DETAILS[role].title}</span>
+                      <div key={role} className="settings-field">
+                        <label>{ROLE_DETAILS[role].title}</label>
                         <textarea
                           value={settings.systemPrompts.roles[role]}
-                          onChange={(event) => setRolePrompt(role, event.target.value)}
+                          onChange={(e) => setRolePrompt(role, e.target.value)}
                           rows={4}
-                          placeholder={`Optional override for ${ROLE_DETAILS[role].title.toLowerCase()}`}
+                          placeholder={`Override for ${ROLE_DETAILS[role].title.toLowerCase()}`}
                         />
-                      </label>
+                      </div>
                     ))}
                   </div>
                 </section>
-              </Surface>
-            ) : null}
+              </div>
+            )}
           </div>
         </div>
       </div>

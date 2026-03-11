@@ -7,8 +7,28 @@ tools: [mcp__playwright__browser_navigate, mcp__playwright__browser_snapshot]
 
 ## Playwright Browser Tools
 
-Use Playwright browser tools when real page state, UI interaction, authenticated sessions,
-or visual verification are required. Prefer `http_request` for pure JSON/REST APIs.
+### When to use the browser vs. lighter tools
+
+The browser is expensive — slow to start, token-heavy, and blocks the Raspberry Pi.
+**Always prefer the lighter tool first:**
+
+| Need | Right tool |
+|------|-----------|
+| Search the web | `web_search` |
+| Read a public webpage, docs, article | `fetch_page` |
+| Call a JSON/REST API | `http_request` |
+| Log in to a site, fill a form, click buttons | **browser** |
+| Scrape a page that blocks plain HTTP | **browser** |
+| Verify UI state / visual layout | **browser** |
+| Anything that requires a live authenticated session | **browser** |
+
+**Never open the browser just to read content.** If `fetch_page` can retrieve the
+page (it handles redirects and most public sites), use it. The browser is for
+interaction — clicking, typing, submitting forms, navigating behind auth walls.
+
+**Decision rule:** Ask yourself — *do I need to click or log in?*
+- **No** → use `fetch_page` (or `web_search` + `fetch_page`)
+- **Yes** → use the browser
 
 ### Core tools (use these for 95% of tasks)
 

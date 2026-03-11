@@ -75,6 +75,7 @@ export interface Settings {
   themePreference: string;
   tailscaleStatus: string;
   sudoPassword: string;
+  braveApiKey: string;
   compression: {
     enabled: boolean;
     contextWindowTokens: number;

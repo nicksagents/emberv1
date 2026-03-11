@@ -51,6 +51,7 @@ export const defaultSettings = (workspaceRoot: string): Settings => ({
   themePreference: "ember-night",
   tailscaleStatus: "Not configured",
   sudoPassword: "",
+  braveApiKey: "",
   compression: {
     enabled: true,
     contextWindowTokens: 100_000,

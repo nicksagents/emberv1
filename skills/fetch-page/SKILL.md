@@ -27,4 +27,10 @@ there are more pages.
 ### Do not use for
 
 - API endpoints that return JSON — use `http_request` instead
-- Pages that require session cookies or login — use `browser` instead
+- Pages that require session cookies or login — use the Playwright browser tools instead
+
+### fetch_page vs. browser — always try fetch_page first
+
+`fetch_page` is dramatically cheaper than the browser. Try it first for any URL.
+Only escalate to the browser if `fetch_page` returns an empty body, a login
+redirect, or clearly insufficient content after you have already tried it.

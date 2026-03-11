@@ -162,8 +162,38 @@ export function ShellNav({
 
   const isNewChatActive = pathname === "/chat" && !activeConversationId;
 
+  // Touch handling for swipe to close
+  const touchStartX = useRef<number | null>(null);
+  
+  const handleTouchStart = (e: React.TouchEvent) => {
+    touchStartX.current = e.touches[0].clientX;
+  };
+  
+  const handleTouchEnd = (e: React.TouchEvent) => {
+    if (touchStartX.current === null) return;
+    
+    const touchEndX = e.changedTouches[0].clientX;
+    const diff = touchStartX.current - touchEndX;
+    
+    // Swipe left to close (threshold of 50px)
+    if (diff > 50) {
+      onClose();
+    }
+    
+    touchStartX.current = null;
+  };
+
   return (
-    <aside className={`sidebar${isOpen ? " open" : ""}`}>
+    <aside 
+      className={`sidebar${isOpen ? " open" : ""}`}
+      onTouchStart={handleTouchStart}
+      onTouchEnd={handleTouchEnd}
+    >
+      {/* Mobile drag handle */}
+      <div className="sidebar-drag-handle" aria-hidden="true">
+        <div className="sidebar-drag-bar" />
+      </div>
+      
       <div className="sidebar-head">
         <div className="sidebar-header-row">
           <div className="sidebar-brand">
@@ -174,20 +204,8 @@ export function ShellNav({
                 fill="none"
                 xmlns="http://www.w3.org/2000/svg"
               >
-                <path
-                  d="M16.2 4.8C12.3 8.8 9.6 12.4 9.6 17c0 4.2 2.8 7.7 6.9 8.6 4.1-.9 6.9-4.4 6.9-8.6 0-4.6-2.8-8.2-7.2-12.2Z"
-                  fill="#FF9A4D"
-                />
-                <path
-                  d="M16 11.7c-2 2.1-3.1 4-3.1 5.9 0 2 1.2 3.8 3.1 4.4 1.9-.6 3.1-2.4 3.1-4.4 0-1.9-1-3.8-3.1-5.9Z"
-                  fill="#FFF1D6"
-                />
-                <path
-                  d="M10.1 21.2c2.1 2.2 4.3 3.2 6.4 3.2 2.2 0 4.3-1.1 6.3-3.2"
-                  stroke="#FFD7A8"
-                  strokeWidth="1.8"
-                  strokeLinecap="round"
-                />
+                <circle cx="16" cy="16" r="12" stroke="currentColor" strokeWidth="1.5" opacity="0.4"/>
+                <circle cx="16" cy="16" r="6" fill="currentColor" opacity="0.9"/>
               </svg>
             </div>
             <span className="sidebar-title">Ember</span>
