@@ -1,4 +1,5 @@
 import { getHistorySummaryMessage, isHistorySummaryMessage, type ChatRequest, type Role } from "@ember/core";
+import { isProductDeliveryRequest } from "./delivery-workflow.js";
 
 export type RoutedRole = Exclude<Role, "dispatch" | "ops">;
 
@@ -28,7 +29,7 @@ const DISPATCH_MAX_MESSAGES = 8;
 const DISPATCH_CONTEXT_CHAR_BUDGET = 2200;
 const DISPATCH_SUMMARY_CHAR_LIMIT = 900;
 const DISPATCH_MESSAGE_CHAR_LIMIT = 500;
-const MIN_DISPATCH_CONFIDENCE = 0.55;
+const MIN_DISPATCH_CONFIDENCE = 0.4;
 
 function countPatternMatches(content: string, patterns: RegExp[]): number {
   return patterns.reduce((total, pattern) => total + (pattern.test(content) ? 1 : 0), 0);
@@ -116,6 +117,18 @@ export function parseDispatchDecision(content: string): DispatchDecisionPayload 
   }
 }
 
+function createPolicyEvaluation(
+  decision: AutoRouteDecision,
+  options: {
+    shouldQueryDispatch?: boolean;
+  } = {},
+): PolicyRouteEvaluation {
+  return {
+    decision,
+    shouldQueryDispatch: options.shouldQueryDispatch ?? true,
+  };
+}
+
 function formatDispatchMessage(message: ChatRequest["conversation"][number]): string {
   const speaker =
     message.role === "user"
@@ -130,7 +143,10 @@ function formatDispatchMessage(message: ChatRequest["conversation"][number]): st
   return `${speaker}: ${content}`;
 }
 
-export function buildDispatchInput(request: ChatRequest): string {
+export function buildDispatchInput(
+  request: ChatRequest,
+  fallbackDecision?: AutoRouteDecision | null,
+): string {
   const historySummary = getHistorySummaryMessage(request.conversation);
   const recentMessages = request.conversation
     .filter((message) => !isHistorySummaryMessage(message))
@@ -156,11 +172,15 @@ export function buildDispatchInput(request: ChatRequest): string {
   const latestUserRequest = alreadyHasLatest ? recentMessages.at(-1)?.content ?? request.content : request.content;
 
   return [
+    "<routing_mode>\nrole\n</routing_mode>",
     historySummary
       ? `<compacted_history>\n${historySummary.content.slice(0, DISPATCH_SUMMARY_CHAR_LIMIT)}\n</compacted_history>`
       : "",
     recentTranscript ? `<recent_conversation>\n${recentTranscript}\n</recent_conversation>` : "",
     `<latest_user_request>\n${latestUserRequest}\n</latest_user_request>`,
+    fallbackDecision
+      ? `<policy_fallback>\nrole=${fallbackDecision.role}\nconfidence=${fallbackDecision.confidence.toFixed(2)}\nreason=${fallbackDecision.reason}\n</policy_fallback>`
+      : "",
     'Return strict JSON only: {"role":"coordinator|advisor|director|inspector","confidence":0.0,"reason":"brief explanation"}',
   ]
     .filter(Boolean)
@@ -178,6 +198,17 @@ function createDecision(
 
 export function routeAutoRequestPolicy(request: ChatRequest): PolicyRouteEvaluation {
   const normalized = request.content.toLowerCase().trim();
+  if (!normalized) {
+    return createPolicyEvaluation(
+      createDecision(
+        "coordinator",
+        "Coordinator is the default role for direct answers and routine work.",
+        "policy",
+        0.88,
+      ),
+      { shouldQueryDispatch: false },
+    );
+  }
   const wordCount = normalized.split(/\s+/).filter(Boolean).length;
   const taskCount = estimateTaskCount(normalized);
   const previousRole = getMostRecentAssistantRole(request);
@@ -305,6 +336,7 @@ export function routeAutoRequestPolicy(request: ChatRequest): PolicyRouteEvaluat
   const wantsExecution = /(implement|build|fix|debug|update|change|edit|write|run|open|click|go to|navigate)/.test(
     normalized,
   );
+  const wantsProductDelivery = isProductDeliveryRequest(normalized);
   const wantsPlanningOnly =
     planningScore >= 1 &&
     (!wantsExecution ||
@@ -320,40 +352,48 @@ export function routeAutoRequestPolicy(request: ChatRequest): PolicyRouteEvaluat
     (complexityScore >= 1 || taskCount >= 3 || wordCount >= 20 || /(across backend and frontend|multi-file|refactor)/.test(normalized));
   const routineExecution = browserScore + researchScore + filesystemScore >= 1;
 
+  if (wantsProductDelivery) {
+    return createPolicyEvaluation(
+      createDecision(
+        "advisor",
+        "A full product build should start with the advisor so the end-to-end plan exists before implementation and review loops begin.",
+        "policy",
+        0.98,
+      ),
+    );
+  }
+
   if (wantsBrowserFindings) {
-    return {
-      decision: createDecision(
+    return createPolicyEvaluation(
+      createDecision(
         "inspector",
         "The request is browser-heavy and asks for validation or a findings write-up.",
         "policy",
         0.96,
       ),
-      shouldQueryDispatch: false,
-    };
+    );
   }
 
   if (explicitReview) {
-    return {
-      decision: createDecision(
+    return createPolicyEvaluation(
+      createDecision(
         "inspector",
         "The request is primarily review, testing, validation, or bug finding.",
         "policy",
         0.97,
       ),
-      shouldQueryDispatch: false,
-    };
+    );
   }
 
   if (wantsPlanningOnly) {
-    return {
-      decision: createDecision(
+    return createPolicyEvaluation(
+      createDecision(
         "advisor",
         "The request is asking for planning, architecture, sequencing, or scoping before execution.",
         "policy",
         0.96,
       ),
-      shouldQueryDispatch: false,
-    };
+    );
   }
 
   if (followUp && previousRole) {
@@ -362,75 +402,69 @@ export function routeAutoRequestPolicy(request: ChatRequest): PolicyRouteEvaluat
     const conflictsWithInspector = previousRole !== "inspector" && (explicitReview || wantsBrowserFindings);
 
     if (!conflictsWithDirector && !conflictsWithAdvisor && !conflictsWithInspector) {
-      return {
-        decision: createDecision(
+      return createPolicyEvaluation(
+        createDecision(
           previousRole,
           `This looks like a context-dependent follow-up, so keeping the current ${previousRole} role is safer than rerouting.`,
           "policy",
           0.9,
         ),
-        shouldQueryDispatch: false,
-      };
+      );
     }
   }
 
   if (substantialCoding) {
-    return {
-      decision: createDecision(
+    return createPolicyEvaluation(
+      createDecision(
         "director",
         "The request is substantial technical execution that likely needs deeper coding loops.",
         "policy",
         0.94,
       ),
-      shouldQueryDispatch: false,
-    };
+    );
   }
 
   if (browserScore >= 1 || researchScore >= 1) {
-    return {
-      decision: createDecision(
+    return createPolicyEvaluation(
+      createDecision(
         "coordinator",
         "Browsing, research, and routine investigation should stay with the coordinator by default.",
         "policy",
         0.93,
       ),
-      shouldQueryDispatch: false,
-    };
+    );
   }
 
   if (routineExecution && codingScore === 0) {
-    return {
-      decision: createDecision(
+    return createPolicyEvaluation(
+      createDecision(
         "coordinator",
         "This is routine execution that the coordinator can handle directly.",
         "policy",
         0.9,
       ),
-      shouldQueryDispatch: false,
-    };
+    );
   }
 
   if (codingScore >= 1) {
-    return {
-      decision: createDecision(
+    return createPolicyEvaluation(
+      createDecision(
         "coordinator",
         "This looks technical but not clearly substantial, so defaulting to coordinator unless dispatch sees stronger evidence for director.",
         "policy",
         0.62,
       ),
-      shouldQueryDispatch: true,
-    };
+    );
   }
 
-  return {
-    decision: createDecision(
+  return createPolicyEvaluation(
+    createDecision(
       "coordinator",
       "Coordinator is the default role for direct answers and routine work.",
       "policy",
       0.88,
     ),
-    shouldQueryDispatch: false,
-  };
+  );
 }
 
 export function resolveDispatchDecision(

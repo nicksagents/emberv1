@@ -48,12 +48,13 @@ import type {
   MemoryPromptContext,
   MemoryRepository,
   MemoryToolObservation,
+  PromptStack,
   Provider,
   Role,
   RoleAssignment,
+  ToolDefinition,
 } from "@ember/core";
 import type { UiBlock } from "@ember/ui-schema";
-import { getPromptStack } from "@ember/prompts";
 import {
   buildDispatchInput,
   formatRouteSource,
@@ -62,15 +63,49 @@ import {
   type AutoRouteDecision,
 } from "./routing.js";
 import {
+  buildAssignedModelFallbackDecision,
+  buildModelDispatchInput,
+  formatModelRouteSource,
+  resolveModelDispatchDecision,
+  resolveModelRoutePolicy,
+  type ExecutionModelDecision,
+} from "./model-routing.js";
+import {
+  buildAssignedProviderFallbackDecision,
+  buildProviderDispatchInput,
+  formatProviderRouteSource,
+  resolveProviderDispatchDecision,
+  resolveProviderRoutePolicy,
+  type ExecutionProviderDecision,
+} from "./provider-routing.js";
+import {
   createToolHandler,
+  getExecutionToolSnapshotForRole,
   getExecutionToolsForRole,
-  getToolSystemPrompt,
   registerMcpTools,
+  replaceMcpTools,
   setToolConfig,
 } from "./tools/index.js";
 import { skillManager } from "@ember/core/skills";
 import { McpClientManager } from "./mcp/mcp-client-manager.js";
-import type { McpConfig } from "@ember/core/mcp";
+import type { McpConfig, McpServerConfig } from "@ember/core/mcp";
+import {
+  buildInstalledMcpServer,
+  buildRemoteMcpServer,
+  describeMcpServerTransport,
+  derivePublicMcpServerName,
+  normalizeMcpServerName,
+  readResolvedMcpConfigState,
+  removeMcpServer,
+  resolveMcpTransportKind,
+  sanitizeMcpRoleList,
+  sanitizeMcpStringList,
+  sanitizeMcpStringRecord,
+  upsertMcpServer,
+  validateMcpServerConfig,
+  validatePublicMcpPackageName,
+  type McpConfigScope,
+} from "./mcp/config.js";
 import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
@@ -88,12 +123,26 @@ import {
   resolveExecutionPromptBudget,
   toMemorySearchBudgetOverrides,
 } from "./prompt-budget.js";
+import { buildRolePromptStack } from "./orchestration-prompt.js";
+import {
+  buildDeliveryWorkflowBlocks,
+  buildDeliveryWorkflowReminder,
+  buildDeliveryWorkflowPrompt,
+  createInitialDeliveryWorkflow,
+  extractPersistedDeliveryWorkflow,
+  type DeliveryWorkflowState,
+} from "./delivery-workflow.js";
 import {
   buildProcedureMemorySearchQuery,
   buildStructuredMemorySearchQuery,
   hasProcedureMemorySearchCues,
   hasStructuredMemorySearchCues,
 } from "./memory-query.js";
+import {
+  formatParallelTaskResults,
+  parseParallelTaskRequest,
+  type ParallelTaskOutcome,
+} from "./parallel-tasks.js";
 const host = process.env.EMBER_RUNTIME_HOST ?? "0.0.0.0";
 const port = Number(process.env.EMBER_RUNTIME_PORT ?? "3005");
 
@@ -103,6 +152,12 @@ function createId(prefix: string): string {
 
 function requestHasImageAttachments(request: ChatRequest): boolean {
   return request.conversation.some((message) =>
+    (message.attachments ?? []).some((attachment) => attachment.kind === "image"),
+  );
+}
+
+function conversationHasImageAttachments(conversation: ChatMessage[]): boolean {
+  return conversation.some((message) =>
     (message.attachments ?? []).some((attachment) => attachment.kind === "image"),
   );
 }
@@ -170,7 +225,7 @@ function createConversationRecord(
 
 type ExecutionRole = Exclude<Role, "dispatch">;
 
-function resolveSpeakingRole(role: Role | null): Role {
+function resolveSpeakingRole(role: Role | null): ExecutionRole {
   return role === "dispatch" || role === null ? "coordinator" : role;
 }
 
@@ -222,12 +277,12 @@ function createBlocks(
         },
         {
           label: providerName
-            ? `Use assigned provider ${providerName}`
-            : "No provider assigned yet for this role",
+            ? `Use active provider ${providerName}`
+            : "No provider resolved yet for this role",
           state: providerName ? "complete" : "pending",
         },
         {
-          label: modelId ? `Use model ${modelId}` : "Model selection still unassigned",
+          label: modelId ? `Use active model ${modelId}` : "Model selection is still unresolved",
           state: modelId ? "complete" : "pending",
         },
         {
@@ -275,7 +330,7 @@ function resolveBrowserSessionKey(request: ChatRequest): string {
 function compactChatRequest(
   request: ChatRequest,
   settings: Awaited<ReturnType<typeof readSettings>>,
-  promptStack: ReturnType<typeof getPromptStack>,
+  promptStack: PromptStack,
   provider: Provider | null,
 ): ChatRequest {
   const result = compactConversationForContext(
@@ -299,7 +354,7 @@ function compactConversationForContext(
   conversation: ChatMessage[],
   content: string,
   settings: Awaited<ReturnType<typeof readSettings>>,
-  promptStack: ReturnType<typeof getPromptStack>,
+  promptStack: PromptStack,
   provider: Provider | null,
 ) {
   const promptBudget = resolveExecutionPromptBudget(settings, provider);
@@ -326,14 +381,19 @@ interface ExecutionContext {
   routeDecision: AutoRouteDecision | null;
   routedTo: Role | null;
   activeRole: Role;
-  promptStack: ReturnType<typeof getPromptStack>;
+  promptStack: PromptStack;
   tools: ReturnType<typeof getExecutionToolsForRole>;
+  toolSnapshot: ReturnType<typeof getExecutionToolSnapshotForRole>;
   assignment: RoleAssignment | undefined;
   provider: Provider | null;
+  providerDecision: ExecutionProviderDecision | null;
+  modelDecision: ExecutionModelDecision | null;
   responseModelId: string | null;
   routeNote: string | null;
   handoffSourceRole: Role | null;
+  workflowState: DeliveryWorkflowState | null;
   browserSessionKey: string;
+  parallelDepth: number;
 }
 
 interface BuiltExecution {
@@ -347,6 +407,42 @@ function sendStreamEvent(
   event: ChatStreamEvent,
 ) {
   emit?.(event);
+}
+
+function buildModelSelectionNote(decision: ExecutionModelDecision | null): string | null {
+  if (!decision?.modelId) {
+    return null;
+  }
+
+  return `Model routed to ${decision.modelId} via ${formatModelRouteSource(decision.source)}. ${decision.reason}`;
+}
+
+function buildProviderSelectionNote(
+  provider: Provider | null,
+  decision: ExecutionProviderDecision | null,
+): string | null {
+  if (!provider || !decision?.providerId) {
+    return null;
+  }
+
+  return `Provider routed to ${provider.name} via ${formatProviderRouteSource(decision.source)}. ${decision.reason}`;
+}
+
+function buildProviderStatusMessage(
+  provider: Provider,
+  providerDecision: ExecutionProviderDecision | null,
+  decision: ExecutionModelDecision | null,
+): string {
+  const reasonParts = [buildProviderSelectionNote(provider, providerDecision), buildModelSelectionNote(decision)]
+    .filter(Boolean)
+    .join(" ");
+  if (!decision?.modelId) {
+    return reasonParts ? `Using ${provider.name}. ${reasonParts}` : `Using ${provider.name}.`;
+  }
+
+  return reasonParts
+    ? `Using ${provider.name} with ${decision.modelId}. ${reasonParts}`
+    : `Using ${provider.name} with ${decision.modelId}.`;
 }
 
 function buildReplyMessage(
@@ -377,42 +473,109 @@ function buildReplyMessage(
       responseModelId,
       "live",
       executionNote,
-    ),
+    ).concat(buildDeliveryWorkflowBlocks(context.workflowState)),
   };
 }
 
 const MAX_AGENT_LOOP = 16;
 const MAX_ROLE_VISITS = 5;
+const MAX_PARALLEL_DEPTH = 1;
 const DISPATCH_TIMEOUT_MS = 10_000;
 
-function buildHandoffContext(source: ExecutionContext, targetRole: ExecutionRole): ExecutionContext {
+async function buildHandoffContext(
+  source: ExecutionContext,
+  targetRole: ExecutionRole,
+  handoffMessage: string,
+  conversation: ChatMessage[],
+  workflowState: DeliveryWorkflowState | null,
+): Promise<ExecutionContext> {
   const assignment = source.assignmentMap.get(targetRole);
-  const provider = source.providers.find((p) => p.id === assignment?.providerId) ?? null;
-  const responseModelId =
-    assignment?.modelId ?? provider?.config.defaultModelId ?? provider?.availableModels[0] ?? null;
+  const routerAssignment = source.assignmentMap.get("dispatch");
+  const candidateProviders = source.providers.filter((candidate) =>
+    candidate.id !== routerAssignment?.providerId || candidate.id === assignment?.providerId,
+  );
+  const preferredProvider = source.providers.find((p) => p.id === assignment?.providerId) ?? null;
+  const providerDecision = await resolveExecutionProviderDecision({
+    role: targetRole,
+    preferredProviderId: assignment?.providerId ?? null,
+    request: {
+      content: handoffMessage,
+      conversation,
+    },
+    settings: source.settings,
+    candidateProviders,
+    providers: source.providers,
+    assignmentMap: source.assignmentMap,
+    secrets: source.secrets,
+    workflowState,
+    requiresImages: conversationHasImageAttachments(conversation),
+  });
+  const provider =
+    source.providers.find((candidate) => candidate.id === providerDecision.providerId) ??
+    preferredProvider ??
+    null;
   const executionProfile = resolveExecutionModelProfile(source.settings, provider, targetRole);
   const tools = provider && !provider.capabilities.canUseTools
     ? []
     : getExecutionToolsForRole(targetRole, {
         compact: executionProfile.compactToolset,
-        content: source.compactedRequest.content,
-        conversation: source.compactedRequest.conversation,
+        content: handoffMessage,
+        conversation,
       });
-  const promptStack = getPromptStack(source.settings, targetRole);
-  promptStack.tools = getToolSystemPrompt(tools, targetRole, {
-    compact: executionProfile.compactToolPrompt,
+  const toolSnapshot = provider && !provider.capabilities.canUseTools
+    ? new Map()
+    : getExecutionToolSnapshotForRole(targetRole, {
+        compact: executionProfile.compactToolset,
+        content: handoffMessage,
+        conversation,
+      });
+  const promptStack = buildRolePromptStack({
+    settings: source.settings,
+    role: targetRole,
+    tools,
+    providers: source.providers,
+    assignmentMap: source.assignmentMap,
+    compactRolePrompt: executionProfile.compactCoordinatorProfile,
+    compactToolPrompt: executionProfile.compactToolPrompt,
+    extraSharedSections: [buildDeliveryWorkflowPrompt(workflowState, targetRole)],
   });
+  const modelDecision = provider
+    ? await resolveExecutionModelDecision({
+        role: targetRole,
+        provider,
+        preferredModelId: provider.id === assignment?.providerId ? assignment?.modelId ?? null : null,
+        request: {
+          content: handoffMessage,
+          conversation,
+        },
+        settings: source.settings,
+        providers: source.providers,
+        assignmentMap: source.assignmentMap,
+        secrets: source.secrets,
+        workflowState,
+      })
+    : null;
+  const responseModelId =
+    modelDecision?.modelId ??
+    assignment?.modelId ??
+    provider?.config.defaultModelId ??
+    provider?.availableModels[0] ??
+    null;
   return {
     ...source,
     activeRole: targetRole,
     promptStack,
     tools,
+    toolSnapshot,
     assignment,
     provider,
+    providerDecision,
+    modelDecision,
     responseModelId,
     routedTo: targetRole,
     routeNote: `${source.activeRole} chained to ${targetRole}.`,
     handoffSourceRole: source.activeRole,
+    workflowState,
   };
 }
 
@@ -569,6 +732,88 @@ function parsePositiveInteger(value: unknown, fallback: number, maximum: number)
   return Math.min(maximum, parsed);
 }
 
+function resolveWritableMcpScope(value: unknown): Exclude<McpConfigScope, "default"> | null {
+  return value === "user" || value === "project" ? value : null;
+}
+
+function normalizeMcpTimeout(value: unknown, fallback?: number): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.max(1_000, Math.floor(value));
+}
+
+function resolveMcpInstallTransport(body: {
+  transport?: string;
+  packageName?: string;
+  url?: string;
+  httpUrl?: string;
+}): "package" | "sse" | "streamable-http" | null {
+  const explicit = typeof body.transport === "string" ? body.transport.trim().toLowerCase() : "";
+  if (explicit === "package" || explicit === "sse" || explicit === "streamable-http") {
+    return explicit;
+  }
+  if (typeof body.httpUrl === "string" && body.httpUrl.trim()) {
+    return "streamable-http";
+  }
+  if (typeof body.url === "string" && body.url.trim()) {
+    return "sse";
+  }
+  if (typeof body.packageName === "string" && body.packageName.trim()) {
+    return "package";
+  }
+  return null;
+}
+
+function buildMergedMcpServerConfig(
+  patch: Partial<McpServerConfig>,
+  existing: McpServerConfig | null,
+): McpServerConfig {
+  const transportCandidate: Partial<McpServerConfig> = {
+    command: typeof patch.command === "string" ? patch.command.trim() : existing?.command,
+    args: sanitizeMcpStringList(patch.args ?? existing?.args ?? []),
+    env: sanitizeMcpStringRecord(patch.env ?? existing?.env ?? {}),
+    url: typeof patch.url === "string" ? patch.url.trim() : existing?.url,
+    httpUrl: typeof patch.httpUrl === "string" ? patch.httpUrl.trim() : existing?.httpUrl,
+    headers: sanitizeMcpStringRecord(patch.headers ?? existing?.headers ?? {}),
+  };
+  const transport = resolveMcpTransportKind(transportCandidate);
+
+  const common: Omit<McpServerConfig, "command" | "args" | "env" | "url" | "httpUrl" | "headers"> = {
+    enabled: patch.enabled ?? existing?.enabled ?? true,
+    roles: sanitizeMcpRoleList(patch.roles ?? existing?.roles ?? []),
+    includeTools: sanitizeMcpStringList(patch.includeTools ?? existing?.includeTools ?? []),
+    excludeTools: sanitizeMcpStringList(patch.excludeTools ?? existing?.excludeTools ?? []),
+    timeout: normalizeMcpTimeout(patch.timeout, existing?.timeout),
+    description: typeof patch.description === "string"
+      ? patch.description.trim() || undefined
+      : existing?.description,
+  };
+
+  if (transport === "stdio") {
+    return {
+      ...common,
+      command: transportCandidate.command?.trim(),
+      args: transportCandidate.args,
+      env: transportCandidate.env,
+    };
+  }
+
+  if (transport === "streamable-http") {
+    return {
+      ...common,
+      httpUrl: transportCandidate.httpUrl?.trim(),
+      headers: transportCandidate.headers,
+    };
+  }
+
+  return {
+    ...common,
+    url: transportCandidate.url?.trim(),
+    headers: transportCandidate.headers,
+  };
+}
+
 async function consolidatePersistedConversation(
   context: ExecutionContext,
   conversation: Conversation,
@@ -654,14 +899,24 @@ async function resolveAutoRouteDecision(
   }
 
   try {
+    const workflowState = createInitialDeliveryWorkflow(request.content) ??
+      extractPersistedDeliveryWorkflow(request.conversation);
+    const dispatchPromptStack = buildRolePromptStack({
+      settings,
+      role: "dispatch",
+      tools: [],
+      providers,
+      assignmentMap,
+      extraSharedSections: [buildDeliveryWorkflowPrompt(workflowState, "dispatch")],
+    });
     console.log(`[dispatch] calling ${routerProvider.name} (${routerAssignment?.modelId ?? "default model"})`);
     const routerExecution = await Promise.race([
       executeProviderChat(routerProvider, secrets, {
         modelId: routerAssignment?.modelId ?? null,
-        promptStack: getPromptStack(settings, "dispatch"),
+        promptStack: dispatchPromptStack,
         role: "dispatch",
         conversation: [],
-        content: buildDispatchInput(request),
+        content: buildDispatchInput(request, policy.decision),
         purpose: "route",
       }),
       new Promise<never>((_, reject) => {
@@ -688,7 +943,236 @@ async function resolveAutoRouteDecision(
   }
 }
 
-async function prepareExecution(request: ChatRequest): Promise<ExecutionContext> {
+async function resolveExecutionModelDecision(options: {
+  role: ExecutionRole;
+  provider: Provider;
+  preferredModelId: string | null;
+  request: Pick<ChatRequest, "content" | "conversation">;
+  settings: ExecutionContext["settings"];
+  providers: Provider[];
+  assignmentMap: Map<Role, RoleAssignment>;
+  secrets: ExecutionContext["secrets"];
+  workflowState: DeliveryWorkflowState | null;
+}): Promise<ExecutionModelDecision> {
+  const policy = resolveModelRoutePolicy({
+    role: options.role,
+    provider: options.provider,
+    assignedModelId: options.preferredModelId,
+    request: options.request,
+  });
+  const fallbackDecision = buildAssignedModelFallbackDecision({
+    role: options.role,
+    assignedModelId: options.preferredModelId,
+    candidates: policy.candidates,
+    policyDecision: policy.decision,
+  });
+  const shouldQueryDispatch =
+    policy.shouldQueryDispatch ||
+    (
+      fallbackDecision.modelId !== policy.decision.modelId &&
+      policy.candidates.length > 1 &&
+      options.request.content.trim().length > 0
+    );
+
+  if (!shouldQueryDispatch) {
+    return fallbackDecision;
+  }
+
+  const routerAssignment = options.assignmentMap.get("dispatch");
+  const routerProvider =
+    options.providers.find((candidate) => candidate.id === routerAssignment?.providerId) ?? null;
+
+  if (!routerProvider || routerProvider.status !== "connected" || !providerCanChat(routerProvider)) {
+    const reason = !routerProvider
+      ? "Dispatch provider is not assigned."
+      : routerProvider.status !== "connected"
+        ? `Dispatch provider ${routerProvider.name} is ${routerProvider.status}.`
+        : `Dispatch provider ${routerProvider.name} cannot execute chat requests.`;
+    return {
+      ...fallbackDecision,
+      source: "policy-fallback",
+      reason:
+        `${reason} ` +
+        `Keeping ${fallbackDecision.modelId ?? "the provider default"} as the assigned model lane.`,
+    };
+  }
+
+  try {
+    const dispatchPromptStack = buildRolePromptStack({
+      settings: options.settings,
+      role: "dispatch",
+      tools: [],
+      providers: options.providers,
+      assignmentMap: options.assignmentMap,
+      extraSharedSections: [buildDeliveryWorkflowPrompt(options.workflowState, "dispatch")],
+    });
+    console.log(
+      `[model-routing] calling ${routerProvider.name} for ${options.role} (${routerAssignment?.modelId ?? "default model"})`,
+    );
+    const routerExecution = await Promise.race([
+      executeProviderChat(routerProvider, options.secrets, {
+        modelId: routerAssignment?.modelId ?? null,
+        promptStack: dispatchPromptStack,
+        role: "dispatch",
+        conversation: [],
+        content: buildModelDispatchInput({
+          role: options.role,
+          provider: options.provider,
+          assignedModelId: options.preferredModelId,
+          request: options.request,
+          candidates: policy.candidates,
+          fallbackDecision,
+        }),
+        purpose: "route",
+      }),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => {
+          reject(new Error(`Model routing timed out after ${DISPATCH_TIMEOUT_MS}ms.`));
+        }, DISPATCH_TIMEOUT_MS).unref();
+      }),
+    ]);
+    console.log(`[model-routing] raw response: "${routerExecution.content}"`);
+    const decision = resolveModelDispatchDecision(
+      routerExecution.content,
+      fallbackDecision,
+      policy.candidates,
+    );
+    console.log(
+      `[model-routing] selected ${decision.modelId ?? "default"} for ${options.role} (source: ${decision.source}, confidence: ${decision.confidence.toFixed(2)})`,
+    );
+    return decision;
+  } catch (error) {
+    console.warn(
+      `[model-routing] failed, using policy fallback. reason: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return {
+      ...fallbackDecision,
+      source: "policy-fallback",
+      reason:
+        `Model routing failed, so the fallback kept ${fallbackDecision.modelId ?? "the provider default"}.`,
+    };
+  }
+}
+
+async function resolveExecutionProviderDecision(options: {
+  role: ExecutionRole;
+  preferredProviderId: string | null;
+  request: Pick<ChatRequest, "content" | "conversation">;
+  settings: ExecutionContext["settings"];
+  candidateProviders: Provider[];
+  providers: Provider[];
+  assignmentMap: Map<Role, RoleAssignment>;
+  secrets: ExecutionContext["secrets"];
+  workflowState: DeliveryWorkflowState | null;
+  requiresImages: boolean;
+}): Promise<ExecutionProviderDecision> {
+  const policy = resolveProviderRoutePolicy({
+    role: options.role,
+    providers: options.candidateProviders,
+    preferredProviderId: options.preferredProviderId,
+    request: options.request,
+    settings: options.settings,
+    requiresImages: options.requiresImages,
+  });
+  const fallbackDecision = buildAssignedProviderFallbackDecision({
+    role: options.role,
+    preferredProviderId: options.preferredProviderId,
+    providers: options.candidateProviders,
+    policyDecision: policy.decision,
+  });
+  const shouldQueryDispatch =
+    policy.shouldQueryDispatch ||
+    (
+      fallbackDecision.providerId !== policy.decision.providerId &&
+      policy.candidates.length > 1 &&
+      options.request.content.trim().length > 0
+    );
+
+  if (!shouldQueryDispatch) {
+    return fallbackDecision;
+  }
+
+  const routerAssignment = options.assignmentMap.get("dispatch");
+  const routerProvider =
+    options.providers.find((candidate) => candidate.id === routerAssignment?.providerId) ?? null;
+
+  if (!routerProvider || routerProvider.status !== "connected" || !providerCanChat(routerProvider)) {
+    const reason = !routerProvider
+      ? "Dispatch provider is not assigned."
+      : routerProvider.status !== "connected"
+        ? `Dispatch provider ${routerProvider.name} is ${routerProvider.status}.`
+        : `Dispatch provider ${routerProvider.name} cannot execute chat requests.`;
+    return {
+      ...fallbackDecision,
+      source: "policy-fallback",
+      reason:
+        `${reason} ` +
+        `Keeping ${fallbackDecision.providerId ?? "the assigned provider"} as the assigned provider lane.`,
+    };
+  }
+
+  try {
+    const dispatchPromptStack = buildRolePromptStack({
+      settings: options.settings,
+      role: "dispatch",
+      tools: [],
+      providers: options.providers,
+      assignmentMap: options.assignmentMap,
+      extraSharedSections: [buildDeliveryWorkflowPrompt(options.workflowState, "dispatch")],
+    });
+    console.log(
+      `[provider-routing] calling ${routerProvider.name} for ${options.role} (${routerAssignment?.modelId ?? "default model"})`,
+    );
+    const routerExecution = await Promise.race([
+      executeProviderChat(routerProvider, options.secrets, {
+        modelId: routerAssignment?.modelId ?? null,
+        promptStack: dispatchPromptStack,
+        role: "dispatch",
+        conversation: [],
+        content: buildProviderDispatchInput({
+          role: options.role,
+          request: options.request,
+          candidates: policy.candidates,
+          preferredProviderId: options.preferredProviderId,
+          fallbackDecision,
+        }),
+        purpose: "route",
+      }),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => {
+          reject(new Error(`Provider routing timed out after ${DISPATCH_TIMEOUT_MS}ms.`));
+        }, DISPATCH_TIMEOUT_MS).unref();
+      }),
+    ]);
+    console.log(`[provider-routing] raw response: "${routerExecution.content}"`);
+    const decision = resolveProviderDispatchDecision(
+      routerExecution.content,
+      fallbackDecision,
+      policy.candidates,
+    );
+    console.log(
+      `[provider-routing] selected ${decision.providerId ?? "none"} for ${options.role} (source: ${decision.source}, confidence: ${decision.confidence.toFixed(2)})`,
+    );
+    return decision;
+  } catch (error) {
+    console.warn(
+      `[provider-routing] failed, using policy fallback. reason: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return {
+      ...fallbackDecision,
+      source: "policy-fallback",
+      reason:
+        `Provider routing failed, so the fallback kept ${fallbackDecision.providerId ?? "no provider"}.`,
+    };
+  }
+}
+
+async function prepareExecution(
+  request: ChatRequest,
+  options: {
+    parallelDepth?: number;
+  } = {},
+): Promise<ExecutionContext> {
   const mode = normalizeChatMode(request.mode);
   const [settings, providers, assignments, secrets] = await Promise.all([
     readSettings(),
@@ -703,10 +1187,19 @@ async function prepareExecution(request: ChatRequest): Promise<ExecutionContext>
   const routerAssignment = assignmentMap.get("dispatch");
   const routerProvider =
     providers.find((candidate) => candidate.id === routerAssignment?.providerId) ?? null;
+  const workflowState = createInitialDeliveryWorkflow(request.content) ??
+    extractPersistedDeliveryWorkflow(request.conversation);
 
   setToolConfig({ sudoPassword: settings.sudoPassword ?? "" });
 
-  const dispatchPromptStack = getPromptStack(settings, "dispatch");
+  const dispatchPromptStack = buildRolePromptStack({
+    settings,
+    role: "dispatch",
+    tools: [],
+    providers,
+    assignmentMap,
+    extraSharedSections: [buildDeliveryWorkflowPrompt(workflowState, "dispatch")],
+  });
   const routingRequest =
     mode === "auto" ? compactChatRequest(request, settings, dispatchPromptStack, routerProvider) : request;
   const routeDecision =
@@ -716,7 +1209,29 @@ async function prepareExecution(request: ChatRequest): Promise<ExecutionContext>
   const routedTo = mode === "auto" ? resolveSpeakingRole(routeDecision?.role ?? null) : null;
   const activeRole = mode === "auto" ? routedTo ?? "coordinator" : resolveSpeakingRole(mode);
   const assignment = assignmentMap.get(activeRole);
-  const provider = providers.find((candidate) => candidate.id === assignment?.providerId) ?? null;
+  const candidateProviders = providers.filter((candidate) =>
+    candidate.id !== routerAssignment?.providerId || candidate.id === assignment?.providerId,
+  );
+  const preferredProvider = providers.find((candidate) => candidate.id === assignment?.providerId) ?? null;
+  const providerDecision = await resolveExecutionProviderDecision({
+    role: activeRole,
+    preferredProviderId: assignment?.providerId ?? null,
+    request: {
+      content: request.content,
+      conversation: request.conversation,
+    },
+    settings,
+    candidateProviders,
+    providers,
+    assignmentMap,
+    secrets,
+    workflowState,
+    requiresImages: requestHasImageAttachments(request),
+  });
+  const provider =
+    providers.find((candidate) => candidate.id === providerDecision.providerId) ??
+    preferredProvider ??
+    null;
   const executionProfile = resolveExecutionModelProfile(settings, provider, activeRole);
   const tools = provider && !provider.capabilities.canUseTools
     ? []
@@ -725,15 +1240,48 @@ async function prepareExecution(request: ChatRequest): Promise<ExecutionContext>
         content: request.content,
         conversation: request.conversation,
       });
-  const promptStack = getPromptStack(settings, activeRole);
-  promptStack.tools = getToolSystemPrompt(tools, activeRole, {
-    compact: executionProfile.compactToolPrompt,
+  const toolSnapshot = provider && !provider.capabilities.canUseTools
+    ? new Map()
+    : getExecutionToolSnapshotForRole(activeRole, {
+        compact: executionProfile.compactToolset,
+        content: request.content,
+        conversation: request.conversation,
+      });
+  const promptStack = buildRolePromptStack({
+    settings,
+    role: activeRole,
+    tools,
+    providers,
+    assignmentMap,
+    compactRolePrompt: executionProfile.compactCoordinatorProfile,
+    compactToolPrompt: executionProfile.compactToolPrompt,
+    extraSharedSections: [buildDeliveryWorkflowPrompt(workflowState, activeRole)],
   });
   const compactedRequest = compactChatRequest(request, settings, promptStack, provider);
+  const modelDecision = provider
+    ? await resolveExecutionModelDecision({
+        role: activeRole,
+        provider,
+        preferredModelId: provider.id === assignment?.providerId ? assignment?.modelId ?? null : null,
+        request: {
+          content: request.content,
+          conversation: request.conversation,
+        },
+        settings,
+        providers,
+        assignmentMap,
+        secrets,
+        workflowState,
+      })
+    : null;
   const responseModelId =
-    assignment?.modelId ?? provider?.config.defaultModelId ?? provider?.availableModels[0] ?? null;
+    modelDecision?.modelId ??
+    assignment?.modelId ??
+    provider?.config.defaultModelId ??
+    provider?.availableModels[0] ??
+    null;
   const routeNote = routeDecision
-    ? `Auto routed to ${routeDecision.role} via ${formatRouteSource(routeDecision.source)}.`
+    ? `Auto routed to ${routeDecision.role} via ${formatRouteSource(routeDecision.source)}. ${routeDecision.reason}`
     : null;
   const memoryRepository = settings.memory.enabled
     ? createMemoryRepository(settings.memory)
@@ -752,17 +1300,22 @@ async function prepareExecution(request: ChatRequest): Promise<ExecutionContext>
     activeRole,
     promptStack,
     tools,
+    toolSnapshot,
     assignment,
     provider,
+    providerDecision,
+    modelDecision,
     responseModelId,
     routeNote,
     handoffSourceRole: null,
+    workflowState,
     browserSessionKey: resolveBrowserSessionKey(request),
+    parallelDepth: options.parallelDepth ?? 0,
   };
 }
 
 function resolveExecutionGuard(context: ExecutionContext): never {
-  const { provider, routeNote } = context;
+  const { provider, routeNote, providerDecision, modelDecision } = context;
   let executionNote = provider
     ? `Assigned provider ${provider.name} is not ready for live execution yet.`
     : "No provider is assigned to this role yet.";
@@ -774,11 +1327,110 @@ function resolveExecutionGuard(context: ExecutionContext): never {
     executionNote = `Assigned provider ${provider.name} is currently ${provider.status}. Recheck the connection before using live execution.`;
   }
 
-  if (routeNote) {
-    executionNote = `${routeNote} ${executionNote}`;
-  }
+  executionNote = [
+    routeNote,
+    buildProviderSelectionNote(provider, providerDecision),
+    buildModelSelectionNote(modelDecision),
+    executionNote,
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   throw createStatusError(409, executionNote);
+}
+
+function buildParallelSubtaskContent(options: {
+  parentRequest: ChatRequest;
+  parentContext: ExecutionContext;
+  currentContent: string;
+  title: string;
+  task: string;
+}): string {
+  const sections = [
+    `PARENT GOAL: ${options.parentRequest.content}`,
+    `REQUESTED BY ROLE: ${options.parentContext.activeRole}`,
+  ];
+
+  const normalizedCurrent = options.currentContent.trim();
+  if (normalizedCurrent && normalizedCurrent !== options.parentRequest.content.trim()) {
+    sections.push(`CURRENT WORKING CONTEXT: ${normalizedCurrent}`);
+  }
+
+  sections.push(`SUBTASK TITLE: ${options.title}`);
+  sections.push(`SUBTASK: ${options.task}`);
+  sections.push(
+    "Complete only this subtask. Use tools if needed and return the concrete result to the calling agent.",
+  );
+
+  return sections.join("\n\n");
+}
+
+async function runParallelTasks(options: {
+  parentRequest: ChatRequest;
+  parentContext: ExecutionContext;
+  currentContent: string;
+  input: Record<string, unknown>;
+}): Promise<import("@ember/core").ToolResult> {
+  if (options.parentContext.parallelDepth >= MAX_PARALLEL_DEPTH) {
+    return "Parallel task execution is limited to one fan-out layer.";
+  }
+
+  const parsed = parseParallelTaskRequest(options.input, options.parentContext.activeRole);
+  if (parsed.error) {
+    return parsed.error;
+  }
+
+  const outcomes = await Promise.all(
+    parsed.tasks.map(async (task): Promise<ParallelTaskOutcome> => {
+      const nestedMode: ChatMode =
+        task.role === "auto" || task.role === "dispatch" ? "auto" : task.role;
+      const nestedRequest: ChatRequest = {
+        mode: nestedMode,
+        content: buildParallelSubtaskContent({
+          parentRequest: options.parentRequest,
+          parentContext: options.parentContext,
+          currentContent: options.currentContent,
+          title: task.title,
+          task: task.task,
+        }),
+        conversation: [],
+      };
+
+      try {
+        const built = await buildExecution(nestedRequest, {
+          parallelDepth: options.parentContext.parallelDepth + 1,
+        });
+        try {
+          const lastMessage = built.result.messages.at(-1) ?? null;
+          const content = lastMessage?.content?.trim() || "Subtask finished without a visible result.";
+          return {
+            title: task.title,
+            requestedRole: task.role,
+            activeRole: built.result.activeRole ?? lastMessage?.authorRole ?? null,
+            providerName: built.result.providerName ?? lastMessage?.providerName ?? null,
+            modelId: built.result.modelId ?? lastMessage?.modelId ?? null,
+            content,
+            error: null,
+          };
+        } finally {
+          await built.context.memoryRepository?.close?.();
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Subtask failed.";
+        return {
+          title: task.title,
+          requestedRole: task.role,
+          activeRole: null,
+          providerName: null,
+          modelId: null,
+          content: message,
+          error: message,
+        };
+      }
+    }),
+  );
+
+  return formatParallelTaskResults(outcomes);
 }
 
 async function persistConversationFromResult(
@@ -800,8 +1452,11 @@ async function persistConversationFromResult(
 
 async function buildExecution(
   request: ChatRequest,
+  options: {
+    parallelDepth?: number;
+  } = {},
 ): Promise<BuiltExecution> {
-  const context = await prepareExecution(request);
+  const context = await prepareExecution(request, options);
   try {
     const compactedRequest = context.compactedRequest;
     const provider = context.provider;
@@ -819,6 +1474,7 @@ async function buildExecution(
     const messages: ChatMessage[] = [];
     const toolObservations: MemoryToolObservation[] = [];
     const visitCounts = new Map<string, number>();
+    const workflowReminderCounts = new Map<string, number>();
     let currentCtx = context;
     let currentConversation = compactedRequest.conversation;
     let currentContent = compactedRequest.content;
@@ -844,7 +1500,18 @@ async function buildExecution(
         request.conversationId ?? null,
       );
       const handler = createToolHandler({
+        activeRole: currentCtx.activeRole,
+        workflowState: currentCtx.workflowState,
         browserSessionKey: currentCtx.browserSessionKey,
+        toolSnapshot: currentCtx.toolSnapshot,
+        parallelDepth: currentCtx.parallelDepth,
+        onParallelTasks: (input) =>
+          runParallelTasks({
+            parentRequest: request,
+            parentContext: currentCtx,
+            currentContent,
+            input,
+          }),
         onToolResult(observation) {
           toolObservations.push(observation);
         },
@@ -862,7 +1529,7 @@ async function buildExecution(
 
       try {
         const iterExecution = await executeProviderChat(iterProvider, currentCtx.secrets, {
-          modelId: currentCtx.assignment?.modelId ?? null,
+          modelId: currentCtx.responseModelId,
           promptStack: currentCtx.promptStack,
           memoryContext,
           procedureContext,
@@ -886,20 +1553,48 @@ async function buildExecution(
           new Date().toISOString(),
         );
       } catch (error) {
-        const note = `${currentCtx.routeNote ? `${currentCtx.routeNote} ` : ""}Live provider execution failed: ${
-          error instanceof Error ? error.message : "Unknown error."
-        }`;
+        const note = [
+          currentCtx.routeNote,
+          buildProviderSelectionNote(currentCtx.provider, currentCtx.providerDecision),
+          buildModelSelectionNote(currentCtx.modelDecision),
+          `Live provider execution failed: ${error instanceof Error ? error.message : "Unknown error."}`,
+        ]
+          .filter(Boolean)
+          .join(" ");
         if (iteration === 0) throw createStatusError(502, note);
         console.warn(`[loop] ${currentCtx.activeRole} failed: ${note}`);
         break;
       }
 
-      const iterNote = `${currentCtx.routeNote ?? ""} Live response via ${iterProvider.name}.`.trim();
+      const iterNote = [
+        currentCtx.routeNote,
+        buildProviderSelectionNote(currentCtx.provider, currentCtx.providerDecision),
+        buildModelSelectionNote(currentCtx.modelDecision),
+        `Live response via ${iterProvider.name}.`,
+      ]
+        .filter(Boolean)
+        .join(" ");
       const iterMsg = buildReplyMessage(currentCtx, request, iterContent, iterThinking, iterModelId, iterNote);
       messages.push(iterMsg);
 
       const handoff = handler.getPendingHandoff();
-      if (!handoff) break;
+      if (!handoff) {
+        const reminder = buildDeliveryWorkflowReminder(currentCtx.workflowState, currentCtx.activeRole);
+        if (reminder) {
+          const reminderCount = (workflowReminderCounts.get(currentCtx.activeRole) ?? 0) + 1;
+          if (reminderCount <= 1) {
+            workflowReminderCounts.set(currentCtx.activeRole, reminderCount);
+            currentConversation = [...compactedConversation, iterMsg];
+            currentContent = reminder;
+            currentCtx = {
+              ...currentCtx,
+              routeNote: `${currentCtx.routeNote ? `${currentCtx.routeNote} ` : ""}Delivery workflow requires a specialist handoff.`,
+            };
+            continue;
+          }
+        }
+        break;
+      }
 
       const visits = (visitCounts.get(handoff.role) ?? 0) + 1;
       if (visits > MAX_ROLE_VISITS) {
@@ -911,7 +1606,13 @@ async function buildExecution(
 
       currentConversation = [...compactedConversation, iterMsg];
       currentContent = handoff.message;
-      currentCtx = buildHandoffContext(currentCtx, handoff.role as ExecutionRole);
+      currentCtx = await buildHandoffContext(
+        currentCtx,
+        handoff.role as ExecutionRole,
+        handoff.message,
+        currentConversation,
+        handoff.workflowState,
+      );
     }
 
     const lastMessage = messages.at(-1)!;
@@ -980,7 +1681,8 @@ function loadDefaultMcpConfig(): McpConfig | null {
   for (const [name, server] of Object.entries(cfg.mcpServers)) {
     if (server.command !== "npx") continue;
     // Find the package name: first arg that looks like a package (skip flags like -y)
-    const pkgArg = server.args.find((a) => !a.startsWith("-"));
+    const args = server.args ?? [];
+    const pkgArg = args.find((a) => !a.startsWith("-"));
     if (!pkgArg) continue;
 
     // Convert @scope/pkg → scope/pkg for filesystem path lookup
@@ -1010,7 +1712,7 @@ function loadDefaultMcpConfig(): McpConfig | null {
 
     if (cliPath && existsSync(cliPath)) {
       // Strip the npx flags and package name, keep the rest as args to the CLI
-      const cliArgs = server.args.filter((a) => a !== "-y" && a !== "--yes" && a !== pkgArg);
+      const cliArgs = args.filter((a) => a !== "-y" && a !== "--yes" && a !== pkgArg);
       cfg.mcpServers[name] = {
         ...server,
         command: process.execPath, // node
@@ -1018,7 +1720,7 @@ function loadDefaultMcpConfig(): McpConfig | null {
       };
       console.log(`[mcp] resolved "${name}" to local CLI: ${cliPath}`);
     } else if (sourcePath) {
-      const cliArgs = server.args.filter((a) => a !== "-y" && a !== "--yes" && a !== pkgArg);
+      const cliArgs = args.filter((a) => a !== "-y" && a !== "--yes" && a !== pkgArg);
       cfg.mcpServers[name] = {
         ...server,
         command: process.execPath,
@@ -1031,12 +1733,54 @@ function loadDefaultMcpConfig(): McpConfig | null {
   return cfg;
 }
 
+const workspaceDir = process.cwd();
+const defaultMcpConfig = loadDefaultMcpConfig();
+
 // Start MCP servers and register their tools into the Ember tool registry.
 // Failure of individual servers is isolated — the main process continues.
 const mcpManager = new McpClientManager({
-  defaultConfig: loadDefaultMcpConfig(),
-  workspaceDir: process.cwd(),
+  defaultConfig: defaultMcpConfig,
+  workspaceDir,
 });
+
+async function reloadMcpRuntime(): Promise<void> {
+  replaceMcpTools(await mcpManager.reload());
+}
+
+function buildMcpApiState() {
+  const configState = readResolvedMcpConfigState({
+    defaultConfig: defaultMcpConfig,
+    workspaceDir,
+  });
+  const servers = mcpManager.getServerStatus();
+  const runtimeStats = mcpManager.getRuntimeStats();
+
+  return {
+    layers: configState.layers.map((layer) => ({
+      scope: layer.scope,
+      path: layer.path,
+      exists: layer.exists,
+      serverCount: Object.keys(layer.config?.mcpServers ?? {}).length,
+    })),
+    items: servers.map((server) => ({
+      ...server,
+      target: describeMcpServerTransport(server.config),
+    })),
+    merged: configState.servers.map((entry) => ({
+      name: entry.name,
+      sourceScope: entry.sourceScope,
+      config: entry.config,
+      target: describeMcpServerTransport(entry.config),
+    })),
+    stats: {
+      configuredServers: configState.servers.length,
+      runningServers: servers.filter((server) => server.status === "running").length,
+      drainingServers: runtimeStats.drainingServers,
+      activeTools: servers.reduce((total, server) => total + server.toolNames.length, 0),
+      activeCalls: runtimeStats.activeCalls,
+    },
+  };
+}
 
 await mcpManager.start();
 registerMcpTools(mcpManager.getTools());
@@ -1102,6 +1846,191 @@ app.get("/api/runtime", async () => {
     runtime,
     settings,
   };
+});
+
+app.get("/api/mcp/servers", async () => {
+  return buildMcpApiState();
+});
+
+app.post("/api/mcp/reload", async (_request, reply) => {
+  try {
+    await reloadMcpRuntime();
+    return buildMcpApiState();
+  } catch (error) {
+    reply.code(500);
+    return {
+      error: error instanceof Error ? error.message : "Failed to reload MCP servers.",
+    };
+  }
+});
+
+app.post("/api/mcp/install", async (request, reply) => {
+  const body = (request.body as {
+    transport?: string;
+    packageName?: string;
+    url?: string;
+    httpUrl?: string;
+    serverName?: string;
+    scope?: McpConfigScope;
+    roles?: Role[];
+    args?: string[];
+    env?: Record<string, string>;
+    headers?: Record<string, string>;
+    timeout?: number;
+    description?: string;
+  } | undefined) ?? {};
+  const scope = resolveWritableMcpScope(body.scope ?? "project");
+  if (!scope) {
+    reply.code(400);
+    return { error: "scope must be user or project." };
+  }
+
+  const transport = resolveMcpInstallTransport(body);
+  if (!transport) {
+    reply.code(400);
+    return { error: "transport must be package, sse, or streamable-http." };
+  }
+
+  const packageName = body.packageName?.trim() ?? "";
+  if (transport === "package") {
+    const packageError = validatePublicMcpPackageName(packageName);
+    if (packageError) {
+      reply.code(400);
+      return { error: packageError };
+    }
+  }
+
+  const remoteTarget = ((transport === "streamable-http" ? body.httpUrl : body.url) ?? "").trim();
+  let derivedRemoteName = "";
+  if (transport !== "package" && remoteTarget) {
+    try {
+      derivedRemoteName = normalizeMcpServerName(new URL(remoteTarget).hostname);
+    } catch {
+      derivedRemoteName = "";
+    }
+  }
+  const derivedServerName = body.serverName?.trim()
+    ? normalizeMcpServerName(body.serverName)
+    : transport === "package"
+      ? derivePublicMcpServerName(packageName)
+      : derivedRemoteName;
+  if (!derivedServerName) {
+    reply.code(400);
+    return { error: "serverName must contain letters or numbers." };
+  }
+
+  const roles = sanitizeMcpRoleList(body.roles);
+  if (roles.length === 0) {
+    reply.code(400);
+    return { error: "At least one role must be allowed to use the server." };
+  }
+
+  const config = transport === "package"
+    ? buildInstalledMcpServer({
+        packageName,
+        roles,
+        args: sanitizeMcpStringList(body.args),
+        env: sanitizeMcpStringRecord(body.env),
+        timeout: typeof body.timeout === "number" ? body.timeout : null,
+        description: typeof body.description === "string" ? body.description : null,
+      })
+    : buildRemoteMcpServer({
+        transport,
+        url: remoteTarget,
+        roles,
+        headers: sanitizeMcpStringRecord(body.headers),
+        timeout: typeof body.timeout === "number" ? body.timeout : null,
+        description: typeof body.description === "string" ? body.description : null,
+      });
+  const validationError = validateMcpServerConfig(config);
+  if (validationError) {
+    reply.code(400);
+    return { error: validationError };
+  }
+
+  await upsertMcpServer({
+    scope,
+    workspaceDir,
+    name: derivedServerName,
+    config,
+  });
+  await reloadMcpRuntime();
+
+  reply.code(201);
+  return buildMcpApiState();
+});
+
+app.put("/api/mcp/servers/:scope/:name", async (request, reply) => {
+  const params = request.params as { scope: McpConfigScope; name: string };
+  const body = (request.body as {
+    config?: Partial<McpServerConfig>;
+  } | undefined) ?? {};
+  const scope = resolveWritableMcpScope(params.scope);
+  if (!scope) {
+    reply.code(400);
+    return { error: "scope must be user or project." };
+  }
+
+  const serverName = normalizeMcpServerName(params.name);
+  if (!serverName) {
+    reply.code(400);
+    return { error: "Server name is required." };
+  }
+
+  const currentState = readResolvedMcpConfigState({
+    defaultConfig: defaultMcpConfig,
+    workspaceDir,
+  });
+  const existing = currentState.servers.find((entry) => entry.name === serverName)?.config ?? null;
+  const patch = body.config;
+  if (!patch) {
+    reply.code(400);
+    return { error: "config is required." };
+  }
+  const config = buildMergedMcpServerConfig(patch, existing);
+  const validationError = validateMcpServerConfig(config);
+  if (validationError) {
+    reply.code(400);
+    return { error: validationError };
+  }
+
+  await upsertMcpServer({
+    scope,
+    workspaceDir,
+    name: serverName,
+    config,
+  });
+  await reloadMcpRuntime();
+
+  return buildMcpApiState();
+});
+
+app.delete("/api/mcp/servers/:scope/:name", async (request, reply) => {
+  const params = request.params as { scope: McpConfigScope; name: string };
+  const scope = resolveWritableMcpScope(params.scope);
+  if (!scope) {
+    reply.code(400);
+    return { error: "scope must be user or project." };
+  }
+
+  const serverName = normalizeMcpServerName(params.name);
+  if (!serverName) {
+    reply.code(400);
+    return { error: "Server name is required." };
+  }
+
+  const removed = await removeMcpServer({
+    scope,
+    workspaceDir,
+    name: serverName,
+  });
+  if (!removed) {
+    reply.code(404);
+    return { error: "Server not found in that scope." };
+  }
+
+  await reloadMcpRuntime();
+  return buildMcpApiState();
 });
 
 app.get("/api/memory/overview", async (request, reply) => {
@@ -1751,14 +2680,38 @@ app.put("/api/settings", async (request, reply) => {
 
 app.get("/api/prompts/:role", async (request, reply) => {
   const role = (request.params as { role: Role }).role;
-  const settings = await readSettings();
   if (!["dispatch", "coordinator", "advisor", "director", "inspector", "ops"].includes(role)) {
     reply.code(400);
     return { error: "Unknown role." };
   }
 
+  const [settings, assignments, providers] = await Promise.all([
+    readSettings(),
+    readRoleAssignments(),
+    readProviders(),
+  ]);
+  const assignmentMap = new Map<Role, RoleAssignment>(
+    assignments.map((assignment) => [assignment.role, assignment]),
+  );
+  const assignment = assignmentMap.get(role);
+  const provider = providers.find((candidate) => candidate.id === assignment?.providerId) ?? null;
+  const executionProfile = resolveExecutionModelProfile(settings, provider, role);
+  const tools: ToolDefinition[] = role === "dispatch"
+    ? []
+    : getExecutionToolsForRole(role, {
+        compact: executionProfile.compactToolset,
+      });
+
   return {
-    item: getPromptStack(settings, role),
+    item: buildRolePromptStack({
+      settings,
+      role,
+      tools,
+      providers,
+      assignmentMap,
+      compactRolePrompt: executionProfile.compactCoordinatorProfile,
+      compactToolPrompt: executionProfile.compactToolPrompt,
+    }),
   };
 });
 
@@ -1848,7 +2801,9 @@ app.post("/api/chat/stream", async (request, reply) => {
       sendStreamEvent(send, {
         type: "status",
         phase: "routing",
-        message: `Auto routed to ${context.routeDecision.role} via ${formatRouteSource(context.routeDecision.source)}.`,
+        message:
+          `Auto routed to ${context.routeDecision.role} via ${formatRouteSource(context.routeDecision.source)}. ` +
+          context.routeDecision.reason,
         role: context.routeDecision.role,
         providerName: context.provider?.name ?? null,
         modelId: context.responseModelId,
@@ -1870,6 +2825,7 @@ app.post("/api/chat/stream", async (request, reply) => {
     let streamCtx = context;
     let streamConversation = [...compactedBody.conversation];
     let streamContent = compactedBody.content;
+    const streamWorkflowReminderCounts = new Map<string, number>();
 
     for (let iteration = 0; iteration < MAX_AGENT_LOOP; iteration++) {
       const iterProvider = streamCtx.provider;
@@ -1883,7 +2839,11 @@ app.post("/api/chat/stream", async (request, reply) => {
         sendStreamEvent(send, {
           type: "status",
           phase: "provider",
-          message: `Using ${iterProvider.name}${streamCtx.responseModelId ? ` with ${streamCtx.responseModelId}` : ""}.`,
+          message: buildProviderStatusMessage(
+            iterProvider,
+            streamCtx.providerDecision,
+            streamCtx.modelDecision,
+          ),
           role: streamCtx.activeRole,
           providerName: iterProvider.name,
           modelId: streamCtx.responseModelId,
@@ -1892,7 +2852,9 @@ app.post("/api/chat/stream", async (request, reply) => {
         sendStreamEvent(send, {
           type: "status",
           phase: "routing",
-          message: `Handing off to ${streamCtx.activeRole}...`,
+          message:
+            `Handing off to ${streamCtx.activeRole} via ${iterProvider.name}` +
+            `${streamCtx.responseModelId ? ` / ${streamCtx.responseModelId}` : ""}...`,
           role: streamCtx.activeRole,
           providerName: iterProvider.name,
           modelId: streamCtx.responseModelId,
@@ -1912,7 +2874,18 @@ app.post("/api/chat/stream", async (request, reply) => {
         body.conversationId ?? null,
       );
       const handler = createToolHandler({
+        activeRole: streamCtx.activeRole,
+        workflowState: streamCtx.workflowState,
         browserSessionKey: streamCtx.browserSessionKey,
+        toolSnapshot: streamCtx.toolSnapshot,
+        parallelDepth: streamCtx.parallelDepth,
+        onParallelTasks: (input) =>
+          runParallelTasks({
+            parentRequest: body,
+            parentContext: streamCtx,
+            currentContent: streamContent,
+            input,
+          }),
         onToolResult(observation) {
           toolObservations.push(observation);
         },
@@ -1932,7 +2905,7 @@ app.post("/api/chat/stream", async (request, reply) => {
           iterProvider,
           context.secrets,
           {
-            modelId: streamCtx.assignment?.modelId ?? null,
+            modelId: streamCtx.responseModelId,
             promptStack: streamCtx.promptStack,
             memoryContext,
             procedureContext,
@@ -1974,14 +2947,37 @@ app.post("/api/chat/stream", async (request, reply) => {
           new Date().toISOString(),
         );
 
-        const iterNote = `${streamCtx.routeNote ?? ""} Live response via ${iterProvider.name}.`.trim();
+        const iterNote = [
+          streamCtx.routeNote,
+          buildProviderSelectionNote(streamCtx.provider, streamCtx.providerDecision),
+          buildModelSelectionNote(streamCtx.modelDecision),
+          `Live response via ${iterProvider.name}.`,
+        ]
+          .filter(Boolean)
+          .join(" ");
         const iterMsg = buildReplyMessage(
           streamCtx, body, iterExecution.content, iterExecution.thinking ?? null, iterExecution.modelId, iterNote,
         );
         resultMessages.push(iterMsg);
 
         const handoff = handler.getPendingHandoff();
-        if (!handoff) break;
+        if (!handoff) {
+          const reminder = buildDeliveryWorkflowReminder(streamCtx.workflowState, streamCtx.activeRole);
+          if (reminder) {
+            const reminderCount = (streamWorkflowReminderCounts.get(streamCtx.activeRole) ?? 0) + 1;
+            if (reminderCount <= 1) {
+              streamWorkflowReminderCounts.set(streamCtx.activeRole, reminderCount);
+              streamConversation = [...compactedConversation, iterMsg];
+              streamContent = reminder;
+              streamCtx = {
+                ...streamCtx,
+                routeNote: `${streamCtx.routeNote ? `${streamCtx.routeNote} ` : ""}Delivery workflow requires a specialist handoff.`,
+              };
+              continue;
+            }
+          }
+          break;
+        }
 
         const visits = (streamVisitCounts.get(handoff.role) ?? 0) + 1;
         if (visits > MAX_ROLE_VISITS) {
@@ -1993,7 +2989,13 @@ app.post("/api/chat/stream", async (request, reply) => {
 
         streamConversation = [...compactedConversation, iterMsg];
         streamContent = handoff.message;
-        streamCtx = buildHandoffContext(streamCtx, handoff.role as ExecutionRole);
+        streamCtx = await buildHandoffContext(
+          streamCtx,
+          handoff.role as ExecutionRole,
+          handoff.message,
+          streamConversation,
+          handoff.workflowState,
+        );
       } catch (chainError) {
         if (iteration === 0) throw chainError;
         console.warn(`[loop] ${streamCtx.activeRole} failed: ${chainError instanceof Error ? chainError.message : String(chainError)}`);

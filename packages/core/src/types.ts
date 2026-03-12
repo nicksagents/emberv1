@@ -135,7 +135,7 @@ export interface RuntimeState {
   startedAt: string | null;
   webUrl: string;
   apiUrl: string;
-  status: "idle" | "starting" | "running" | "error";
+  status: "idle" | "starting" | "running" | "stopping" | "error";
 }
 
 export interface ProviderSecrets {

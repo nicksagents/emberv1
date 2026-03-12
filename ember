@@ -2,158 +2,24 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "$ROOT_DIR"
+export EMBER_ROOT="$ROOT_DIR"
 
-# ── Colours ────────────────────────────────────────────────────────────────
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-BLUE='\033[0;34m'; BOLD='\033[1m'; NC='\033[0m'
+case " ${NODE_OPTIONS-} " in
+  *" --disable-warning=ExperimentalWarning "*) ;;
+  *) export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--disable-warning=ExperimentalWarning" ;;
+esac
 
-log()  { echo -e "${BLUE}▶${NC} $*"; }
-ok()   { echo -e "${GREEN}✓${NC} $*"; }
-warn() { echo -e "${YELLOW}⚠${NC} $*"; }
-err()  { echo -e "${RED}✗${NC} $*" >&2; }
-die()  { err "$*"; exit 1; }
+CLI_DIST="$ROOT_DIR/packages/cli/dist/index.js"
+CLI_SRC="$ROOT_DIR/packages/cli/src/index.ts"
+TSX_BIN="$ROOT_DIR/node_modules/.bin/tsx"
 
-# ── Sanity check ──────────────────────────────────────────────────────────
-if [ ! -f "$ROOT_DIR/pnpm-workspace.yaml" ]; then
-  die "Run this script from the Ember repo root, or install globally via scripts/install.sh"
+if [ -f "$CLI_DIST" ]; then
+  exec node "$CLI_DIST" "$@"
 fi
 
-# ── Load .env ─────────────────────────────────────────────────────────────
-if [ -f "$ROOT_DIR/.env" ]; then
-  # Export only lines that look like KEY=VALUE (skip comments and blanks)
-  set -o allexport
-  # shellcheck disable=SC1091
-  source <(grep -E '^[A-Z_]+=.*' "$ROOT_DIR/.env" || true)
-  set +o allexport
+if [ -x "$TSX_BIN" ]; then
+  exec "$TSX_BIN" "$CLI_SRC" "$@"
 fi
 
-WEB_PORT="${EMBER_WEB_PORT:-3000}"
-SERVER_PORT="${EMBER_RUNTIME_PORT:-3005}"
-
-# ── Pre-flight: packages built? ────────────────────────────────────────────
-if [ ! -f "$ROOT_DIR/packages/core/dist/index.js" ]; then
-  warn "Packages not built yet — run scripts/install.sh first."
-  warn "Attempting quick build now..."
-  pnpm --filter @ember/core build --silent
-  pnpm --filter @ember/ui-schema build --silent
-  pnpm --filter @ember/connectors build --silent
-  pnpm --filter @ember/prompts build --silent
-fi
-
-# ── Banner ─────────────────────────────────────────────────────────────────
-echo ""
-echo -e "${BOLD}  🔥 Ember${NC}"
-echo -e "  API server  →  http://localhost:${SERVER_PORT}"
-echo -e "  Web UI      →  http://localhost:${WEB_PORT}"
-echo ""
-echo -e "  ${YELLOW}Ctrl-C to stop both services${NC}"
-echo ""
-
-# ── Start services ─────────────────────────────────────────────────────────
-pnpm --filter @ember/server dev &
-SERVER_PID=$!
-
-pnpm --filter @ember/web dev &
-WEB_PID=$!
-
-# Open browser after services have had time to start (macOS / Linux)
-(sleep 5 && {
-  if command -v open &>/dev/null; then
-    open "http://localhost:${WEB_PORT}"
-  elif command -v xdg-open &>/dev/null; then
-    xdg-open "http://localhost:${WEB_PORT}"
-  fi
-}) &
-OPEN_PID=$!
-
-# ── Graceful shutdown ──────────────────────────────────────────────────────
-is_running() {
-  local pid="$1"
-  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
-}
-
-kill_tree() {
-  local pid="$1"
-  [ -n "$pid" ] || return 0
-
-  local children child
-  children="$(pgrep -P "$pid" 2>/dev/null || true)"
-  for child in $children; do
-    kill_tree "$child"
-  done
-
-  kill "$pid" 2>/dev/null || true
-}
-
-terminate_process() {
-  local pid="$1"
-  [ -n "$pid" ] || return 0
-  is_running "$pid" || return 0
-
-  kill_tree "$pid"
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    if ! is_running "$pid"; then
-      return 0
-    fi
-    sleep 0.2
-  done
-
-  kill -9 "$pid" 2>/dev/null || true
-}
-
-port_listener_pids() {
-  local port="$1"
-  lsof -nP -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true
-}
-
-is_ember_process() {
-  local pid="$1"
-  local cwd_line
-  cwd_line="$(lsof -nP -a -p "$pid" -d cwd 2>/dev/null | tail -n +2 || true)"
-  [ -n "$cwd_line" ] || return 1
-  [[ "$cwd_line" == *"$ROOT_DIR"* ]]
-}
-
-clear_stale_port() {
-  local port="$1"
-  local label="$2"
-  local pid
-  for pid in $(port_listener_pids "$port"); do
-    if is_ember_process "$pid"; then
-      warn "Clearing stale Ember ${label} listener on port ${port} (pid ${pid})"
-      terminate_process "$pid"
-    fi
-  done
-}
-
-clear_stale_port "$SERVER_PORT" "server"
-clear_stale_port "$WEB_PORT" "web"
-
-cleanup() {
-  trap - INT TERM EXIT
-  echo ""
-  log "Shutting down Ember..."
-  terminate_process "$SERVER_PID"
-  terminate_process "$WEB_PID"
-  terminate_process "$OPEN_PID"
-  wait "$SERVER_PID" "$WEB_PID" 2>/dev/null || true
-  ok "Stopped."
-}
-trap cleanup INT TERM EXIT
-
-while true; do
-  if ! is_running "$SERVER_PID"; then
-    wait "$SERVER_PID" 2>/dev/null || true
-    cleanup
-    exit 1
-  fi
-
-  if ! is_running "$WEB_PID"; then
-    wait "$WEB_PID" 2>/dev/null || true
-    cleanup
-    exit 1
-  fi
-
-  sleep 1
-done
+echo "EMBER CLI is not ready yet. Run ./scripts/install.sh first." >&2
+exit 1

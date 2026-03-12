@@ -1,7 +1,7 @@
 import type { PromptStack, Role, Settings } from "@ember/core";
 
 import { advisorPrompt } from "./advisor.js";
-import { coordinatorPrompt } from "./coordinator.js";
+import { compactCoordinatorPrompt, coordinatorPrompt } from "./coordinator.js";
 import { directorPrompt } from "./director.js";
 import { dispatchPrompt } from "./dispatch.js";
 import { inspectorPrompt } from "./inspector.js";
@@ -17,7 +17,13 @@ const rolePromptMap: Record<Role, string> = {
   ops: opsPrompt,
 };
 
-export function getPromptStack(settings: Settings, role: Role): PromptStack {
+export function getPromptStack(
+  settings: Settings,
+  role: Role,
+  options: {
+    compact?: boolean;
+  } = {},
+): PromptStack {
   if (role === "dispatch") {
     const override = settings.systemPrompts.roles.dispatch.trim();
     return {
@@ -29,10 +35,16 @@ export function getPromptStack(settings: Settings, role: Role): PromptStack {
 
   const sharedOverride = settings.systemPrompts.shared.trim();
   const roleOverride = settings.systemPrompts.roles[role].trim();
+  const compact = options.compact === true;
+  const sharedPrompt = buildSharedPrompt(settings, role, { compact });
+  const rolePrompt =
+    compact && role === "coordinator"
+      ? compactCoordinatorPrompt
+      : rolePromptMap[role];
 
   return {
-    shared: [buildSharedPrompt(settings, role), sharedOverride].filter(Boolean).join("\n\n"),
-    role: roleOverride || rolePromptMap[role],
+    shared: [sharedPrompt, sharedOverride].filter(Boolean).join("\n\n"),
+    role: roleOverride || rolePrompt,
     tools: "",
   };
 }

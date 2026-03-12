@@ -27,11 +27,20 @@ NODE_MAJOR=$(node -e "process.stdout.write(String(process.versions.node.split('.
 [ "$NODE_MAJOR" -ge 20 ] || die "Node.js v20+ required (found $(node --version)). Update at https://nodejs.org"
 ok "Node.js $(node --version)"
 
+log "Checking npm..."
+command -v npm &>/dev/null || die "npm is required. Reinstall Node.js from https://nodejs.org"
+ok "npm $(npm --version)"
+
 # ── 2. pnpm ────────────────────────────────────────────────────────────────
 log "Checking pnpm..."
 if ! command -v pnpm &>/dev/null; then
   log "Installing pnpm via corepack..."
-  corepack enable pnpm || npm install -g pnpm
+  if command -v corepack &>/dev/null; then
+    corepack enable
+    corepack prepare pnpm@10.9.0 --activate || npm install -g pnpm@10.9.0
+  else
+    npm install -g pnpm@10.9.0
+  fi
 fi
 ok "pnpm $(pnpm --version)"
 
@@ -48,24 +57,19 @@ else
   ok ".env already exists"
 fi
 
-# ── 5. Data directory ──────────────────────────────────────────────────────
-log "Preparing data directory..."
-mkdir -p "$ROOT_DIR/data"
-for file in connector-types.json providers.json conversations.json role-assignments.json runtime.json; do
-  [ -f "$ROOT_DIR/data/$file" ] || echo "[]" > "$ROOT_DIR/data/$file"
-done
-# These must be JSON objects, not arrays:
-[ -f "$ROOT_DIR/data/settings.json" ]         || echo "{}" > "$ROOT_DIR/data/settings.json"
-[ -f "$ROOT_DIR/data/provider-secrets.json" ] || echo "{}" > "$ROOT_DIR/data/provider-secrets.json"
-ok "Data directory ready"
-
-# ── 6. Build packages ──────────────────────────────────────────────────────
+# ── 5. Build packages ──────────────────────────────────────────────────────
 log "Building packages (first run takes ~30 seconds)..."
 pnpm --filter @ember/core build
 pnpm --filter @ember/ui-schema build
 pnpm --filter @ember/connectors build
 pnpm --filter @ember/prompts build
+pnpm --filter @ember/cli build
 ok "Packages built"
+
+# ── 6. Runtime bootstrap ───────────────────────────────────────────────────
+log "Preparing data files and memory runtime..."
+node "$ROOT_DIR/scripts/bootstrap-runtime.mjs"
+ok "Runtime bootstrap complete"
 
 # ── 7. Playwright browsers ────────────────────────────────────────────────
 log "Installing Playwright Chromium (used for web automation)..."
@@ -82,6 +86,7 @@ log "Installing the global 'ember' command..."
 
 INSTALL_DIR="$HOME/.local/bin"
 mkdir -p "$INSTALL_DIR"
+chmod +x "$ROOT_DIR/ember"
 
 # Write a wrapper that delegates to this repo's ember script.
 # Using printf to avoid heredoc variable-expansion issues.
@@ -101,7 +106,12 @@ add_to_path "$HOME/.zshrc"
 add_to_path "$HOME/.bashrc"
 add_to_path "$HOME/.bash_profile"
 
-# ── 9. Done ────────────────────────────────────────────────────────────────
+# ── 9. Diagnostics ─────────────────────────────────────────────────────────
+log "Running Ember doctor..."
+"$ROOT_DIR/ember" doctor
+ok "Doctor checks completed"
+
+# ── 10. Done ───────────────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}${GREEN}  Ember is ready!${NC}"
 echo ""

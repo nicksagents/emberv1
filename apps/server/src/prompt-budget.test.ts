@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { normalizeProvider, normalizeSettings } from "@ember/core";
-import type { Provider } from "@ember/core";
+import { ROLES, normalizeProvider, normalizeSettings } from "@ember/core";
+import type { Provider, RoleAssignment } from "@ember/core";
 
 import {
   resolveAdaptiveMemoryRetrievalBudget,
@@ -11,6 +11,8 @@ import {
   resolveExecutionPromptBudget,
   toMemorySearchBudgetOverrides,
 } from "./prompt-budget.js";
+import { buildRolePromptStack } from "./orchestration-prompt.js";
+import { getExecutionToolsForRole } from "./tools/index.js";
 
 function makeProvider(
   overrides: Partial<Provider> & { typeId: Provider["typeId"] },
@@ -112,4 +114,58 @@ test("resolveExecutionModelProfile enables compact coordinator mode for small lo
   assert.equal(compactCoordinator.compactToolset, true);
   assert.equal(fullCoordinator.compactCoordinatorProfile, false);
   assert.equal(directorProfile.compactCoordinatorProfile, false);
+});
+
+test("compact coordinator profile keeps prompt and tool overhead small for local models", () => {
+  const settings = normalizeSettings({}, "/tmp/workspace");
+  const provider = makeProvider({
+    typeId: "openai-compatible",
+    config: {
+      baseUrl: "http://127.0.0.1:11434/v1",
+      contextWindowTokens: "25000",
+    },
+  });
+
+  const executionProfile = resolveExecutionModelProfile(settings, provider, "coordinator");
+  const tools = getExecutionToolsForRole("coordinator", {
+    compact: executionProfile.compactToolset,
+    content: "Search the latest docs and fetch the relevant page.",
+    conversation: [],
+  });
+  const assignmentMap = new Map<RoleAssignment["role"], RoleAssignment>(
+    ROLES.map((role) => [
+      role,
+      {
+        role,
+        providerId: role === "coordinator" ? provider.id : null,
+        modelId: null,
+      },
+    ]),
+  );
+  const promptStack = buildRolePromptStack({
+    settings,
+    role: "coordinator",
+    tools,
+    providers: [provider],
+    assignmentMap,
+    compactRolePrompt: executionProfile.compactCoordinatorProfile,
+    compactToolPrompt: executionProfile.compactToolPrompt,
+  });
+
+  const promptChars = [promptStack.shared, promptStack.role, promptStack.tools].join("\n\n").length;
+  const toolBodyChars = JSON.stringify(
+    tools.map((tool) => ({
+      type: "function",
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.inputSchema,
+      },
+    })),
+  ).length;
+
+  assert.ok(promptChars < 3_200);
+  assert.ok(toolBodyChars < 3_600);
+  assert.ok(tools.length <= 6);
+  assert.match(promptStack.shared, /Current lane:/);
 });

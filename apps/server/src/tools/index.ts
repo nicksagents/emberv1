@@ -1,5 +1,7 @@
 import type { ChatMessage, MemoryToolObservation, Role, ToolDefinition, ToolResult } from "@ember/core";
 import { skillManager } from "@ember/core/skills";
+import type { DeliveryWorkflowState } from "../delivery-workflow.js";
+import { resolveDeliveryWorkflowAfterHandoff } from "../delivery-workflow.js";
 
 // browserTool is intentionally NOT imported here — replaced by @playwright/mcp (Phase 3).
 // See apps/server/mcp.default.json and skills/playwright-browser/SKILL.md.
@@ -10,6 +12,7 @@ import { gitInspectTool } from "./git-inspect.js";
 import { handoffTool } from "./handoff.js";
 import { httpRequestTool } from "./http-request.js";
 import { forgetMemoryTool, memoryGetTool, memorySearchTool, saveMemoryTool } from "./memory.js";
+import { parallelTasksTool } from "./parallel-tasks.js";
 import { projectOverviewTool } from "./project-overview.js";
 import { searchFilesTool } from "./search-files.js";
 import { setSudoPassword, terminalTool } from "./terminal.js";
@@ -23,7 +26,7 @@ export type { EmberTool };
 // See TOOLS.md for how to create and register a new tool.
 // MCP tools are added at startup via registerMcpTools() — do not edit by hand.
 
-const REGISTRY: EmberTool[] = [
+const BASE_REGISTRY: EmberTool[] = [
   projectOverviewTool,
   gitInspectTool,
   terminalTool,
@@ -40,9 +43,12 @@ const REGISTRY: EmberTool[] = [
   memorySearchTool,
   memoryGetTool,
   forgetMemoryTool,
+  parallelTasksTool,
   // browserTool removed — replaced by @playwright/mcp (mcp__playwright__browser_*)
   handoffTool,
 ];
+
+const REGISTRY: EmberTool[] = [...BASE_REGISTRY];
 
 // Fast lookup map rebuilt whenever registerMcpTools() adds new tools.
 const TOOL_MAP = new Map<string, EmberTool>(
@@ -56,21 +62,29 @@ const TOOL_MAP = new Map<string, EmberTool>(
 // Note: browser tools are NOT listed here — they are injected at startup via
 // registerMcpTools() when the @playwright/mcp server connects (mcp.default.json).
 // Roles: coordinator, advisor, director, inspector get mcp__playwright__browser_*
-const ROLE_TOOLS: Record<Role, EmberTool[]> = {
+const BASE_ROLE_TOOLS: Record<Role, EmberTool[]> = {
   dispatch:    [],
-  coordinator: [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, handoffTool],
-  advisor:     [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, handoffTool],
-  director:    [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, handoffTool],
-  inspector:   [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, handoffTool],
+  coordinator: [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, parallelTasksTool, handoffTool],
+  advisor:     [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, parallelTasksTool, handoffTool],
+  director:    [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, parallelTasksTool, handoffTool],
+  inspector:   [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, parallelTasksTool, handoffTool],
   ops:         [editFileTool, deleteFileTool],
 };
+
+const ROLE_TOOLS: Record<Role, EmberTool[]> = Object.fromEntries(
+  Object.entries(BASE_ROLE_TOOLS).map(([role, tools]) => [role, [...tools]]),
+) as Record<Role, EmberTool[]>;
+const MCP_TOOL_REGISTRY = new Map<string, { tool: EmberTool; roles: Role[] }>();
 
 // ─── Handoff state ────────────────────────────────────────────────────────────
 
 export interface PendingHandoff {
   role: string;
   message: string;
+  workflowState: DeliveryWorkflowState | null;
 }
+
+export type ToolSnapshot = ReadonlyMap<string, EmberTool>;
 
 const VALID_HANDOFF_ROLES = ["advisor", "coordinator", "director", "inspector", "ops"];
 const COMPACT_BROWSER_TOOL_SUFFIXES = new Set([
@@ -79,10 +93,49 @@ const COMPACT_BROWSER_TOOL_SUFFIXES = new Set([
   "browser_click",
   "browser_fill_form",
   "browser_type",
+  "browser_press_key",
+  "browser_select_option",
+  "browser_check",
   "browser_wait_for",
   "browser_get_url",
   "browser_screenshot",
+  "browser_take_screenshot",
+  "browser_navigate_back",
+  "browser_handle_dialog",
   "browser_evaluate",
+]);
+const HANDOFF_REQUIRED_SECTIONS = ["GOAL", "DONE", "TODO", "FILES", "NOTES"] as const;
+const TOOL_DESCRIPTION_LIMIT = 110;
+const TOOL_PROPERTY_DESCRIPTION_LIMIT = 56;
+const COMPACT_EXTRA_MCP_TOOL_LIMIT = 4;
+const COMPACT_TOOL_SELECTION_STOP_WORDS = new Set([
+  "about",
+  "after",
+  "again",
+  "agent",
+  "around",
+  "build",
+  "could",
+  "fetch",
+  "from",
+  "have",
+  "into",
+  "just",
+  "latest",
+  "make",
+  "need",
+  "page",
+  "please",
+  "project",
+  "repo",
+  "role",
+  "that",
+  "this",
+  "tool",
+  "using",
+  "want",
+  "with",
+  "work",
 ]);
 
 function toolResultToText(result: ToolResult): string {
@@ -142,12 +195,109 @@ function resolveToolObservation(
   };
 }
 
+function validateHandoffMessage(message: string): string | null {
+  const missing = HANDOFF_REQUIRED_SECTIONS.filter((section) =>
+    !new RegExp(`(^|\\n)${section}:\\s*\\S`, "i").test(message),
+  );
+  if (missing.length === 0) {
+    return null;
+  }
+  return `Handoff message must include ${missing.join(", ")} sections.`;
+}
+
+function tokenizeToolSelectionText(value: string): Set<string> {
+  return new Set(
+    value
+      .toLowerCase()
+      .split(/[^a-z0-9]+/g)
+      .map((token) => token.trim())
+      .filter((token) =>
+        token.length >= 4 &&
+        !COMPACT_TOOL_SELECTION_STOP_WORDS.has(token),
+      ),
+  );
+}
+
+function scoreCompactToolRelevance(
+  tool: ToolDefinition,
+  contextTokens: ReadonlySet<string>,
+): number {
+  if (contextTokens.size === 0) {
+    return 0;
+  }
+
+  const haystack = tokenizeToolSelectionText(
+    `${tool.name.replace(/__/g, " ").replace(/_/g, " ")} ${tool.description}`,
+  );
+  let score = 0;
+  for (const token of contextTokens) {
+    if (haystack.has(token)) {
+      score += 1;
+    }
+  }
+  return score;
+}
+
+function selectRelevantCompactMcpTools(
+  tools: ToolDefinition[],
+  contextText: string,
+  selectedNames: ReadonlySet<string>,
+  options: {
+    needsInteractiveBrowser: boolean;
+    needsProjectScaffold: boolean;
+  },
+): Set<string> {
+  const extra = new Set<string>();
+  const contextTokens = tokenizeToolSelectionText(contextText);
+
+  if (options.needsInteractiveBrowser) {
+    for (const tool of tools) {
+      if (!tool.name.startsWith("mcp__playwright__")) {
+        continue;
+      }
+      const suffix = tool.name.split("__").slice(-1)[0] ?? "";
+      if (COMPACT_BROWSER_TOOL_SUFFIXES.has(suffix)) {
+        extra.add(tool.name);
+      }
+    }
+  }
+
+  if (options.needsProjectScaffold) {
+    for (const tool of tools) {
+      if (tool.name.startsWith("mcp__scaffold__")) {
+        extra.add(tool.name);
+      }
+    }
+  }
+
+  const ranked = tools
+    .filter((tool) => tool.name.startsWith("mcp__") && !selectedNames.has(tool.name) && !extra.has(tool.name))
+    .map((tool) => ({
+      name: tool.name,
+      score: scoreCompactToolRelevance(tool, contextTokens),
+    }))
+    .filter((entry) => entry.score > 0)
+    .sort((left, right) => right.score - left.score || left.name.localeCompare(right.name))
+    .slice(0, COMPACT_EXTRA_MCP_TOOL_LIMIT);
+
+  for (const entry of ranked) {
+    extra.add(entry.name);
+  }
+
+  return extra;
+}
+
 /**
  * Creates a per-execution tool handler that intercepts `handoff` calls and
- * delegates everything else to the global handleToolCall.
+ * can execute the request-scoped tool snapshot for the current run.
  */
 export function createToolHandler(options?: {
+  activeRole?: Role;
+  workflowState?: DeliveryWorkflowState | null;
   browserSessionKey?: string;
+  toolSnapshot?: ToolSnapshot;
+  parallelDepth?: number;
+  onParallelTasks?: (input: Record<string, unknown>) => Promise<import("@ember/core").ToolResult>;
   onToolResult?: (observation: MemoryToolObservation) => void;
 }) {
   let pendingHandoff: PendingHandoff | null = null;
@@ -155,6 +305,9 @@ export function createToolHandler(options?: {
   return {
     async onToolCall(name: string, input: Record<string, unknown>): Promise<import("@ember/core").ToolResult> {
       if (name === "handoff") {
+        if (pendingHandoff) {
+          return `Handoff already registered for ${pendingHandoff.role}. Finish your response without calling handoff again.`;
+        }
         const role = String(input.role ?? "").toLowerCase().trim();
         const message = String(input.message ?? "").trim();
         if (!VALID_HANDOFF_ROLES.includes(role)) {
@@ -163,14 +316,46 @@ export function createToolHandler(options?: {
         if (!message) {
           return "Handoff message is required. Include the goal, completed work, and what the next role should do.";
         }
-        pendingHandoff = { role, message };
+        const handoffValidationError = validateHandoffMessage(message);
+        if (handoffValidationError) {
+          return handoffValidationError;
+        }
+        const workflowResolution = resolveDeliveryWorkflowAfterHandoff({
+          current: options?.workflowState ?? null,
+          sourceRole: options?.activeRole ?? "coordinator",
+          targetRole: role,
+          message,
+        });
+        if (workflowResolution.error) {
+          return workflowResolution.error;
+        }
+        pendingHandoff = { role, message, workflowState: workflowResolution.state };
         return `Handoff to ${role} registered. Wrap up your response and ${role} will continue.`;
+      }
+
+      if (name === "launch_parallel_tasks") {
+        if (!options?.onParallelTasks) {
+          return "Parallel task execution is not available in this context.";
+        }
+        if ((options.parallelDepth ?? 0) >= 1) {
+          return "Parallel task execution is limited to one fan-out layer. Finish this subtask without launching more parallel workers.";
+        }
+        const result = await options.onParallelTasks(input);
+        options.onToolResult?.(resolveToolObservation(name, input, result));
+        return result;
+      }
+
+      const tool = resolveTool(name, options?.toolSnapshot);
+      if (!tool) {
+        return options?.toolSnapshot
+          ? `Tool "${name}" is not active for this execution.`
+          : `Unknown tool: ${name}`;
       }
 
       // Only terminal tools use __sessionKey for session persistence.
       // Playwright MCP manages its own sessions internally via the MCP server process.
       if (name === "run_terminal_command" && options?.browserSessionKey) {
-        const result = await handleToolCall(name, {
+        const result = await tool.execute({
           ...input,
           __sessionKey: options.browserSessionKey,
         });
@@ -178,7 +363,7 @@ export function createToolHandler(options?: {
         return result;
       }
 
-      const result = await handleToolCall(name, input);
+      const result = await tool.execute(input);
       options?.onToolResult?.(resolveToolObservation(name, input, result));
       return result;
     },
@@ -210,28 +395,67 @@ export function setToolConfig(config: { sudoPassword?: string }) {
 export function registerMcpTools(
   entries: Array<{ tool: EmberTool; roles: Role[] }>,
 ): void {
+  ingestMcpTools(entries, false);
+}
+
+export function replaceMcpTools(
+  entries: Array<{ tool: EmberTool; roles: Role[] }>,
+): void {
+  ingestMcpTools(entries, true);
+}
+
+export function getToolsForRole(role: Role): ToolDefinition[] {
+  return (ROLE_TOOLS[role] ?? []).map((t) => t.definition);
+}
+
+function ingestMcpTools(
+  entries: Array<{ tool: EmberTool; roles: Role[] }>,
+  replaceAll: boolean,
+): void {
+  if (replaceAll) {
+    MCP_TOOL_REGISTRY.clear();
+  }
+
   for (const { tool, roles } of entries) {
-    // Skip if already registered (e.g. duplicate names from multiple servers)
-    if (TOOL_MAP.has(tool.definition.name)) {
+    const nativeCollision = BASE_REGISTRY.some((candidate) => candidate.definition.name === tool.definition.name);
+    if (nativeCollision) {
+      console.warn(
+        `[mcp] Tool name collision: "${tool.definition.name}" already exists in the native registry. Skipping.`,
+      );
+      continue;
+    }
+    if (MCP_TOOL_REGISTRY.has(tool.definition.name) && !replaceAll) {
       console.warn(
         `[mcp] Tool name collision: "${tool.definition.name}" already registered. Skipping.`,
       );
       continue;
     }
+    MCP_TOOL_REGISTRY.set(tool.definition.name, { tool, roles });
+  }
 
+  rebuildToolRegistry();
+}
+
+function rebuildToolRegistry(): void {
+  REGISTRY.splice(0, REGISTRY.length, ...BASE_REGISTRY);
+  TOOL_MAP.clear();
+  for (const tool of BASE_REGISTRY) {
+    TOOL_MAP.set(tool.definition.name, tool);
+  }
+
+  for (const role of Object.keys(BASE_ROLE_TOOLS) as Role[]) {
+    ROLE_TOOLS[role] = [...BASE_ROLE_TOOLS[role]];
+  }
+
+  for (const { tool, roles } of MCP_TOOL_REGISTRY.values()) {
     REGISTRY.push(tool);
     TOOL_MAP.set(tool.definition.name, tool);
-
     for (const role of roles) {
       if (ROLE_TOOLS[role]) {
         ROLE_TOOLS[role].push(tool);
       }
     }
   }
-}
-
-export function getToolsForRole(role: Role): ToolDefinition[] {
-  return (ROLE_TOOLS[role] ?? []).map((t) => t.definition);
 }
 
 export function getExecutionToolsForRole(
@@ -242,22 +466,61 @@ export function getExecutionToolsForRole(
     conversation?: ChatMessage[];
   } = {},
 ): ToolDefinition[] {
-  const tools = getToolsForRole(role);
+  const tools = selectExecutionToolsForRole(role, options);
   if (!options.compact || role !== "coordinator") {
-    return tools;
+    return tools.map((tool) => tool.definition);
+  }
+
+  return tools.map((tool) => compactToolDefinition(tool.definition));
+}
+
+export function getExecutionToolSnapshotForRole(
+  role: Role,
+  options: {
+    compact?: boolean;
+    content?: string;
+    conversation?: ChatMessage[];
+  } = {},
+): ToolSnapshot {
+  return new Map(
+    selectExecutionToolsForRole(role, options).map((tool) => [tool.definition.name, tool] as const),
+  );
+}
+
+function selectExecutionToolsForRole(
+  role: Role,
+  options: {
+    compact?: boolean;
+    content?: string;
+    conversation?: ChatMessage[];
+  } = {},
+): EmberTool[] {
+  const tools = ROLE_TOOLS[role] ?? [];
+  if (!options.compact || role !== "coordinator") {
+    return [...tools];
   }
 
   const contextText = buildToolSelectionContext(options.content ?? "", options.conversation ?? []);
-  const needsWorkspaceRead =
-    /\b(repo|workspace|project|file|files|code|typescript|tsconfig|function|class|server|debug|fix|build|test|lint|package|component|api)\b/i.test(
+  const workspaceContext =
+    /\b(repo|workspace|codebase|project files?|source code|file|files|path|directory|folder|tree|layout|tsconfig|package\.json|component|class|function|module|build|test|lint|typecheck|pnpm|npm|git|diff|branch|commit)\b/i.test(
       contextText,
-    );
+    ) ||
+    (/\b(fix|implement|change|edit|update|patch|write|create|add|refactor|rename|remove|debug)\b/i.test(
+      contextText,
+    ) &&
+      /\b(api|server|endpoint|typescript|javascript|react|backend|frontend|component|function|module)\b/i.test(
+        contextText,
+      ));
+  const needsWorkspaceRead = workspaceContext;
   const needsWorkspaceWrite =
+    workspaceContext &&
     /\b(fix|implement|change|edit|update|patch|write|create|add|refactor|rename|remove)\b/i.test(
       contextText,
     );
-  const needsDirectoryContext = /\b(path|directory|folder|tree|layout|list files|list dir)\b/i.test(contextText);
+  const needsDirectoryContext =
+    workspaceContext && /\b(path|directory|folder|tree|layout|list files|list dir)\b/i.test(contextText);
   const needsTerminal =
+    workspaceContext &&
     /\b(build|test|lint|typecheck|run|start|serve|install|command|terminal|shell|pnpm|npm|node|python|script)\b/i.test(
       contextText,
     );
@@ -269,12 +532,24 @@ export function getExecutionToolsForRole(
     /\b(login|log in|sign in|browser|click|button|form|fill|otp|navigate|page state|session|interactive)\b/i.test(
       contextText,
     );
+  const needsProjectScaffold =
+    /\b(scaffold|template|starter|boilerplate|bootstrap|new project|new app|new repo|spin up)\b/i.test(
+      contextText,
+    );
   const needsMemoryMutation =
     /\b(remember|save memory|forget|stop remembering|remove memory|delete memory|correct memory)\b/i.test(
       contextText,
     );
+  const needsMemoryRecall =
+    needsMemoryMutation ||
+    /\b(earlier|previous|last time|from before|past chat|past conversation|what do you remember|what do you know about me|you saved|memory)\b/i.test(
+      contextText,
+    );
 
-  const selected = new Set<string>(["handoff", "project_overview", "memory_search", "memory_get"]);
+  const selected = new Set<string>(["handoff"]);
+  if (needsWorkspaceRead || needsWorkspaceWrite || needsDirectoryContext || needsTerminal) {
+    selected.add("project_overview");
+  }
   if (needsWorkspaceRead || needsWorkspaceWrite || needsTerminal || needsDirectoryContext) {
     selected.add("git_inspect");
     selected.add("search_files");
@@ -295,26 +570,31 @@ export function getExecutionToolsForRole(
     selected.add("http_request");
     selected.add("fetch_page");
   }
+  if (needsMemoryRecall) {
+    selected.add("memory_search");
+    selected.add("memory_get");
+  }
   if (needsMemoryMutation) {
     selected.add("save_memory");
     selected.add("forget_memory");
   }
-  if (selected.size <= 4) {
-    selected.add("search_files");
-    selected.add("read_file");
-    selected.add("http_request");
-    selected.add("fetch_page");
-  }
+  selected.add("launch_parallel_tasks");
+
+  const compactMcpTools = selectRelevantCompactMcpTools(
+    tools.map((tool) => tool.definition),
+    contextText,
+    selected,
+    {
+      needsInteractiveBrowser,
+      needsProjectScaffold,
+    },
+  );
 
   return tools.filter((tool) => {
-    if (selected.has(tool.name)) {
+    if (selected.has(tool.definition.name)) {
       return true;
     }
-    if (!needsInteractiveBrowser || !tool.name.startsWith("mcp__playwright__")) {
-      return false;
-    }
-    const suffix = tool.name.split("__").slice(-1)[0] ?? "";
-    return COMPACT_BROWSER_TOOL_SUFFIXES.has(suffix);
+    return compactMcpTools.has(tool.definition.name);
   });
 }
 
@@ -335,14 +615,35 @@ export function getToolSystemPrompt(
     compact?: boolean;
   } = {},
 ): string {
-  if (!tools.length) return "";
-
   const toolNames = new Set(tools.map((t) => t.name));
 
   // ── Skill injection ───────────────────────────────────────────────────────
   const skills = skillManager.listSkills(role, toolNames);
   const toolSkills = skills.filter((s) => s.tools && s.tools.length > 0);
   const roleSkills = skills.filter((s) => !s.tools || s.tools.length === 0);
+  const hasInjectedWorkflow = tools.length > 0 || roleSkills.length > 0;
+  if (!hasInjectedWorkflow) {
+    return "";
+  }
+
+  if (!tools.length) {
+    if (options.compact) {
+      const compactSkills = roleSkills
+        .slice(0, 8)
+        .map((skill) => `- ${skill.name}: ${skill.description}`);
+      return [
+        "## Workflow",
+        "Stay in role unless the next role clearly has the better lane.",
+        ...(compactSkills.length > 0 ? ["", "## Active Skills", ...compactSkills] : []),
+      ].join("\n");
+    }
+
+    return [
+      "## Workflow",
+      "No tools are active for this role. Follow the role guidance and the injected skills below.",
+      ...roleSkills.flatMap((skill) => ["", skill.body]),
+    ].join("\n");
+  }
 
   // ── Dynamic workflow hints ────────────────────────────────────────────────
   const workflows: string[] = [];
@@ -369,6 +670,11 @@ export function getToolSystemPrompt(
   }
   if (toolNames.has("forget_memory")) {
     workflows.push("For corrections or deletion requests: identify the target memory first, then call forget_memory with confirm=true.");
+  }
+  if (toolNames.has("launch_parallel_tasks")) {
+    workflows.push(
+      "For independent multi-part work: fan out up to 4 self-contained subtasks with launch_parallel_tasks and avoid overlapping file writes.",
+    );
   }
   // Detect Playwright MCP tools (registered as mcp__playwright__browser_*)
   if ([...toolNames].some((n) => n.startsWith("mcp__playwright__browser_"))) {
@@ -435,20 +741,89 @@ function buildToolSelectionContext(content: string, conversation: ChatMessage[])
   return [content, ...recentMessages].join(" ").toLowerCase();
 }
 
+function compactToolDefinition(tool: ToolDefinition): ToolDefinition {
+  return {
+    ...tool,
+    description: truncateInstruction(tool.description, TOOL_DESCRIPTION_LIMIT),
+    inputSchema: compactJsonSchema(tool.inputSchema),
+  };
+}
+
+function compactJsonSchema(value: unknown): ToolDefinition["inputSchema"] {
+  return compactJsonSchemaNode(value) as ToolDefinition["inputSchema"];
+}
+
+function compactJsonSchemaNode(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => compactJsonSchemaNode(item));
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+
+  const record = value as Record<string, unknown>;
+  const compact: Record<string, unknown> = {};
+
+  if (typeof record.type === "string") {
+    compact.type = record.type;
+  }
+  if (typeof record.description === "string" && record.description.trim()) {
+    compact.description = truncateInstruction(record.description, TOOL_PROPERTY_DESCRIPTION_LIMIT);
+  }
+  if (Array.isArray(record.required) && record.required.length > 0) {
+    compact.required = record.required;
+  }
+  if (Array.isArray(record.enum) && record.enum.length > 0) {
+    compact.enum = record.enum;
+  }
+  if (record.additionalProperties === false) {
+    compact.additionalProperties = false;
+  }
+  if (record.properties && typeof record.properties === "object") {
+    compact.properties = Object.fromEntries(
+      Object.entries(record.properties as Record<string, unknown>).map(([key, property]) => [
+        key,
+        compactJsonSchemaNode(property),
+      ]),
+    );
+  }
+  if (record.items !== undefined) {
+    compact.items = compactJsonSchemaNode(record.items);
+  }
+  for (const key of ["anyOf", "oneOf", "allOf"] as const) {
+    if (Array.isArray(record[key])) {
+      compact[key] = record[key].map((entry) => compactJsonSchemaNode(entry));
+    }
+  }
+
+  return compact;
+}
+
+function truncateInstruction(value: string, limit: number): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "";
+  }
+  const sentence = normalized.match(/^(.+?[.!?])(?:\s|$)/)?.[1] ?? normalized;
+  return sentence.length > limit ? `${sentence.slice(0, limit - 1)}...` : sentence;
+}
+
 export async function handleToolCall(
   name: string,
   input: Record<string, unknown>,
 ): Promise<import("@ember/core").ToolResult> {
-  let tool = TOOL_MAP.get(name);
+  const tool = resolveTool(name);
+  if (!tool) return `Unknown tool: ${name}`;
+  return tool.execute(input);
+}
 
-  // Alias resolution: local models (e.g. Qwen GGUF) may call MCP tools by their
-  // base name (e.g. "browser_navigate") instead of the full namespaced name
-  // (e.g. "mcp__playwright__browser_navigate"). If the exact name is not found,
-  // scan the registry for a unique tool whose name ends with "__<name>".
+function resolveTool(name: string, tools: ToolSnapshot = TOOL_MAP): EmberTool | null {
+  let tool = tools.get(name) ?? null;
+
   if (!tool && !name.includes("__")) {
     const suffix = `__${name}`;
     const matches: EmberTool[] = [];
-    for (const [registeredName, registeredTool] of TOOL_MAP) {
+    for (const [registeredName, registeredTool] of tools) {
       if (registeredName.endsWith(suffix)) {
         matches.push(registeredTool);
       }
@@ -457,11 +832,12 @@ export async function handleToolCall(
       console.log(`[tools] alias resolved: "${name}" → "${matches[0].definition.name}"`);
       tool = matches[0];
     } else if (matches.length > 1) {
-      const candidates = matches.map((t) => t.definition.name).join(", ");
-      return `Ambiguous tool name "${name}" — matches multiple registered tools: ${candidates}. Use the full tool name.`;
+      console.warn(
+        `[tools] ambiguous tool alias "${name}" across: ${matches.map((candidate) => candidate.definition.name).join(", ")}`,
+      );
+      return null;
     }
   }
 
-  if (!tool) return `Unknown tool: ${name}`;
-  return tool.execute(input);
+  return tool;
 }

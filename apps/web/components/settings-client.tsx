@@ -12,6 +12,7 @@ import type {
   Settings,
 } from "@ember/core/client";
 import { isLocalOpenAiCompatibleBaseUrl, ROLES } from "@ember/core/client";
+import type { McpServerConfig } from "@ember/core/mcp";
 
 import { clientApiPath } from "../lib/api";
 
@@ -72,6 +73,43 @@ interface QuickPreset {
   apiKeyPlaceholder?: string;
   apiKeyRequired: boolean;
   defaultModelSuggestion?: string;
+}
+
+type McpConfigScope = "default" | "user" | "project";
+
+interface McpServerStatus {
+  name: string;
+  sourceScope: McpConfigScope;
+  config: McpServerConfig;
+  roles: Role[];
+  toolNames: string[];
+  status: "running" | "error" | "disabled" | "configured";
+  lastError: string | null;
+  activeCalls?: number;
+  target?: string;
+}
+
+interface McpState {
+  layers: Array<{
+    scope: McpConfigScope;
+    path: string;
+    exists: boolean;
+    serverCount: number;
+  }>;
+  items: McpServerStatus[];
+  merged: Array<{
+    name: string;
+    sourceScope: McpConfigScope;
+    config: McpServerConfig;
+    target?: string;
+  }>;
+  stats: {
+    configuredServers: number;
+    runningServers: number;
+    drainingServers?: number;
+    activeTools: number;
+    activeCalls?: number;
+  };
 }
 
 function ProviderIcon({ id }: { id: string }) {
@@ -218,7 +256,8 @@ const ROLE_DETAILS: Record<Role, { title: string; description: string }> = {
   },
 };
 
-type SettingsPanelId = "general" | "providers" | "roles" | "prompts";
+type SettingsPanelId = "general" | "providers" | "roles" | "mcp" | "prompts";
+type McpInstallTransport = "package" | "sse" | "streamable-http";
 
 const SETTINGS_PANELS: Array<{
   id: SettingsPanelId;
@@ -239,6 +278,11 @@ const SETTINGS_PANELS: Array<{
     id: "roles",
     label: "Roles",
     description: "Provider routing",
+  },
+  {
+    id: "mcp",
+    label: "MCP",
+    description: "Global tool servers",
   },
   {
     id: "prompts",
@@ -410,6 +454,49 @@ function formatStartedAt(value: string | null): string {
   }
 }
 
+function formatMcpScope(scope: McpConfigScope): string {
+  if (scope === "default") {
+    return "Bundled";
+  }
+  return scope[0].toUpperCase() + scope.slice(1);
+}
+
+function formatMcpStatus(status: McpServerStatus["status"]): string {
+  switch (status) {
+    case "running":
+      return "Running";
+    case "error":
+      return "Error";
+    case "disabled":
+      return "Disabled";
+    case "configured":
+      return "Configured";
+  }
+}
+
+function formatMcpTransport(config: McpServerConfig): string {
+  if (config.httpUrl?.trim()) {
+    return "Streamable HTTP";
+  }
+  if (config.url?.trim()) {
+    return "SSE";
+  }
+  return "stdio";
+}
+
+function formatMcpTarget(config: McpServerConfig, target?: string): string {
+  if (target?.trim()) {
+    return target;
+  }
+  if (config.httpUrl?.trim()) {
+    return config.httpUrl.trim();
+  }
+  if (config.url?.trim()) {
+    return config.url.trim();
+  }
+  return [config.command?.trim() ?? "", ...(config.args ?? [])].filter(Boolean).join(" ").trim();
+}
+
 function createProviderEditorState(provider: Provider): ProviderEditorState {
   return {
     name: provider.name,
@@ -427,6 +514,7 @@ export function SettingsClient({
   connectorTypes,
   modelCatalog,
   initialAssignments,
+  initialMcpState,
 }: {
   initialSettings: Settings;
   runtime: RuntimeState;
@@ -434,6 +522,7 @@ export function SettingsClient({
   connectorTypes: ConnectorType[];
   modelCatalog: Partial<Record<ConnectorTypeId, string[]>>;
   initialAssignments: RoleAssignment[];
+  initialMcpState: McpState;
 }) {
   const [settings, setSettings] = useState(initialSettings);
   const [providers, setProviders] = useState(initialProviders);
@@ -454,6 +543,18 @@ export function SettingsClient({
   const [providerEditor, setProviderEditor] = useState<ProviderEditorState | null>(null);
   const [activePanel, setActivePanel] = useState<SettingsPanelId>("general");
   const [selectedQuickPresetId, setSelectedQuickPresetId] = useState<string | null>(null);
+  const [mcpState, setMcpState] = useState(initialMcpState);
+  const [mcpBusyKey, setMcpBusyKey] = useState<string | null>(null);
+  const [mcpInstallTransport, setMcpInstallTransport] = useState<McpInstallTransport>("package");
+  const [mcpPackageName, setMcpPackageName] = useState("");
+  const [mcpRemoteUrl, setMcpRemoteUrl] = useState("");
+  const [mcpServerName, setMcpServerName] = useState("");
+  const [mcpScope, setMcpScope] = useState<Exclude<McpConfigScope, "default">>("project");
+  const [mcpDescription, setMcpDescription] = useState("");
+  const [mcpArgs, setMcpArgs] = useState("");
+  const [mcpHeaders, setMcpHeaders] = useState("");
+  const [mcpTimeout, setMcpTimeout] = useState("30000");
+  const [mcpRoles, setMcpRoles] = useState<Role[]>(["coordinator", "director", "inspector"]);
 
   const providerMap = useMemo(
     () => new Map(providers.map((provider) => [provider.id, provider])),
@@ -933,6 +1034,157 @@ export function SettingsClient({
       });
     } finally {
       setCreatingProvider(false);
+    }
+  }
+
+  function resetMcpInstaller() {
+    setMcpInstallTransport("package");
+    setMcpPackageName("");
+    setMcpRemoteUrl("");
+    setMcpServerName("");
+    setMcpDescription("");
+    setMcpArgs("");
+    setMcpHeaders("");
+    setMcpTimeout("30000");
+    setMcpRoles(["coordinator", "director", "inspector"]);
+    setMcpScope("project");
+  }
+
+  function toggleMcpRole(role: Role) {
+    setMcpRoles((current) =>
+      current.includes(role)
+        ? current.filter((candidate) => candidate !== role)
+        : [...current, role],
+    );
+  }
+
+  function parseMcpKeyValueLines(value: string): Record<string, string> {
+    return Object.fromEntries(
+      value
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => {
+          const separator = line.indexOf("=");
+          if (separator === -1) {
+            return [line, ""] as const;
+          }
+          return [line.slice(0, separator).trim(), line.slice(separator + 1).trim()] as const;
+        })
+        .filter(([key, item]) => key.length > 0 && item.length > 0),
+    );
+  }
+
+  async function reloadMcpServers() {
+    setMcpBusyKey("reload");
+    setNotice(null);
+
+    try {
+      const response = await fetch(clientApiPath("/mcp/reload"), {
+        method: "POST",
+      });
+      if (!response.ok) {
+        throw new Error(`MCP reload failed with status ${response.status}.`);
+      }
+      const payload = (await response.json()) as McpState;
+      setMcpState(payload);
+      setNotice({
+        tone: "success",
+        message:
+          `Reloaded MCP servers. ${payload.stats.runningServers}/${payload.stats.configuredServers} running with ` +
+          `${payload.stats.activeTools} active tools and ${payload.stats.drainingServers ?? 0} draining server` +
+          `${payload.stats.drainingServers === 1 ? "" : "s"}.`,
+      });
+    } catch (error) {
+      setNotice({
+        tone: "danger",
+        message: error instanceof Error ? error.message : "MCP reload failed.",
+      });
+    } finally {
+      setMcpBusyKey(null);
+    }
+  }
+
+  async function installMcpPackage() {
+    setMcpBusyKey("install");
+    setNotice(null);
+
+    try {
+      const response = await fetch(clientApiPath("/mcp/install"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          transport: mcpInstallTransport,
+          packageName: mcpInstallTransport === "package" ? mcpPackageName : undefined,
+          url: mcpInstallTransport === "sse" ? mcpRemoteUrl : undefined,
+          httpUrl: mcpInstallTransport === "streamable-http" ? mcpRemoteUrl : undefined,
+          serverName: mcpServerName || undefined,
+          scope: mcpScope,
+          description: mcpDescription || undefined,
+          timeout: Number(mcpTimeout) || undefined,
+          roles: mcpRoles,
+          args: mcpInstallTransport === "package"
+            ? mcpArgs
+              .split("\n")
+              .map((value) => value.trim())
+              .filter(Boolean)
+            : undefined,
+          headers: mcpInstallTransport === "package"
+            ? undefined
+            : parseMcpKeyValueLines(mcpHeaders),
+        }),
+      });
+
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(payload?.error ?? `Install failed with status ${response.status}.`);
+      }
+
+      const payload = (await response.json()) as McpState;
+      setMcpState(payload);
+      resetMcpInstaller();
+      setNotice({
+        tone: "success",
+        message:
+          mcpInstallTransport === "package"
+            ? `Installed MCP server from ${mcpPackageName.trim()}.`
+            : `Added ${mcpInstallTransport === "sse" ? "SSE" : "Streamable HTTP"} MCP server.`,
+      });
+    } catch (error) {
+      setNotice({
+        tone: "danger",
+        message: error instanceof Error ? error.message : "MCP install failed.",
+      });
+    } finally {
+      setMcpBusyKey(null);
+    }
+  }
+
+  async function removeScopedMcpServer(scope: Exclude<McpConfigScope, "default">, name: string) {
+    setMcpBusyKey(`remove:${scope}:${name}`);
+    setNotice(null);
+
+    try {
+      const response = await fetch(clientApiPath(`/mcp/servers/${scope}/${name}`), {
+        method: "DELETE",
+      });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(payload?.error ?? `Remove failed with status ${response.status}.`);
+      }
+      const payload = (await response.json()) as McpState;
+      setMcpState(payload);
+      setNotice({
+        tone: "success",
+        message: `Removed MCP server ${name}.`,
+      });
+    } catch (error) {
+      setNotice({
+        tone: "danger",
+        message: error instanceof Error ? error.message : "MCP remove failed.",
+      });
+    } finally {
+      setMcpBusyKey(null);
     }
   }
 
@@ -1702,6 +1954,286 @@ export function SettingsClient({
                             >
                               {assignment.providerId && assignment.modelId ? "Assigned" : "Setup"}
                             </span>
+                          </article>
+                        );
+                      })}
+                    </div>
+                  )}
+                </section>
+              </div>
+            )}
+
+            {/* MCP Panel */}
+            {activePanel === "mcp" && (
+              <div className="settings-pane">
+                <div className="settings-pane-head">
+                  <div>
+                    <h2>MCP</h2>
+                    <p className="helper-copy">Manage global MCP servers and the tool surfaces they expose.</p>
+                  </div>
+                  <button
+                    className="button"
+                    onClick={() => void reloadMcpServers()}
+                    disabled={mcpBusyKey === "reload"}
+                  >
+                    {mcpBusyKey === "reload" ? "Reloading..." : "Reload Servers"}
+                  </button>
+                </div>
+
+                <section className="settings-block">
+                  <div className="settings-block-head">
+                    <h3>Runtime Status</h3>
+                    <p className="helper-copy">Audit the current MCP registry, memory engine, and config layers.</p>
+                  </div>
+                  <div className="settings-block-content">
+                    <div className="settings-stats-grid" style={{ padding: 0 }}>
+                      <div className="settings-stat-card">
+                        <strong>{mcpState.stats.runningServers}/{mcpState.stats.configuredServers}</strong>
+                        <span className="settings-stat-label">MCP Servers Running</span>
+                      </div>
+                      <div className="settings-stat-card">
+                        <strong>{mcpState.stats.activeTools}</strong>
+                        <span className="settings-stat-label">Active MCP Tools</span>
+                      </div>
+                      <div className="settings-stat-card">
+                        <strong>{mcpState.stats.drainingServers ?? 0}</strong>
+                        <span className="settings-stat-label">Draining Servers</span>
+                      </div>
+                      <div className="settings-stat-card">
+                        <strong>{settings.memory.enabled ? "On" : "Off"}</strong>
+                        <span className="settings-stat-label">Memory Engine</span>
+                      </div>
+                    </div>
+                    <div className="settings-info-note">
+                      <span className="label">Layers</span>
+                      <p>
+                        {mcpState.layers
+                          .map((layer) =>
+                            `${formatMcpScope(layer.scope)}: ${layer.exists ? `${layer.serverCount} server${layer.serverCount === 1 ? "" : "s"}` : "missing"}`,
+                          )
+                          .join(" · ")}
+                      </p>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="settings-block">
+                  <div className="settings-block-head">
+                    <h3>Add MCP Server</h3>
+                    <p className="helper-copy">Install a public npm MCP package or add a remote SSE/Streamable HTTP endpoint, scope it to roles, then reload it into the live tool registry.</p>
+                  </div>
+                  <div className="settings-block-content">
+                    <div className="settings-field-row">
+                      <div className="settings-field">
+                        <label>Transport</label>
+                        <select
+                          value={mcpInstallTransport}
+                          onChange={(e) => setMcpInstallTransport(e.target.value as McpInstallTransport)}
+                        >
+                          <option value="package">Public npm package</option>
+                          <option value="streamable-http">Streamable HTTP</option>
+                          <option value="sse">SSE</option>
+                        </select>
+                      </div>
+                      <div className="settings-field">
+                        <label>{mcpInstallTransport === "package" ? "npm package" : "Endpoint URL"}</label>
+                        {mcpInstallTransport === "package" ? (
+                          <input
+                            value={mcpPackageName}
+                            onChange={(e) => setMcpPackageName(e.target.value)}
+                            placeholder="@modelcontextprotocol/server-filesystem"
+                          />
+                        ) : (
+                          <input
+                            value={mcpRemoteUrl}
+                            onChange={(e) => setMcpRemoteUrl(e.target.value)}
+                            placeholder={mcpInstallTransport === "sse" ? "https://mcp.example.test/sse" : "https://mcp.example.test/mcp"}
+                          />
+                        )}
+                      </div>
+                      <div className="settings-field">
+                        <label>
+                          Server name <span className="optional">(optional)</span>
+                        </label>
+                        <input
+                          value={mcpServerName}
+                          onChange={(e) => setMcpServerName(e.target.value)}
+                          placeholder="filesystem"
+                        />
+                      </div>
+                      <div className="settings-field">
+                        <label>Scope</label>
+                        <select
+                          value={mcpScope}
+                          onChange={(e) => setMcpScope(e.target.value as Exclude<McpConfigScope, "default">)}
+                        >
+                          <option value="project">Project</option>
+                          <option value="user">User</option>
+                        </select>
+                      </div>
+                      <div className="settings-field">
+                        <label>Timeout ms</label>
+                        <input
+                          type="number"
+                          min={1000}
+                          step={1000}
+                          value={mcpTimeout}
+                          onChange={(e) => setMcpTimeout(e.target.value)}
+                          placeholder="30000"
+                        />
+                      </div>
+                    </div>
+                    <div className="settings-field-row">
+                      <div className="settings-field">
+                        <label>
+                          Description <span className="optional">(optional)</span>
+                        </label>
+                        <input
+                          value={mcpDescription}
+                          onChange={(e) => setMcpDescription(e.target.value)}
+                          placeholder="Short note for why this server is installed"
+                        />
+                      </div>
+                      <div className="settings-field">
+                        <label>
+                          {mcpInstallTransport === "package"
+                            ? "Extra args "
+                            : "Headers "}
+                          <span className="optional">
+                            {mcpInstallTransport === "package"
+                              ? "(one token per line)"
+                              : "(KEY=VALUE per line)"}
+                          </span>
+                        </label>
+                        <textarea
+                          value={mcpInstallTransport === "package" ? mcpArgs : mcpHeaders}
+                          onChange={(e) =>
+                            mcpInstallTransport === "package"
+                              ? setMcpArgs(e.target.value)
+                              : setMcpHeaders(e.target.value)
+                          }
+                          rows={4}
+                          placeholder={
+                            mcpInstallTransport === "package"
+                              ? "--root\n.\n--read-only"
+                              : "Authorization=Bearer ...\nX-Workspace=demo"
+                          }
+                        />
+                      </div>
+                    </div>
+                    <div className="settings-field">
+                      <label>Allowed roles</label>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem", marginTop: "0.75rem" }}>
+                        {ROLES.filter((role) => role !== "dispatch").map((role) => (
+                          <label
+                            key={role}
+                            style={{ display: "inline-flex", alignItems: "center", gap: "0.45rem", fontSize: "0.9rem" }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={mcpRoles.includes(role)}
+                              onChange={() => toggleMcpRole(role)}
+                            />
+                            {ROLE_DETAILS[role].title}
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="form-actions">
+                      <button className="button ghost" onClick={resetMcpInstaller}>
+                        Reset
+                      </button>
+                      <button
+                        className="button primary"
+                        onClick={() => void installMcpPackage()}
+                        disabled={
+                          mcpBusyKey === "install" ||
+                          (mcpInstallTransport === "package" ? !mcpPackageName.trim() : !mcpRemoteUrl.trim()) ||
+                          mcpRoles.length === 0
+                        }
+                      >
+                        {mcpBusyKey === "install" ? "Saving..." : "Add MCP Server"}
+                      </button>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="settings-block">
+                  <div className="settings-block-head">
+                    <h3>Configured Servers</h3>
+                    <p className="helper-copy">Inspect the live MCP surfaces and remove user or project servers when they are no longer needed.</p>
+                  </div>
+                  {mcpState.items.length === 0 ? (
+                    <div className="settings-empty-state" style={{ margin: "0 1.5rem 1.25rem" }}>
+                      <strong>No MCP servers configured</strong>
+                      <span>Install a public package above or add a project override later.</span>
+                    </div>
+                  ) : (
+                    <div className="settings-provider-list">
+                      {mcpState.items.map((server) => {
+                        const busyKey = `remove:${server.sourceScope}:${server.name}`;
+                        const removable = server.sourceScope !== "default";
+                        return (
+                          <article key={`${server.sourceScope}:${server.name}`} className="settings-provider-card">
+                            <div className="settings-provider-head">
+                              <div className="settings-provider-title">
+                                <div className={`provider-status-dot ${server.status === "error" ? "error" : server.status === "running" ? "connected" : "idle"}`} />
+                                <div>
+                                  <span className="type-label">{formatMcpScope(server.sourceScope)}</span>
+                                  <h3>{server.name}</h3>
+                                  <p className="helper-copy">
+                                    {server.config.description?.trim() || formatMcpTarget(server.config, server.target)}
+                                  </p>
+                                </div>
+                              </div>
+                              <span className={`settings-status-pill ${server.status === "error" ? "error" : server.status === "running" ? "connected" : "idle"}`}>
+                                {formatMcpStatus(server.status)}
+                              </span>
+                            </div>
+
+                            <div className="settings-provider-meta">
+                              <span>{formatMcpTransport(server.config)}</span>
+                              <span>{server.roles.length > 0 ? server.roles.join(", ") : "No roles"}</span>
+                              <span>{server.toolNames.length} tool{server.toolNames.length === 1 ? "" : "s"}</span>
+                              {typeof server.config.timeout === "number" && <span>{server.config.timeout} ms timeout</span>}
+                              {typeof server.activeCalls === "number" && server.activeCalls > 0 && <span>{server.activeCalls} active call{server.activeCalls === 1 ? "" : "s"}</span>}
+                            </div>
+
+                            {server.lastError ? (
+                              <div className="provider-error">{server.lastError}</div>
+                            ) : null}
+
+                            {server.toolNames.length > 0 ? (
+                              <div className="settings-model-pills">
+                                {server.toolNames.slice(0, 4).map((toolName) => (
+                                  <span key={toolName} className="settings-model-pill">{toolName}</span>
+                                ))}
+                                {server.toolNames.length > 4 && (
+                                  <span className="settings-model-pill muted">+{server.toolNames.length - 4} more</span>
+                                )}
+                              </div>
+                            ) : null}
+
+                            <div className="settings-provider-actions">
+                              {removable ? (
+                                <button
+                                  className="button ghost"
+                                  onClick={() => {
+                                    if (window.confirm(`Remove MCP server "${server.name}" from ${server.sourceScope} scope?`)) {
+                                      void removeScopedMcpServer(server.sourceScope as Exclude<McpConfigScope, "default">, server.name);
+                                    }
+                                  }}
+                                  disabled={mcpBusyKey === busyKey}
+                                >
+                                  {mcpBusyKey === busyKey ? "Removing..." : "Remove"}
+                                </button>
+                              ) : (
+                                <div className="settings-info-note" style={{ marginLeft: 0 }}>
+                                  <span className="label">Bundled</span>
+                                  <p>Bundled defaults live in the repo and are removed by override, not deletion.</p>
+                                </div>
+                              )}
+                            </div>
                           </article>
                         );
                       })}

@@ -14,21 +14,40 @@
  * Configuration for a single MCP server process.
  */
 export interface McpServerConfig {
-  /** The executable to run, e.g. "npx" or "/usr/local/bin/my-mcp-server". */
-  command: string;
-  /** Arguments passed to the command, e.g. ["-y", "@playwright/mcp", "--headless"]. */
-  args: string[];
+  /** Whether this server should be started. Defaults to true. */
+  enabled?: boolean;
+  /** The executable to run for stdio servers, e.g. "npx" or "/usr/local/bin/my-mcp-server". */
+  command?: string;
+  /** Arguments passed to the stdio command, e.g. ["-y", "@playwright/mcp", "--headless"]. */
+  args?: string[];
+  /** SSE endpoint for a remote MCP server. Deprecated in the MCP SDK but still widely used. */
+  url?: string;
+  /** Streamable HTTP endpoint for a remote MCP server. */
+  httpUrl?: string;
   /**
-   * Extra environment variables merged into the subprocess environment.
+   * Extra environment variables merged into the stdio subprocess environment.
    * Process env is always inherited; this only adds or overrides specific keys.
    */
   env?: Record<string, string>;
+  /** Extra HTTP headers for remote transports. */
+  headers?: Record<string, string>;
+  /** Optional display copy for settings UI and runtime inspection. */
+  description?: string;
   /**
    * Ember roles that may call tools from this MCP server.
    * Empty or absent = no roles have access by default.
    * Valid values: "coordinator" | "advisor" | "director" | "inspector" | "ops" | "dispatch"
    */
   roles?: string[];
+  /**
+   * Optional allowlist of server tool names to expose. If set, only these tools
+   * will be registered from the MCP server.
+   */
+  includeTools?: string[];
+  /**
+   * Optional denylist of server tool names to hide. Applied after includeTools.
+   */
+  excludeTools?: string[];
   /**
    * Timeout in milliseconds for tool calls to this server.
    * Defaults to 30 000 ms if not set.

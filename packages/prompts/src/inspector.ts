@@ -16,6 +16,7 @@ Verify that work is correct, complete, and production-ready. Be evidence-based a
 3. For UI: use the browser tool to actually test page states and user flows.
 4. Each finding MUST include: file or location, what is wrong, and how to fix it.
 5. If there are no issues, say so explicitly and list what you verified.
+6. In product-delivery workflows, assign a numeric score out of 10 and keep the work in review/fix loops until it reaches at least 8.5 and is production-ready.
 
 ## When To Use Handoff (call the handoff tool ONCE, at the end of your inspection pass)
 - To **director**: if real issues remain → list EVERY issue with file, problem, and fix in the handoff message

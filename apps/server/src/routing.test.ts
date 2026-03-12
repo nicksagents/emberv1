@@ -68,7 +68,7 @@ test("policy keeps browser navigation with coordinator", () => {
   );
 
   assert.equal(result.decision.role, "coordinator");
-  assert.equal(result.shouldQueryDispatch, false);
+  assert.equal(result.shouldQueryDispatch, true);
 });
 
 test("policy routes planning to advisor", () => {
@@ -77,7 +77,7 @@ test("policy routes planning to advisor", () => {
   );
 
   assert.equal(result.decision.role, "advisor");
-  assert.equal(result.shouldQueryDispatch, false);
+  assert.equal(result.shouldQueryDispatch, true);
 });
 
 test("policy routes substantial implementation to director", () => {
@@ -86,7 +86,7 @@ test("policy routes substantial implementation to director", () => {
   );
 
   assert.equal(result.decision.role, "director");
-  assert.equal(result.shouldQueryDispatch, false);
+  assert.equal(result.shouldQueryDispatch, true);
 });
 
 test("policy routes browser-heavy findings work to inspector", () => {
@@ -95,7 +95,7 @@ test("policy routes browser-heavy findings work to inspector", () => {
   );
 
   assert.equal(result.decision.role, "inspector");
-  assert.equal(result.shouldQueryDispatch, false);
+  assert.equal(result.shouldQueryDispatch, true);
 });
 
 test("policy preserves follow-up continuity when the task type has not changed", () => {
@@ -108,7 +108,7 @@ test("policy preserves follow-up continuity when the task type has not changed",
   );
 
   assert.equal(result.decision.role, "director");
-  assert.equal(result.shouldQueryDispatch, false);
+  assert.equal(result.shouldQueryDispatch, true);
 });
 
 test("policy marks smaller technical work as ambiguous coordinator-first routing", () => {
@@ -127,9 +127,20 @@ test("dispatch input includes recent transcript and strict json instructions", (
   ]);
 
   const input = buildDispatchInput(request);
+  assert.match(input, /routing_mode/);
   assert.match(input, /recent_conversation/);
   assert.match(input, /strict JSON only/);
   assert.match(input, /latest_user_request/);
+});
+
+test("dispatch input can include the policy fallback hint for the router model", () => {
+  const request = makeRequest("fix this bug in the settings page");
+  const policy = routeAutoRequestPolicy(request);
+  const input = buildDispatchInput(request, policy.decision);
+
+  assert.match(input, /policy_fallback/);
+  assert.match(input, /role=coordinator/);
+  assert.match(input, /reason=/);
 });
 
 test("dispatch input includes compacted history separately from recent turns", () => {

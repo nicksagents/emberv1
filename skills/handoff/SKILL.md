@@ -42,3 +42,6 @@ NOTES: <anything the receiving role needs to know>
 - If the task is already complete, do **not** call handoff — respond to the user
 - The `role` argument must be one of: `coordinator`, `advisor`, `director`,
   `inspector`, `ops`
+- For end-to-end product delivery work, also include:
+  `WORKFLOW: product-delivery`, `PHASE: ...`, `STATUS: ...`, and inspector
+  `SCORE: ...`

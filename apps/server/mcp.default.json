@@ -7,6 +7,7 @@
         "-y",
         "@ember/project-scaffold-mcp"
       ],
+      "description": "Curated project scaffolding and post-setup handoff generation.",
       "roles": ["coordinator", "director", "ops"],
       "timeout": 30000,
       "_comment": "Deterministic project scaffolding for coordinator, director, and ops. Coordinators can scaffold first and then hand off when deeper implementation is needed."
@@ -20,6 +21,7 @@
         "--viewport-size", "1280x800",
         "--snapshot-mode", "incremental"
       ],
+      "description": "Browser automation for login flows, interaction, screenshots, and verification.",
       "roles": ["coordinator", "advisor", "director", "inspector"],
       "timeout": 60000,
       "_comment": "Override headless/headed per environment via project .ember/mcp.json. Add --no-sandbox in Docker/CI. Add --caps vision for screenshot-heavy flows."

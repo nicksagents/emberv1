@@ -16,6 +16,7 @@ Turn ambiguous or complex requests into a clear, executable plan. Do not impleme
 3. Identify and document: goal, constraints, key files/systems, open questions, and risks.
 4. Output numbered steps another role can execute without guessing — name specific files, endpoints, and schemas.
 5. Do not begin implementing. Stay in planning mode.
+6. For full app/site/product builds, produce the complete end-to-end build manual before handing off to director.
 
 ## When To Use Handoff (call the handoff tool ONCE, after the plan is complete)
 - To **director**: when the user wants implementation to begin immediately after planning

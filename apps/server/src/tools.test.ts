@@ -21,9 +21,11 @@ import { fetchPageTool } from "./tools/fetch-page.js";
 import { gitInspectTool } from "./tools/git-inspect.js";
 import { httpRequestTool } from "./tools/http-request.js";
 import { forgetMemoryTool, memoryGetTool, memorySearchTool, saveMemoryTool } from "./tools/memory.js";
+import { parallelTasksTool } from "./tools/parallel-tasks.js";
 import { projectOverviewTool } from "./tools/project-overview.js";
 import { searchFilesFallback, searchFilesTool } from "./tools/search-files.js";
-import { getExecutionToolsForRole, getToolSystemPrompt } from "./tools/index.js";
+import { createToolHandler, getExecutionToolsForRole, getToolSystemPrompt, registerMcpTools, replaceMcpTools } from "./tools/index.js";
+import type { EmberTool } from "./tools/index.js";
 import { terminalTool } from "./tools/terminal.js";
 
 function tempDir(): string {
@@ -45,6 +47,17 @@ function runGit(cwd: string, args: string[]): void {
   if (result.status !== 0) {
     throw new Error(`git ${args.join(" ")} failed: ${result.stderr || result.stdout}`);
   }
+}
+
+function makeNoopTool(name: string, description: string): EmberTool {
+  return {
+    definition: {
+      name,
+      description,
+      inputSchema: { type: "object", properties: {} },
+    },
+    execute: async () => "ok",
+  };
 }
 
 test("read_file supports line ranges", async () => {
@@ -378,6 +391,83 @@ test("ops cleanup skill exists and generic file skill excludes ops", () => {
   assert.deepEqual(filesSkill!.roles, ["coordinator", "advisor", "director", "inspector"]);
 });
 
+test("team orchestration skill is available to dispatch even without active tools", () => {
+  const skill = skillManager.loadSkill("team-orchestration");
+  assert.ok(skill, "team-orchestration skill must exist");
+  assert.match(skill!.body, /Handoff rules/i);
+  assert.deepEqual(skill!.roles, ["dispatch", "coordinator", "advisor", "director", "inspector", "ops"]);
+
+  const prompt = getToolSystemPrompt([], "dispatch");
+  assert.match(prompt, /## Workflow/);
+  assert.match(prompt, /Team Orchestration/);
+  assert.match(prompt, /Loop Prevention/);
+});
+
+test("handoff tool enforces the structured message contract and single registration", async () => {
+  const handler = createToolHandler();
+  const invalid = expectText(await handler.onToolCall("handoff", {
+    role: "director",
+    message: "TODO: fix the bug",
+  }));
+  assert.match(invalid, /GOAL, DONE, FILES, NOTES sections/i);
+
+  const message = [
+    "GOAL: ship the fix",
+    "DONE: reproduced the issue and scoped the root cause",
+    "TODO: patch the failing code path",
+    "FILES: apps/server/src/index.ts",
+    "NOTES: run the targeted tests after the edit",
+  ].join("\n");
+  const accepted = expectText(await handler.onToolCall("handoff", {
+    role: "director",
+    message,
+  }));
+  assert.match(accepted, /Handoff to director registered/);
+
+  const duplicate = expectText(await handler.onToolCall("handoff", {
+    role: "inspector",
+    message,
+  }));
+  assert.match(duplicate, /already registered/i);
+});
+
+test("compact coordinator tool selection keeps scaffold MCP tools reachable", () => {
+  registerMcpTools([
+    {
+      tool: makeNoopTool(
+        "mcp__scaffold__list_templates",
+        "List available starter templates for new projects.",
+      ),
+      roles: ["coordinator"],
+    },
+    {
+      tool: makeNoopTool(
+        "mcp__scaffold__scaffold_project",
+        "Scaffold a new project from a selected template.",
+      ),
+      roles: ["coordinator"],
+    },
+    {
+      tool: makeNoopTool(
+        "mcp__scaffold__post_setup",
+        "Write the follow-up handoff and setup notes after scaffolding.",
+      ),
+      roles: ["coordinator"],
+    },
+  ]);
+
+  const tools = getExecutionToolsForRole("coordinator", {
+    compact: true,
+    content: "Scaffold a new Next.js starter project and set up the handoff notes.",
+    conversation: [],
+  });
+  const toolNames = tools.map((tool) => tool.name);
+
+  assert.ok(toolNames.includes("mcp__scaffold__list_templates"));
+  assert.ok(toolNames.includes("mcp__scaffold__scaffold_project"));
+  assert.ok(toolNames.includes("mcp__scaffold__post_setup"));
+});
+
 test("tool schemas expose small-model-friendly aliases; skills inject correctly by role", () => {
   assert.ok("file" in (readFileTool.definition.inputSchema.properties ?? {}));
   assert.ok("text" in (searchFilesTool.definition.inputSchema.properties ?? {}));
@@ -415,6 +505,7 @@ test("tool schemas expose small-model-friendly aliases; skills inject correctly 
     memoryGetDefinition,
     saveMemoryDefinition,
     forgetMemoryDefinition,
+    parallelTasksTool.definition,
     readFileTool.definition,
     searchFilesTool.definition,
     httpRequestTool.definition,
@@ -431,6 +522,7 @@ test("tool schemas expose small-model-friendly aliases; skills inject correctly 
   // Memory workflow hints present
   assert.match(promptNoRole, /memory_search first, then memory_get/i);
   assert.match(promptNoRole, /Use save_memory only for durable facts/i);
+  assert.match(promptNoRole, /Parallel Subtasks/);
 
   // With a coordinator role, role-scoped skills are also injected
   const promptWithRole = getToolSystemPrompt(
@@ -442,6 +534,7 @@ test("tool schemas expose small-model-friendly aliases; skills inject correctly 
       memoryGetDefinition,
       saveMemoryDefinition,
       forgetMemoryDefinition,
+      parallelTasksTool.definition,
       readFileTool.definition,
       searchFilesTool.definition,
       httpRequestTool.definition,
@@ -540,8 +633,43 @@ test("compact coordinator tool selection keeps only tools relevant to the curren
   assert.ok(webToolNames.has("web_search"));
   assert.ok(webToolNames.has("fetch_page"));
   assert.ok(webToolNames.has("http_request"));
+  assert.equal(webToolNames.has("project_overview"), false);
+  assert.equal(webToolNames.has("search_files"), false);
+  assert.equal(webToolNames.has("read_file"), false);
+  assert.equal(webToolNames.has("memory_search"), false);
   assert.equal(webToolNames.has("edit_file"), false);
   assert.equal(webToolNames.has("run_terminal_command"), false);
+
+  const recallTools = getExecutionToolsForRole("coordinator", {
+    compact: true,
+    content: "What do you remember from our earlier chats about my project preferences?",
+    conversation: [],
+  });
+  const recallToolNames = new Set(recallTools.map((tool) => tool.name));
+  assert.ok(recallToolNames.has("memory_search"));
+  assert.ok(recallToolNames.has("memory_get"));
+  assert.equal(recallToolNames.has("project_overview"), false);
+});
+
+test("compact coordinator tool definitions are trimmed for small local models", () => {
+  const compactTools = getExecutionToolsForRole("coordinator", {
+    compact: true,
+    content: "Fix the TypeScript build in this repo and edit the failing file.",
+    conversation: [],
+  });
+  const terminalDefinition = compactTools.find((tool) => tool.name === "run_terminal_command");
+  assert.ok(terminalDefinition);
+  assert.ok(terminalDefinition!.description.length < terminalTool.definition.description.length);
+
+  const compactCommandProperty = terminalDefinition!.inputSchema.properties?.command as
+    | { description?: string }
+    | undefined;
+  const fullCommandProperty = terminalTool.definition.inputSchema.properties?.command as
+    | { description?: string }
+    | undefined;
+  assert.ok(compactCommandProperty?.description);
+  assert.ok(fullCommandProperty?.description);
+  assert.ok(compactCommandProperty!.description!.length < fullCommandProperty!.description!.length);
 });
 
 test("git_inspect reports status and diff stats", async () => {
@@ -563,4 +691,69 @@ test("git_inspect reports status and diff stats", async () => {
   assert.match(status, /M tracked\.txt/);
   assert.match(diffStats, /Action: diff_stats/);
   assert.match(diffStats, /tracked\.txt \| 1 \+/);
+});
+
+test("replaceMcpTools swaps stale MCP registrations out of the compact registry", () => {
+  replaceMcpTools([
+    {
+      tool: makeNoopTool(
+        "mcp__alpha__search_docs",
+        "Search docs from the alpha MCP server.",
+      ),
+      roles: ["coordinator"],
+    },
+  ]);
+
+  let toolNames = new Set(
+    getExecutionToolsForRole("coordinator", {
+      compact: false,
+    }).map((tool) => tool.name),
+  );
+  assert.ok(toolNames.has("mcp__alpha__search_docs"));
+
+  replaceMcpTools([
+    {
+      tool: makeNoopTool(
+        "mcp__beta__search_docs",
+        "Search docs from the beta MCP server.",
+      ),
+      roles: ["coordinator"],
+    },
+  ]);
+
+  toolNames = new Set(
+    getExecutionToolsForRole("coordinator", {
+      compact: false,
+    }).map((tool) => tool.name),
+  );
+  assert.equal(toolNames.has("mcp__alpha__search_docs"), false);
+  assert.ok(toolNames.has("mcp__beta__search_docs"));
+
+  replaceMcpTools([]);
+});
+
+test("request-scoped tool snapshots survive global MCP registry replacement", async () => {
+  const staleTool: EmberTool = {
+    definition: {
+      name: "mcp__snapshot__inspect",
+      description: "Old snapshot tool",
+      inputSchema: { type: "object", properties: {} },
+    },
+    execute: async () => "stale-result",
+  };
+  const handler = createToolHandler({
+    toolSnapshot: new Map([[staleTool.definition.name, staleTool]]),
+  });
+
+  replaceMcpTools([
+    {
+      tool: makeNoopTool("mcp__snapshot__inspect", "Replacement tool"),
+      roles: ["coordinator"],
+    },
+  ]);
+
+  const result = expectText(await handler.onToolCall("mcp__snapshot__inspect", {}));
+  assert.equal(result, "stale-result");
+
+  replaceMcpTools([]);
 });

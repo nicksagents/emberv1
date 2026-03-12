@@ -30,6 +30,11 @@ export const handoffTool: EmberTool = {
             "TODO: <what the next role should do>\n" +
             "FILES: <key files created, modified, or relevant — list file paths>\n" +
             "NOTES: <warnings, blockers, or findings the next role must know>\n\n" +
+            "For product-delivery workflows, also include:\n" +
+            "WORKFLOW: product-delivery\n" +
+            "PHASE: planning|implementation|inspection|finalization\n" +
+            "STATUS: planning-required|plan-complete|ready-for-review|needs-fixes|approved\n" +
+            "SCORE: <0.0-10.0>   # inspector handoffs only\n\n" +
             "If handing to inspector: specify exactly what to verify and what acceptance looks like.\n" +
             "If handing to director: list every issue to fix with file and location.",
         },

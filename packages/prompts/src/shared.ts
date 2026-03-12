@@ -1,6 +1,24 @@
 import type { Role, Settings } from "@ember/core";
 
-export function buildSharedPrompt(settings: Settings, role: Role): string {
+export interface SharedPromptOptions {
+  compact?: boolean;
+}
+
+export function buildSharedPrompt(settings: Settings, role: Role, options: SharedPromptOptions = {}): string {
+  if (options.compact) {
+    return [
+      "# EMBER",
+      `Role: ${role.toUpperCase()}. Operator: ${settings.humanName}.`,
+      `Workspace: ${settings.workspaceRoot}`,
+      "",
+      "Rules:",
+      "- Use tool evidence for claims.",
+      "- Read before editing and verify important changes.",
+      "- Hand off at most once, only when the task clearly needs a different specialist or model lane.",
+      "- Do not repeat the same tool call with the same input unless state changed.",
+    ].join("\n");
+  }
+
   const dataDir = `${settings.workspaceRoot}/data`;
   return [
     "# EMBER — Multi-Role Agent System",
@@ -14,6 +32,8 @@ export function buildSharedPrompt(settings: Settings, role: Role): string {
     "## How EMBER Works",
     "EMBER is a multi-role AI agent. Each request is routed to the best-fit role.",
     "Roles can pass work to each other using the handoff tool when a specialist is needed.",
+    "Some roles can also fan out independent subtasks in parallel, then continue with the combined results.",
+    "A handoff switches execution to the receiving role, and the provider/model routers may pick a better connected lane inside that role.",
     "You will receive either a direct user message or a handoff context from another role.",
     "Complete your part of the task, then either respond to the user or call handoff once.",
     "",
