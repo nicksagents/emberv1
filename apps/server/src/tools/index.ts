@@ -104,6 +104,18 @@ const COMPACT_BROWSER_TOOL_SUFFIXES = new Set([
   "browser_handle_dialog",
   "browser_evaluate",
 ]);
+const COMPACT_DESKTOP_TOOL_SUFFIXES = new Set([
+  "describe_environment",
+  "take_screenshot",
+  "list_open_applications",
+  "open_application",
+  "focus_application",
+  "open_resource",
+  "type_text",
+  "press_keys",
+  "move_mouse",
+  "click_mouse",
+]);
 const HANDOFF_REQUIRED_SECTIONS = ["GOAL", "DONE", "TODO", "FILES", "NOTES"] as const;
 const TOOL_DESCRIPTION_LIMIT = 110;
 const TOOL_PROPERTY_DESCRIPTION_LIMIT = 56;
@@ -244,6 +256,7 @@ function selectRelevantCompactMcpTools(
   selectedNames: ReadonlySet<string>,
   options: {
     needsInteractiveBrowser: boolean;
+    needsDesktopAutomation: boolean;
     needsProjectScaffold: boolean;
   },
 ): Set<string> {
@@ -265,6 +278,18 @@ function selectRelevantCompactMcpTools(
   if (options.needsProjectScaffold) {
     for (const tool of tools) {
       if (tool.name.startsWith("mcp__scaffold__")) {
+        extra.add(tool.name);
+      }
+    }
+  }
+
+  if (options.needsDesktopAutomation) {
+    for (const tool of tools) {
+      if (!tool.name.startsWith("mcp__desktop__")) {
+        continue;
+      }
+      const suffix = tool.name.split("__").slice(-1)[0] ?? "";
+      if (COMPACT_DESKTOP_TOOL_SUFFIXES.has(suffix)) {
         extra.add(tool.name);
       }
     }
@@ -532,6 +557,10 @@ function selectExecutionToolsForRole(
     /\b(login|log in|sign in|browser|click|button|form|fill|otp|navigate|page state|session|interactive)\b/i.test(
       contextText,
     );
+  const needsDesktopAutomation =
+    /\b(desktop|native app|application|window|screen|cursor|mouse|keyboard|type text|press key|focus app|open app|open application|mail app|chatgpt app|desktop screenshot)\b/i.test(
+      contextText,
+    );
   const needsProjectScaffold =
     /\b(scaffold|template|starter|boilerplate|bootstrap|new project|new app|new repo|spin up)\b/i.test(
       contextText,
@@ -586,6 +615,7 @@ function selectExecutionToolsForRole(
     selected,
     {
       needsInteractiveBrowser,
+      needsDesktopAutomation,
       needsProjectScaffold,
     },
   );
@@ -680,6 +710,11 @@ export function getToolSystemPrompt(
   if ([...toolNames].some((n) => n.startsWith("mcp__playwright__browser_"))) {
     workflows.push(
       "For web automation: navigate → snapshot (read accessibility tree refs) → click/fill using refs → snapshot to verify. Never skip the snapshot step.",
+    );
+  }
+  if ([...toolNames].some((n) => n.startsWith("mcp__desktop__"))) {
+    workflows.push(
+      "For desktop automation: describe_environment first, then screenshot → open/focus app → move/click or type/press → screenshot to verify. Use browser tools for websites and terminal/filesystem tools for code or file tasks.",
     );
   }
   if (toolNames.has("run_terminal_command")) {

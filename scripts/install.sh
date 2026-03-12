@@ -62,7 +62,9 @@ log "Building packages (first run takes ~30 seconds)..."
 pnpm --filter @ember/core build
 pnpm --filter @ember/ui-schema build
 pnpm --filter @ember/connectors build
+pnpm --filter @ember/desktop-mcp build
 pnpm --filter @ember/prompts build
+pnpm --filter @ember/project-scaffold-mcp build
 pnpm --filter @ember/cli build
 ok "Packages built"
 

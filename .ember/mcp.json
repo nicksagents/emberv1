@@ -2,8 +2,8 @@
   "mcpServers": {
     "filesystem": {
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
-      "roles": ["coordinator", "director", "ops"],
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+      "roles": ["coordinator", "advisor", "director", "inspector", "ops"],
       "timeout": 15000
     }
   }

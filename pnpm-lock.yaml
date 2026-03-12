@@ -35,6 +35,9 @@ importers:
       '@ember/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@ember/desktop-mcp':
+        specifier: workspace:*
+        version: link:../../packages/desktop-mcp
       '@ember/project-scaffold-mcp':
         specifier: workspace:*
         version: link:../../packages/project-scaffold-mcp
@@ -47,6 +50,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.27.1
         version: 1.27.1(zod@4.3.6)
+      '@modelcontextprotocol/server-filesystem':
+        specifier: ^2026.1.14
+        version: 2026.1.14(zod@4.3.6)
       '@napi-rs/canvas':
         specifier: ^0.1.89
         version: 0.1.96
@@ -65,10 +71,6 @@ importers:
       playwright:
         specifier: ^1.58.2
         version: 1.58.2
-    devDependencies:
-      '@modelcontextprotocol/server-filesystem':
-        specifier: ^2026.1.14
-        version: 2026.1.14(zod@4.3.6)
 
   apps/web:
     dependencies:
@@ -105,6 +107,15 @@ importers:
       '@ember/ui-schema':
         specifier: workspace:*
         version: link:../ui-schema
+
+  packages/desktop-mcp:
+    dependencies:
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.27.1
+        version: 1.27.1(zod@4.3.6)
+      zod:
+        specifier: ^4.3.6
+        version: 4.3.6
 
   packages/project-scaffold-mcp:
     dependencies:

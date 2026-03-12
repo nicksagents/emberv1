@@ -25,6 +25,29 @@
       "roles": ["coordinator", "advisor", "director", "inspector"],
       "timeout": 60000,
       "_comment": "Override headless/headed per environment via project .ember/mcp.json. Add --no-sandbox in Docker/CI. Add --caps vision for screenshot-heavy flows."
+    },
+    "desktop": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@ember/desktop-mcp"
+      ],
+      "description": "Cross-platform desktop automation for screenshots, app launching, focus, keyboard, and mouse control.",
+      "roles": ["coordinator", "advisor", "director", "inspector", "ops"],
+      "timeout": 60000,
+      "_comment": "Desktop capabilities vary by OS and local permissions. Call describe_environment first to learn the active surface."
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "."
+      ],
+      "description": "Workspace filesystem access for direct file inspection and edits alongside Ember's native file tools.",
+      "roles": ["coordinator", "advisor", "director", "inspector", "ops"],
+      "timeout": 30000,
+      "_comment": "Uses the workspace root as the allowed filesystem root. Terminal access remains available via Ember's native terminal tool."
     }
   }
 }
