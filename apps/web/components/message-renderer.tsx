@@ -2,7 +2,8 @@
 
 import { Fragment, type ReactNode, useState, useCallback, useEffect, useRef } from "react";
 
-import type { ChatAttachment, ChatMessage, ToolCall } from "@ember/core/client";
+import type { ChatAttachment, ChatImageAttachment, ChatMessage, ToolCall } from "@ember/core/client";
+import { groupAttachments, isImageAttachment, isTextAttachment } from "../lib/attachments";
 
 type MarkdownBlock =
   | { type: "heading"; level: 1 | 2 | 3 | 4 | 5 | 6; text: string }
@@ -726,7 +727,7 @@ export function ToolCallsPanel({
   );
 }
 
-function ImageAttachments({ attachments }: { attachments: ChatAttachment[] }) {
+function ImageAttachments({ attachments }: { attachments: ChatImageAttachment[] }) {
   if (attachments.length === 0) {
     return null;
   }
@@ -738,6 +739,47 @@ function ImageAttachments({ attachments }: { attachments: ChatAttachment[] }) {
           <img src={attachment.dataUrl} alt={attachment.name} className="message-attachment-image" />
         </div>
       ))}
+    </div>
+  );
+}
+
+function TextAttachments({ attachments }: { attachments: ChatAttachment[] }) {
+  if (attachments.length === 0) {
+    return null;
+  }
+
+  const groups = groupAttachments(attachments);
+
+  return (
+    <div className="message-file-list">
+      {groups.map((group) => {
+        const textAttachments = group.attachments.filter(isTextAttachment);
+        if (textAttachments.length === 0) {
+          return null;
+        }
+
+        return (
+          <details key={group.sourceId} className="message-file-card">
+            <summary className="message-file-summary">
+              <span className="message-file-name">{group.sourceName}</span>
+              <span className="message-file-meta">{group.summary}</span>
+            </summary>
+            <div className="message-file-body">
+              {textAttachments.map((attachment) => (
+                <div key={attachment.id} className="message-file-preview">
+                  <div className="message-file-preview-header">
+                    <span>{attachment.language ? `.${attachment.language}` : attachment.mediaType}</span>
+                    {attachment.truncated ? <span>truncated</span> : null}
+                  </div>
+                  <pre>
+                    <code>{attachment.text}</code>
+                  </pre>
+                </div>
+              ))}
+            </div>
+          </details>
+        );
+      })}
     </div>
   );
 }
@@ -796,9 +838,8 @@ export function MessageRenderer({
   // Get model label
   const modelLabel = !isUser ? message.modelId?.trim() ?? null : null;
   
-  const imageAttachments = (message.attachments ?? []).filter(
-    (attachment) => attachment.kind === "image",
-  );
+  const imageAttachments = (message.attachments ?? []).filter(isImageAttachment);
+  const textAttachments = (message.attachments ?? []).filter(isTextAttachment);
 
   return (
     <div className={`message ${isUser ? "user" : "assistant"}`}>
@@ -819,6 +860,7 @@ export function MessageRenderer({
         {/* Message bubble */}
         <div className={`message-bubble ${isUser ? "user" : "assistant"}`}>
           <ImageAttachments attachments={imageAttachments} />
+          <TextAttachments attachments={textAttachments} />
           <MessageContent content={message.content} />
         </div>
         

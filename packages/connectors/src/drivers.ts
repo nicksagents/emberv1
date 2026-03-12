@@ -6,6 +6,8 @@ import path from "node:path";
 
 import {
   type ChatAttachment,
+  type ChatImageAttachment,
+  type ChatTextAttachment,
   getHistorySummaryMessage,
   isHistorySummaryMessage,
   type ConnectorTypeId,
@@ -582,26 +584,56 @@ function toAnthropicMessages(conversation: ChatMessage[], content: string) {
   ];
 }
 
-function getImageAttachments(message: ChatMessage): ChatAttachment[] {
-  return (message.attachments ?? []).filter((attachment) => attachment.kind === "image");
+function getImageAttachments(message: ChatMessage): ChatImageAttachment[] {
+  return (message.attachments ?? []).filter(
+    (attachment): attachment is ChatImageAttachment => attachment.kind === "image",
+  );
+}
+
+function getTextAttachments(message: ChatMessage): ChatTextAttachment[] {
+  return (message.attachments ?? []).filter(
+    (attachment): attachment is ChatTextAttachment => attachment.kind === "text",
+  );
+}
+
+function formatTextAttachmentForModel(attachment: ChatTextAttachment): string {
+  const label = attachment.sourceName?.trim() || attachment.name.trim() || attachment.id;
+  const header = `Attached file: ${label}`;
+  const body = attachment.text.trim();
+  if (!body) {
+    return `${header}\n(The file was empty.)`;
+  }
+
+  if (attachment.language?.trim()) {
+    return `${header}\n\`\`\`${attachment.language}\n${body}\n\`\`\``;
+  }
+
+  return `${header}\n${body}`;
 }
 
 function withCliAttachmentLabels(message: ChatMessage): string {
-  const attachments = getImageAttachments(message);
-  if (attachments.length === 0) {
-    return message.content;
+  const imageAttachments = getImageAttachments(message);
+  const textAttachments = getTextAttachments(message);
+  const parts = [message.content.trim()].filter(Boolean);
+
+  if (textAttachments.length > 0) {
+    parts.push(...textAttachments.map((attachment) => formatTextAttachmentForModel(attachment)));
   }
 
-  const label = `Attached images: ${attachments
-    .map((attachment) => attachment.name.trim() || attachment.id)
-    .join(", ")}`;
+  if (imageAttachments.length > 0) {
+    const label = `Attached images: ${imageAttachments
+      .map((attachment) => attachment.name.trim() || attachment.id)
+      .join(", ")}`;
+    parts.push(`[${label}]`);
+  }
 
-  return message.content.trim() ? `${message.content}\n[${label}]` : `[${label}]`;
+  return parts.join("\n\n");
 }
 
 function toOpenAiUserContent(message: ChatMessage) {
-  const attachments = getImageAttachments(message);
-  if (attachments.length === 0) {
+  const imageAttachments = getImageAttachments(message);
+  const textAttachments = getTextAttachments(message);
+  if (imageAttachments.length === 0 && textAttachments.length === 0) {
     return message.content;
   }
 
@@ -609,7 +641,11 @@ function toOpenAiUserContent(message: ChatMessage) {
     ...(message.content.trim()
       ? [{ type: "text", text: message.content }]
       : []),
-    ...attachments.map((attachment) => ({
+    ...textAttachments.map((attachment) => ({
+      type: "text",
+      text: formatTextAttachmentForModel(attachment),
+    })),
+    ...imageAttachments.map((attachment) => ({
       type: "image_url",
       image_url: {
         url: attachment.dataUrl,
@@ -638,8 +674,9 @@ function parseDataUrl(dataUrl: string): { mediaType: string; data: string } | nu
 }
 
 function toAnthropicUserContent(message: ChatMessage) {
-  const attachments = getImageAttachments(message);
-  if (attachments.length === 0) {
+  const imageAttachments = getImageAttachments(message);
+  const textAttachments = getTextAttachments(message);
+  if (imageAttachments.length === 0 && textAttachments.length === 0) {
     return message.content;
   }
 
@@ -647,7 +684,11 @@ function toAnthropicUserContent(message: ChatMessage) {
     ...(message.content.trim()
       ? [{ type: "text", text: message.content }]
       : []),
-    ...attachments.flatMap((attachment) => {
+    ...textAttachments.map((attachment) => ({
+      type: "text" as const,
+      text: formatTextAttachmentForModel(attachment),
+    })),
+    ...imageAttachments.flatMap((attachment) => {
       const parsed = parseDataUrl(attachment.dataUrl);
       if (!parsed) {
         return [];
@@ -897,7 +938,7 @@ function extensionForMediaType(mediaType: string): string {
   }
 }
 
-function collectRecentCliImages(conversation: ChatMessage[]): ChatAttachment[] {
+function collectRecentCliImages(conversation: ChatMessage[]): ChatImageAttachment[] {
   return conversation.slice(-10).flatMap((message) => getImageAttachments(message));
 }
 

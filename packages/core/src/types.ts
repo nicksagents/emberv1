@@ -42,12 +42,43 @@ export interface ProviderCapabilities {
   canUseTools: boolean;
 }
 
-export interface ChatAttachment {
+export interface ChatAttachmentBase {
   id: string;
+  name: string;
+  mediaType: string;
+  sourceId?: string | null;
+  sourceName?: string | null;
+  pageNumber?: number | null;
+}
+
+export interface ChatImageAttachment extends ChatAttachmentBase {
   kind: "image";
+  dataUrl: string;
+}
+
+export interface ChatTextAttachment extends ChatAttachmentBase {
+  kind: "text";
+  text: string;
+  language?: string | null;
+  truncated?: boolean;
+}
+
+export type ChatAttachment = ChatImageAttachment | ChatTextAttachment;
+
+export interface ChatAttachmentUpload {
+  id: string;
   name: string;
   mediaType: string;
   dataUrl: string;
+}
+
+export interface PreparedAttachmentGroup {
+  sourceId: string;
+  sourceName: string;
+  sourceMediaType: string;
+  attachments: ChatAttachment[];
+  summary: string;
+  warnings?: string[];
 }
 
 export interface Provider {

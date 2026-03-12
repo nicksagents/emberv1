@@ -14,11 +14,13 @@ import { useRouter, useSearchParams } from "next/navigation";
 
 import type {
   ChatAttachment,
+  ChatAttachmentUpload,
   ChatMessage,
   ChatMode,
   ChatStreamEvent,
   Conversation,
   ConversationSummary,
+  PreparedAttachmentGroup,
   Provider,
   RoleAssignment,
   Settings,
@@ -26,14 +28,15 @@ import type {
 } from "@ember/core/client";
 import { ROLES } from "@ember/core/client";
 
+import { flattenAttachmentGroups, groupAttachments, isImageAttachment } from "../lib/attachments";
 import { clientApiPath, clientStreamApiPath } from "../lib/api";
 import { announceConversationsChanged } from "../lib/conversations";
 import { FunnyLoader, MessageRenderer, StreamingContent, ThinkingPanel, ToolCallsPanel } from "./message-renderer";
 
 const directModes = ROLES.filter((role) => role !== "dispatch" && role !== "coordinator");
 const modes = ["auto", "coordinator", ...directModes] as const;
-const MAX_IMAGE_ATTACHMENTS = 3;
-const MAX_IMAGE_BYTES = 2.5 * 1024 * 1024;
+const MAX_ATTACHMENT_FILES = 6;
+const MAX_ATTACHMENT_FILE_BYTES = 8 * 1024 * 1024;
 
 function normalizeMode(mode: ChatMode): (typeof modes)[number] {
   return mode === "dispatch" ? "auto" : mode;
@@ -85,7 +88,7 @@ function getModeLabel(mode: (typeof modes)[number]): string {
   return mode === "auto" ? "Auto" : titleCase(mode);
 }
 
-function readImageAttachment(file: File): Promise<ChatAttachment> {
+function readUpload(file: File): Promise<ChatAttachmentUpload> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = () => reject(new Error(`Failed to read ${file.name}.`));
@@ -98,14 +101,60 @@ function readImageAttachment(file: File): Promise<ChatAttachment> {
 
       resolve({
         id: `attachment_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-        kind: "image",
         name: file.name,
-        mediaType: file.type || "image/jpeg",
+        mediaType: file.type || "application/octet-stream",
         dataUrl,
       });
     };
     reader.readAsDataURL(file);
   });
+}
+
+function hasImageAttachments(attachments: ChatAttachment[]): boolean {
+  return attachments.some((attachment) => isImageAttachment(attachment));
+}
+
+function decodeStreamBuffer(buffer: string): { events: ChatStreamEvent[]; rest: string } {
+  const usesSse =
+    buffer.startsWith("data:") ||
+    buffer.startsWith(":") ||
+    buffer.includes("\n\ndata:") ||
+    buffer.includes("\n\n:");
+
+  if (usesSse) {
+    const blocks = buffer.split("\n\n");
+    const rest = blocks.pop() ?? "";
+    const events: ChatStreamEvent[] = [];
+
+    for (const block of blocks) {
+      const trimmed = block.trim();
+      if (!trimmed || trimmed.startsWith(":")) {
+        continue;
+      }
+
+      const data = trimmed
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trimStart())
+        .join("");
+      if (!data) {
+        continue;
+      }
+
+      events.push(JSON.parse(data) as ChatStreamEvent);
+    }
+
+    return { events, rest };
+  }
+
+  const lines = buffer.split("\n");
+  const rest = lines.pop() ?? "";
+  const events = lines
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as ChatStreamEvent);
+
+  return { events, rest };
 }
 
 async function fetchConversationSnapshot(id: string): Promise<Conversation | null> {
@@ -146,7 +195,9 @@ export function ChatClient({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [streamingPreview, setStreamingPreview] = useState<StreamingPreview | null>(null);
   const [roleMenuOpen, setRoleMenuOpen] = useState(false);
-  const [pendingAttachments, setPendingAttachments] = useState<ChatAttachment[]>([]);
+  const [preparingAttachments, setPreparingAttachments] = useState(false);
+  const [preparingAttachmentNames, setPreparingAttachmentNames] = useState<string[]>([]);
+  const [pendingAttachmentGroups, setPendingAttachmentGroups] = useState<PreparedAttachmentGroup[]>([]);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const messagesScrollRef = useRef<HTMLDivElement | null>(null);
@@ -182,6 +233,14 @@ export function ChatClient({
   const assignmentMap = useMemo(
     () => new Map(assignments.map((assignment) => [assignment.role, assignment])),
     [assignments],
+  );
+  const pendingAttachments = useMemo(
+    () => flattenAttachmentGroups(pendingAttachmentGroups),
+    [pendingAttachmentGroups],
+  );
+  const pendingContainsImages = useMemo(
+    () => hasImageAttachments(pendingAttachments),
+    [pendingAttachments],
   );
 
   useEffect(() => {
@@ -230,6 +289,7 @@ export function ChatClient({
       setMode("auto");
       setErrorMessage(null);
       setStreamingPreview(null);
+      setPendingAttachmentGroups([]);
       return () => {
         cancelled = true;
       };
@@ -390,13 +450,13 @@ export function ChatClient({
 
   async function sendMessage(rawContent: string) {
     const content = rawContent.trim();
-    if ((!content && pendingAttachments.length === 0) || sending || !setupReady) {
+    if ((!content && pendingAttachments.length === 0) || sending || preparingAttachments || !setupReady) {
       return;
     }
 
-    if (pendingAttachments.length > 0 && !imageInputReady) {
+    if (pendingContainsImages && !imageInputReady) {
       setErrorMessage(
-        "The current chat mode is not ready for image input. Switch to an image-capable provider or remove the image.",
+        "One or more attachments include images. Switch to an image-capable provider or remove the image-based attachment.",
       );
       return;
     }
@@ -416,7 +476,7 @@ export function ChatClient({
 
     setMessages(nextConversation);
     setInput("");
-    setPendingAttachments([]);
+    setPendingAttachmentGroups([]);
     setSending(true);
     autoScrollRef.current = true;
     setShowScrollToBottom(false);
@@ -442,6 +502,7 @@ export function ChatClient({
       const response = await fetch(clientStreamApiPath("/chat/stream"), {
         method: "POST",
         headers: {
+          accept: "text/event-stream",
           "content-type": "application/json",
         },
         body: JSON.stringify({
@@ -471,6 +532,65 @@ export function ChatClient({
       const decoder = new TextDecoder();
       let buffer = "";
       let completed = false;
+      const applyStreamEvent = (event: ChatStreamEvent) => {
+        if (event.type === "status") {
+          setStreamingPreview((current) =>
+            current
+              ? {
+                  ...current,
+                  status: event.message,
+                  phase: event.phase,
+                  providerName: event.providerName ?? current.providerName,
+                  role: event.role ?? current.role,
+                  modelId: event.modelId ?? current.modelId,
+                }
+              : current,
+          );
+        } else if (event.type === "thinking") {
+          setStreamingPreview((current) =>
+            current
+              ? {
+                  ...current,
+                  thinking: `${current.thinking}${event.text}`,
+                }
+              : current,
+          );
+        } else if (event.type === "toolCall") {
+          setStreamingPreview((current) => {
+            if (!current) return current;
+            const existingIndex = current.toolCalls.findIndex((t) => t.id === event.toolCall.id);
+            if (existingIndex >= 0) {
+              const updated = [...current.toolCalls];
+              updated[existingIndex] = event.toolCall;
+              return { ...current, toolCalls: updated };
+            }
+            return { ...current, toolCalls: [...current.toolCalls, event.toolCall] };
+          });
+        } else if (event.type === "content") {
+          setStreamingPreview((current) =>
+            current
+              ? {
+                  ...current,
+                  content: `${current.content}${event.text}`,
+                  status: current.status || "Streaming response...",
+                }
+              : current,
+          );
+        } else if (event.type === "complete") {
+          completed = true;
+          setStreamingPreview(null);
+          setMessages((current) => [...current, event.message]);
+          if (event.conversation) {
+            setConversation(event.conversation);
+          }
+          if (event.conversationId) {
+            router.replace(`/chat?conversation=${event.conversationId}`);
+          }
+          announceConversationsChanged();
+        } else if (event.type === "error") {
+          throw new Error(event.message);
+        }
+      };
 
       try {
         while (true) {
@@ -480,81 +600,23 @@ export function ChatClient({
           }
 
           buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() ?? "";
+          const decoded = decodeStreamBuffer(buffer);
+          buffer = decoded.rest;
 
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed) {
-              continue;
-            }
-
-            const event = JSON.parse(trimmed) as ChatStreamEvent;
-            if (event.type === "status") {
-              setStreamingPreview((current) =>
-                current
-                  ? {
-                      ...current,
-                      status: event.message,
-                      phase: event.phase,
-                      providerName: event.providerName ?? current.providerName,
-                      role: event.role ?? current.role,
-                      modelId: event.modelId ?? current.modelId,
-                    }
-                  : current,
-              );
-            } else if (event.type === "thinking") {
-              setStreamingPreview((current) =>
-                current
-                  ? {
-                      ...current,
-                      thinking: `${current.thinking}${event.text}`,
-                    }
-                  : current,
-              );
-            } else if (event.type === "toolCall") {
-              setStreamingPreview((current) => {
-                if (!current) return current;
-                const existingIndex = current.toolCalls.findIndex((t) => t.id === event.toolCall.id);
-                if (existingIndex >= 0) {
-                  const updated = [...current.toolCalls];
-                  updated[existingIndex] = event.toolCall;
-                  return { ...current, toolCalls: updated };
-                }
-                return { ...current, toolCalls: [...current.toolCalls, event.toolCall] };
-              });
-            } else if (event.type === "content") {
-              setStreamingPreview((current) =>
-                current
-                  ? {
-                      ...current,
-                      content: `${current.content}${event.text}`,
-                      status: current.status || "Streaming response...",
-                    }
-                  : current,
-              );
-            } else if (event.type === "complete") {
-              completed = true;
-              setStreamingPreview(null);
-              setMessages((current) => [...current, event.message]);
-              if (event.conversation) {
-                setConversation(event.conversation);
-              }
-              if (event.conversationId) {
-                router.replace(`/chat?conversation=${event.conversationId}`);
-              }
-              announceConversationsChanged();
-            } else if (event.type === "error") {
-              throw new Error(event.message);
-            }
+          for (const event of decoded.events) {
+            applyStreamEvent(event);
           }
         }
 
         const trailing = decoder.decode();
         if (trailing.trim()) {
-          const event = JSON.parse(trailing.trim()) as ChatStreamEvent;
-          if (event.type === "error") {
-            throw new Error(event.message);
+          buffer += trailing;
+        }
+
+        if (buffer.trim()) {
+          const decoded = decodeStreamBuffer(`${buffer}\n\n`);
+          for (const event of decoded.events) {
+            applyStreamEvent(event);
           }
         }
       } finally {
@@ -590,7 +652,7 @@ export function ChatClient({
       } else {
         setMessages((current) => current.filter((message) => message.id !== userMessage.id));
         setInput(userMessage.content);
-        setPendingAttachments(userMessage.attachments ?? []);
+        setPendingAttachmentGroups(groupAttachments(userMessage.attachments ?? []));
         setErrorMessage(error instanceof Error ? error.message : "Chat request failed.");
       }
     } finally {
@@ -618,13 +680,7 @@ export function ChatClient({
   };
 
   const handleAttachmentButtonClick = () => {
-    if (!imageInputReady) {
-      setErrorMessage(
-        "The current chat mode does not have an image-capable provider ready. Connect Anthropic or an OpenAI-compatible provider first.",
-      );
-      return;
-    }
-
+    setErrorMessage(null);
     attachmentInputRef.current?.click();
   };
 
@@ -636,29 +692,62 @@ export function ChatClient({
     }
 
     setErrorMessage(null);
-    const remainingSlots = MAX_IMAGE_ATTACHMENTS - pendingAttachments.length;
+    const remainingSlots = MAX_ATTACHMENT_FILES - pendingAttachmentGroups.length;
     if (remainingSlots <= 0) {
-      setErrorMessage(`You can attach up to ${MAX_IMAGE_ATTACHMENTS} images per message.`);
+      setErrorMessage(`You can attach up to ${MAX_ATTACHMENT_FILES} files per message.`);
       return;
     }
 
-    const acceptedFiles = files.filter((file) => file.type.startsWith("image/")).slice(0, remainingSlots);
-    const oversizedFile = acceptedFiles.find((file) => file.size > MAX_IMAGE_BYTES);
+    const acceptedFiles = files.slice(0, remainingSlots);
+    const oversizedFile = acceptedFiles.find((file) => file.size > MAX_ATTACHMENT_FILE_BYTES);
     if (oversizedFile) {
-      setErrorMessage(`${oversizedFile.name} is too large. Keep each image under 2.5 MB.`);
+      setErrorMessage(`${oversizedFile.name} is too large. Keep each file under 8 MB.`);
       return;
     }
 
     try {
-      const attachments = await Promise.all(acceptedFiles.map((file) => readImageAttachment(file)));
-      setPendingAttachments((current) => [...current, ...attachments].slice(0, MAX_IMAGE_ATTACHMENTS));
+      setPreparingAttachments(true);
+      setPreparingAttachmentNames(acceptedFiles.map((file) => file.name));
+      const uploads = await Promise.all(acceptedFiles.map((file) => readUpload(file)));
+      const response = await fetch(clientApiPath("/chat/attachments/prepare"), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ uploads }),
+      });
+
+      if (!response.ok) {
+        let message = `Attachment preparation failed with status ${response.status}.`;
+        try {
+          const payload = (await response.json()) as { message?: string };
+          if (payload.message?.trim()) {
+            message = payload.message.trim();
+          }
+        } catch {}
+        throw new Error(message);
+      }
+
+      const payload = (await response.json()) as { groups: PreparedAttachmentGroup[] };
+      const warnings = payload.groups.flatMap((group) => group.warnings ?? []);
+      setPendingAttachmentGroups((current) =>
+        [...current, ...payload.groups].slice(0, MAX_ATTACHMENT_FILES),
+      );
+      if (warnings.length > 0) {
+        setErrorMessage(warnings.join(" "));
+      }
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Failed to attach image.");
+      setErrorMessage(error instanceof Error ? error.message : "Failed to attach file.");
+    } finally {
+      setPreparingAttachments(false);
+      setPreparingAttachmentNames([]);
     }
   };
 
-  const removePendingAttachment = (id: string) => {
-    setPendingAttachments((current) => current.filter((attachment) => attachment.id !== id));
+  const removePendingAttachmentGroup = (sourceId: string) => {
+    setPendingAttachmentGroups((current) =>
+      current.filter((group) => group.sourceId !== sourceId),
+    );
   };
 
   return (
@@ -864,31 +953,82 @@ export function ChatClient({
           <input
             ref={attachmentInputRef}
             type="file"
-            accept="image/*"
             multiple
             hidden
             onChange={handleAttachmentChange}
           />
           <div className="composer-main">
-            {pendingAttachments.length > 0 ? (
+            {pendingAttachmentGroups.length > 0 || preparingAttachmentNames.length > 0 ? (
               <div className="composer-attachments">
-                {pendingAttachments.map((attachment) => (
-                  <div key={attachment.id} className="composer-attachment-chip">
-                    <img src={attachment.dataUrl} alt={attachment.name} className="composer-attachment-thumb" />
-                    <div className="composer-attachment-copy">
-                      <span>{attachment.name}</span>
+                {pendingAttachmentGroups.map((group) => {
+                  const previewImage = group.attachments.find(isImageAttachment);
+                  return (
+                    <div key={group.sourceId} className="composer-attachment-chip">
+                      {previewImage ? (
+                        <img
+                          src={previewImage.dataUrl}
+                          alt={group.sourceName}
+                          className="composer-attachment-thumb"
+                        />
+                      ) : (
+                        <div className="composer-attachment-thumb composer-attachment-icon">
+                          <svg
+                            width="14"
+                            height="14"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="1.8"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          >
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                            <path d="M14 2v6h6" />
+                          </svg>
+                        </div>
+                      )}
+                      <div className="composer-attachment-copy">
+                        <span>{group.sourceName}</span>
+                        <span>{group.summary}</span>
+                      </div>
+                      <button
+                        type="button"
+                        className="composer-attachment-remove"
+                        onClick={() => removePendingAttachmentGroup(group.sourceId)}
+                        aria-label={`Remove ${group.sourceName}`}
+                      >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <line x1="18" y1="6" x2="6" y2="18" />
+                          <line x1="6" y1="6" x2="18" y2="18" />
+                        </svg>
+                      </button>
                     </div>
-                    <button
-                      type="button"
-                      className="composer-attachment-remove"
-                      onClick={() => removePendingAttachment(attachment.id)}
-                      aria-label={`Remove ${attachment.name}`}
-                    >
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <line x1="18" y1="6" x2="6" y2="18" />
-                        <line x1="6" y1="6" x2="18" y2="18" />
+                  );
+                })}
+                {preparingAttachmentNames.map((name, index) => (
+                  <div
+                    key={`preparing-${name}-${index}`}
+                    className="composer-attachment-chip composer-attachment-chip-loading"
+                    aria-live="polite"
+                  >
+                    <div className="composer-attachment-thumb composer-attachment-icon composer-attachment-spinner">
+                      <svg
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.8"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="M21 12a9 9 0 1 1-6.22-8.56" />
                       </svg>
-                    </button>
+                    </div>
+                    <div className="composer-attachment-copy">
+                      <span>{name}</span>
+                      <span>Preparing attachment...</span>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -906,9 +1046,10 @@ export function ChatClient({
                 <button
                   type="button"
                   className="composer-utility"
-                  aria-label="Add images"
-                  title={imageInputReady ? "Add images" : "Image input needs a compatible provider"}
+                  aria-label="Add files"
+                  title={preparingAttachments ? "Preparing files..." : "Add files"}
                   onClick={handleAttachmentButtonClick}
+                  disabled={preparingAttachments}
                 >
                   <svg
                     width="16"
@@ -931,11 +1072,12 @@ export function ChatClient({
                   className="composer-send"
                   disabled={
                     sending ||
+                    preparingAttachments ||
                     !setupReady ||
                     (!input.trim() && pendingAttachments.length === 0) ||
-                    (pendingAttachments.length > 0 && !imageInputReady)
+                    (pendingContainsImages && !imageInputReady)
                   }
-                  aria-label={sending ? "Sending" : "Send message"}
+                  aria-label={sending || preparingAttachments ? "Sending" : "Send message"}
                 >
                   <svg
                     width="19"

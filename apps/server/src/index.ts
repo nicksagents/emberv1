@@ -30,6 +30,7 @@ import {
   writeSettings,
 } from "@ember/core";
 import type {
+  ChatAttachmentUpload,
   ChatExecutionResult,
   ChatMessage,
   ChatMode,
@@ -57,6 +58,7 @@ import type { McpConfig } from "@ember/core/mcp";
 import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
+import { prepareAttachmentUploads } from "./chat-attachments.js";
 
 const host = process.env.EMBER_RUNTIME_HOST ?? "0.0.0.0";
 const port = Number(process.env.EMBER_RUNTIME_PORT ?? "3005");
@@ -638,7 +640,7 @@ async function buildExecution(
 }
 
 const app = Fastify({
-  bodyLimit: 12 * 1024 * 1024,
+  bodyLimit: 24 * 1024 * 1024,
   logger: false,
 });
 
@@ -1209,12 +1211,30 @@ app.post("/api/chat", async (request) => {
   };
 });
 
+app.post("/api/chat/attachments/prepare", async (request, reply) => {
+  const body = request.body as { uploads?: ChatAttachmentUpload[] };
+  if (!Array.isArray(body.uploads) || body.uploads.length === 0) {
+    reply.code(400);
+    return { message: "uploads is required." };
+  }
+
+  try {
+    const groups = await prepareAttachmentUploads(body.uploads);
+    return { groups };
+  } catch (error) {
+    reply.code(400);
+    return {
+      message: error instanceof Error ? error.message : "Attachment preparation failed.",
+    };
+  }
+});
+
 app.post("/api/chat/stream", async (request, reply) => {
   const body = request.body as ChatRequest;
 
   reply.hijack();
   reply.raw.writeHead(200, {
-    "content-type": "application/x-ndjson; charset=utf-8",
+    "content-type": "text/event-stream; charset=utf-8",
     "cache-control": "no-cache, no-transform",
     connection: "keep-alive",
     "x-accel-buffering": "no",
@@ -1225,9 +1245,17 @@ app.post("/api/chat/stream", async (request, reply) => {
   (reply.raw.socket as import("node:net").Socket | null)?.setNoDelay(true);
 
   const send = (event: ChatStreamEvent) => {
-    reply.raw.write(`${JSON.stringify(event)}\n`);
+    reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
     (reply.raw as typeof reply.raw & { flush?: () => void }).flush?.();
   };
+
+  const heartbeat = setInterval(() => {
+    reply.raw.write(": keep-alive\n\n");
+    (reply.raw as typeof reply.raw & { flush?: () => void }).flush?.();
+  }, 15_000);
+
+  reply.raw.write(": stream-open\n\n");
+  (reply.raw as typeof reply.raw & { flush?: () => void }).flush?.();
 
   // Send an immediate heartbeat so the client knows the server is alive
   // before the (potentially slow) routing/dispatch LLM call begins.
@@ -1410,6 +1438,7 @@ app.post("/api/chat/stream", async (request, reply) => {
           : undefined,
     });
   } finally {
+    clearInterval(heartbeat);
     reply.raw.end();
   }
 

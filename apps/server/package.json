@@ -16,11 +16,13 @@
     "@ember/core": "workspace:*",
     "@ember/project-scaffold-mcp": "workspace:*",
     "@ember/prompts": "workspace:*",
+    "@napi-rs/canvas": "^0.1.89",
     "@fastify/cors": "^11.0.1",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@playwright/mcp": "^0.0.68",
     "fastify": "^5.2.1",
     "node-pty": "^1.1.0",
+    "pdfjs-dist": "^5.5.207",
     "playwright": "^1.58.2"
   },
   "devDependencies": {

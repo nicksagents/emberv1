@@ -3,6 +3,7 @@ import type { ChatMessage, PromptStack } from "./types";
 const MESSAGE_OVERHEAD_TOKENS = 12;
 const TOOL_CALL_OVERHEAD_TOKENS = 24;
 const IMAGE_ATTACHMENT_TOKENS = 1_200;
+const TEXT_ATTACHMENT_OVERHEAD_TOKENS = 36;
 const PROMPT_STACK_OVERHEAD_TOKENS = 24;
 const REQUEST_OVERHEAD_TOKENS = 16;
 
@@ -36,8 +37,18 @@ export function estimateChatMessageTokens(message: ChatMessage): number {
       estimateTextTokens(toolCall.status)
     );
   }, 0);
-  const attachmentTokens =
-    ((message.attachments ?? []).length ?? 0) * IMAGE_ATTACHMENT_TOKENS;
+  const attachmentTokens = (message.attachments ?? []).reduce((total, attachment) => {
+    if (attachment.kind === "image") {
+      return total + IMAGE_ATTACHMENT_TOKENS;
+    }
+
+    return (
+      total +
+      TEXT_ATTACHMENT_OVERHEAD_TOKENS +
+      estimateTextTokens(attachment.name) +
+      estimateTextTokens(attachment.text)
+    );
+  }, 0);
 
   return (
     MESSAGE_OVERHEAD_TOKENS +

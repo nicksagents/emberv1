@@ -1,6 +1,8 @@
 import type { NextRequest } from "next/server";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:3005";
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 // Headers that must be stripped to avoid conflicts when proxying a streaming response.
 const HOP_BY_HOP = ["connection", "keep-alive", "transfer-encoding", "content-encoding", "content-length"];
@@ -17,6 +19,7 @@ async function proxy(request: NextRequest, path: string[]) {
   const init: RequestInit = {
     method: request.method,
     headers,
+    cache: "no-store",
     redirect: "manual",
   };
 
@@ -38,6 +41,7 @@ async function proxy(request: NextRequest, path: string[]) {
   for (const header of HOP_BY_HOP) {
     responseHeaders.delete(header);
   }
+  responseHeaders.set("cache-control", "no-cache, no-transform");
 
   return new Response(response.body, {
     status: response.status,
