@@ -5219,8 +5219,13 @@ p {
 
 .memory-constellation-canvas,
 .memory-empty-state {
+  width: 100%;
   height: clamp(34rem, calc(100svh - 5.2rem), 56rem);
   min-height: clamp(34rem, calc(100svh - 5.2rem), 56rem);
+  display: block;
+  /* Ensure canvas doesn't overflow its container */
+  max-width: 100%;
+  object-fit: contain;
 }
 
 .memory-overlay-minibar {
@@ -5531,12 +5536,15 @@ p {
   .memory-visualizer-stage {
     min-height: calc(100svh - 4.5rem);
     border-radius: 1.08rem;
+    overflow: hidden;
   }
 
   .memory-constellation-canvas,
   .memory-empty-state {
+    width: 100%;
     height: calc(100svh - 4.5rem);
     min-height: calc(100svh - 4.5rem);
+    max-width: 100vw;
   }
 
   .memory-overlay-minibar {
@@ -5571,12 +5579,17 @@ p {
   .memory-visualizer-stage {
     min-height: calc(100svh - 4rem);
     border-radius: 0.95rem;
+    /* Ensure stage doesn't allow horizontal overflow */
+    overflow: hidden;
   }
 
   .memory-constellation-canvas,
   .memory-empty-state {
+    width: 100%;
     height: calc(100svh - 4rem);
     min-height: calc(100svh - 4rem);
+    /* Prevent canvas from causing horizontal scroll */
+    max-width: 100vw;
   }
 
   .memory-overlay-minibar {

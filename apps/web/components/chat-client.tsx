@@ -31,6 +31,7 @@ import { ROLES } from "@ember/core/client";
 import { flattenAttachmentGroups, groupAttachments, isImageAttachment } from "../lib/attachments";
 import { clientApiPath, clientStreamApiPath } from "../lib/api";
 import { announceConversationsChanged } from "../lib/conversations";
+import { getRandomSuggestionPrompts, type SuggestionPrompt } from "../lib/suggestion-prompts";
 import { FunnyLoader, MessageRenderer, StreamingContent, ThinkingPanel, ToolCallsPanel } from "./message-renderer";
 
 const directModes = ROLES.filter((role) => role !== "dispatch" && role !== "coordinator" && role !== "ops");
@@ -45,28 +46,7 @@ function normalizeMode(mode: ChatMode): (typeof modes)[number] {
   return mode;
 }
 
-const suggestionPrompts = [
-  {
-    title: "Plan the next feature",
-    description: "Break the next milestone into concrete implementation steps.",
-    value: "Plan the next feature for this workspace.",
-  },
-  {
-    title: "Audit the current setup",
-    description: "Review the runtime, roles, and any obvious setup gaps.",
-    value: "Audit the current Ember setup and call out issues.",
-  },
-  {
-    title: "Explain this workspace",
-    description: "Summarize the moving parts and how the app is wired together.",
-    value: "Explain this workspace and how the main pieces fit together.",
-  },
-  {
-    title: "List connected providers",
-    description: "Show which providers are available and ready for chat.",
-    value: "List the connected providers and their current status.",
-  },
-];
+
 
 interface StreamingPreview {
   content: string;
@@ -208,6 +188,9 @@ export function ChatClient({
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const autoScrollRef = useRef(true);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  
+  // Generate random suggestion prompts on mount - based on agent abilities
+  const [suggestionPrompts] = useState<SuggestionPrompt[]>(() => getRandomSuggestionPrompts(4));
 
   const scrollToLatest = (behavior: ScrollBehavior = "auto", retries = 3) => {
     const scrollEl = messagesScrollRef.current;

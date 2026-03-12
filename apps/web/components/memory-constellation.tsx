@@ -176,10 +176,12 @@ function buildEnvironmentParticles(count: number, radius: number): RenderParticl
     const seed = index + 1;
     const phi = Math.acos(1 - 2 * seededUnit(seed + 17));
     const theta = seededUnit(seed + 31) * Math.PI * 2;
-    const shell = 1.2 + seededUnit(seed + 43) * 0.95;
-    const x = Math.cos(theta) * Math.sin(phi) * radius * 1.7 * shell;
-    const y = Math.cos(phi) * radius * 0.88 * (0.64 + seededUnit(seed + 53) * 0.48);
-    const z = Math.sin(theta) * Math.sin(phi) * radius * 1.22 * shell;
+    // Tighter shell range to keep particles more contained and visible on small screens
+    const shell = 0.8 + seededUnit(seed + 43) * 0.6;
+    // Reduced spread factors to keep particles within viewport bounds on all devices
+    const x = Math.cos(theta) * Math.sin(phi) * radius * 1.3 * shell;
+    const y = Math.cos(phi) * radius * 0.7 * (0.64 + seededUnit(seed + 53) * 0.36);
+    const z = Math.sin(theta) * Math.sin(phi) * radius * 0.95 * shell;
 
     return {
       baseX: x,
@@ -214,6 +216,9 @@ export function MemoryConstellation({
     particles: RenderParticle[];
     rotationY: number;
     rotationX: number;
+    zoom: number;
+    panX: number;
+    panY: number;
     dragging: boolean;
     hoverIndex: number;
     pulses: Array<{ linkIndex: number; t: number; speed: number }>;
@@ -224,6 +229,9 @@ export function MemoryConstellation({
     particles: [],
     rotationY: 0,
     rotationX: -0.22,
+    zoom: 1,
+    panX: 0,
+    panY: 0,
     dragging: false,
     hoverIndex: -1,
     pulses: [],
@@ -259,7 +267,9 @@ export function MemoryConstellation({
       height: canvas.clientHeight,
     });
 
-    const clusterRadius = Math.min(bounds().width, bounds().height) * 0.16;
+    // Responsive cluster radius: smaller on mobile to fit within viewport
+    const minDim = Math.min(bounds().width, bounds().height);
+    const clusterRadius = minDim * (minDim < 500 ? 0.12 : 0.16);
     const hemisphereCounts = new Map<-1 | 1, number>();
     for (let index = 0; index < graph.clusters.length; index += 1) {
       const hemisphere = getClusterHemisphere(graph.clusters[index]!, index);
@@ -304,7 +314,8 @@ export function MemoryConstellation({
       const localIndex = seenByCluster.get(node.clusterId) ?? 0;
       seenByCluster.set(node.clusterId, localIndex + 1);
       const clusterCount = countsByCluster.get(node.clusterId) ?? 1;
-      const localRadius = Math.max(18, clusterRadius * (0.42 + Math.min(1.1, clusterCount / 14)));
+      // Tighter node clustering to keep within viewport bounds
+      const localRadius = Math.max(14, clusterRadius * (0.35 + Math.min(0.85, clusterCount / 18)));
       const offset = getNodeOffset(node, localIndex, clusterCount, localRadius, cluster.hemisphere);
 
       return {
@@ -338,7 +349,9 @@ export function MemoryConstellation({
     stateRef.current.nodes = nodes;
     stateRef.current.clusters = clusters;
     stateRef.current.links = links;
-    stateRef.current.particles = buildEnvironmentParticles(160, clusterRadius * 2.2);
+    // Reduce particle count and radius for better performance and visibility on small screens
+    const particleCount = Math.min(120, Math.max(60, Math.floor((canvas.clientWidth * canvas.clientHeight) / 15000)));
+    stateRef.current.particles = buildEnvironmentParticles(particleCount, clusterRadius * 1.8);
     stateRef.current.hoverIndex = -1;
     stateRef.current.pulses = Array.from({
       length: Math.min(Math.max(20, links.length * 2), 140),
@@ -363,12 +376,16 @@ export function MemoryConstellation({
       const z1 = target.x * sinY + target.z * cosY;
       const y2 = target.y * cosX - z1 * sinX;
       const z2 = target.y * sinX + z1 * cosX;
-      const camera = Math.max(width, height) * 1.28;
+      
+      // Responsive camera distance that stays constant - zoom is applied separately
+      const minDimension = Math.min(width, height);
+      const camera = minDimension * 2.2 + Math.max(width, height) * 0.4;
       const perspective = camera / (camera - z2);
 
-      target.depthScale = perspective;
-      target.screenX = width * 0.5 + x1 * perspective;
-      target.screenY = height * 0.53 + y2 * perspective;
+      target.depthScale = perspective * state.zoom;
+      // Apply pan offset first, then zoom - this enables zoom-to-cursor to work correctly
+      target.screenX = width * 0.5 + (x1 * perspective + state.panX) * state.zoom;
+      target.screenY = height * 0.5 + (y2 * perspective + state.panY) * state.zoom;
     };
 
     const updateHover = (clientX: number, clientY: number) => {
@@ -391,25 +408,8 @@ export function MemoryConstellation({
       stateRef.current.hoverIndex = hoverIndex;
     };
 
-    const onMouseMove = (event: MouseEvent) => {
-      updateHover(event.clientX, event.clientY);
-      if (!stateRef.current.dragging) {
-        return;
-      }
-      stateRef.current.rotationY += event.movementX * 0.0056;
-      stateRef.current.rotationX = Math.max(
-        -0.76,
-        Math.min(0.76, stateRef.current.rotationX + event.movementY * 0.0042),
-      );
-    };
-
-    const onMouseDown = () => {
-      stateRef.current.dragging = true;
-    };
-
-    const onMouseUp = () => {
-      stateRef.current.dragging = false;
-    };
+    let lastTouchX = 0;
+    let lastTouchY = 0;
 
     const onMouseLeave = () => {
       stateRef.current.dragging = false;
@@ -421,11 +421,186 @@ export function MemoryConstellation({
       onSelectId(hovered >= 0 ? stateRef.current.nodes[hovered]?.id ?? null : null);
     };
 
+    // Right-click drag to pan
+    let isPanning = false;
+    let panStartX = 0;
+    let panStartY = 0;
+
+    const onContextMenu = (event: MouseEvent) => {
+      event.preventDefault();
+    };
+
+    const onMouseDown = (event: MouseEvent) => {
+      if (event.button === 2) {
+        // Right mouse button - start panning
+        isPanning = true;
+        panStartX = event.clientX;
+        panStartY = event.clientY;
+        event.preventDefault();
+      } else {
+        stateRef.current.dragging = true;
+      }
+    };
+
+    const onMouseUp = () => {
+      stateRef.current.dragging = false;
+      isPanning = false;
+    };
+
+    const onMouseMove = (event: MouseEvent) => {
+      if (isPanning) {
+        // Pan the view
+        const deltaX = event.clientX - panStartX;
+        const deltaY = event.clientY - panStartY;
+        stateRef.current.panX += deltaX / stateRef.current.zoom;
+        stateRef.current.panY += deltaY / stateRef.current.zoom;
+        panStartX = event.clientX;
+        panStartY = event.clientY;
+        return;
+      }
+      updateHover(event.clientX, event.clientY);
+      if (!stateRef.current.dragging) {
+        return;
+      }
+      stateRef.current.rotationY += event.movementX * 0.0056;
+      stateRef.current.rotationX = Math.max(
+        -0.76,
+        Math.min(0.76, stateRef.current.rotationX + event.movementY * 0.0042),
+      );
+    };
+
+    // Double-click to reset view
+    const onDoubleClick = () => {
+      stateRef.current.zoom = 1;
+      stateRef.current.panX = 0;
+      stateRef.current.panY = 0;
+      stateRef.current.rotationX = -0.22;
+      stateRef.current.rotationY = 0;
+    };
+
+    // Wheel zoom for desktop - zooms towards cursor position
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      const { width, height } = bounds();
+      const zoomSpeed = 0.001;
+      const delta = -event.deltaY * zoomSpeed;
+      const state = stateRef.current;
+      const oldZoom = state.zoom;
+      const newZoom = Math.max(0.5, Math.min(8, oldZoom * (1 + delta)));
+      
+      // Calculate mouse position relative to center
+      const rect = canvas.getBoundingClientRect();
+      const mouseX = event.clientX - rect.left - width * 0.5;
+      const mouseY = event.clientY - rect.top - height * 0.5;
+      
+      // Adjust pan to zoom towards cursor: pan_new = pan_old - mouseOffset * (1 - oldZoom/newZoom)
+      state.panX = state.panX - mouseX * (1 - oldZoom / newZoom);
+      state.panY = state.panY - mouseY * (1 - oldZoom / newZoom);
+      state.zoom = newZoom;
+    };
+
+    // Pinch zoom for mobile - zooms towards pinch center
+    let initialPinchDistance = 0;
+    let initialZoom = 1;
+    let isPinching = false;
+    let pinchCenterX = 0;
+    let pinchCenterY = 0;
+    let initialPanX = 0;
+    let initialPanY = 0;
+
+    const getPinchDistance = (touches: TouchList): number => {
+      if (touches.length < 2) return 0;
+      const dx = touches[0]!.clientX - touches[1]!.clientX;
+      const dy = touches[0]!.clientY - touches[1]!.clientY;
+      return Math.sqrt(dx * dx + dy * dy);
+    };
+
+    const getPinchCenter = (touches: TouchList): { x: number; y: number } => {
+      if (touches.length < 2) return { x: 0, y: 0 };
+      const rect = canvas.getBoundingClientRect();
+      return {
+        x: (touches[0]!.clientX + touches[1]!.clientX) / 2 - rect.left - bounds().width * 0.5,
+        y: (touches[0]!.clientY + touches[1]!.clientY) / 2 - rect.top - bounds().height * 0.5,
+      };
+    };
+
+    const onTouchStart = (event: TouchEvent) => {
+      if (event.touches.length === 2) {
+        // Start pinch gesture
+        isPinching = true;
+        initialPinchDistance = getPinchDistance(event.touches);
+        initialZoom = stateRef.current.zoom;
+        initialPanX = stateRef.current.panX;
+        initialPanY = stateRef.current.panY;
+        const center = getPinchCenter(event.touches);
+        pinchCenterX = center.x;
+        pinchCenterY = center.y;
+        event.preventDefault();
+      } else if (event.touches.length === 1) {
+        stateRef.current.dragging = true;
+        lastTouchX = event.touches[0]!.clientX;
+        lastTouchY = event.touches[0]!.clientY;
+        updateHover(lastTouchX, lastTouchY);
+      }
+    };
+
+    const onTouchMove = (event: TouchEvent) => {
+      if (event.touches.length === 2 && isPinching) {
+        // Handle pinch zoom towards center
+        const currentDistance = getPinchDistance(event.touches);
+        if (initialPinchDistance > 0) {
+          const scale = currentDistance / initialPinchDistance;
+          const newZoom = Math.max(0.5, Math.min(8, initialZoom * scale));
+          // Adjust pan to zoom towards pinch center
+          stateRef.current.panX = initialPanX - pinchCenterX * (1 - initialZoom / newZoom);
+          stateRef.current.panY = initialPanY - pinchCenterY * (1 - initialZoom / newZoom);
+          stateRef.current.zoom = newZoom;
+        }
+        event.preventDefault();
+      } else if (event.touches.length === 1 && !isPinching) {
+        const touch = event.touches[0]!;
+        updateHover(touch.clientX, touch.clientY);
+        
+        if (stateRef.current.dragging) {
+          const deltaX = touch.clientX - lastTouchX;
+          const deltaY = touch.clientY - lastTouchY;
+          stateRef.current.rotationY += deltaX * 0.008;
+          stateRef.current.rotationX = Math.max(
+            -0.76,
+            Math.min(0.76, stateRef.current.rotationX + deltaY * 0.006),
+          );
+          lastTouchX = touch.clientX;
+          lastTouchY = touch.clientY;
+        }
+      }
+    };
+
+    const onTouchEnd = () => {
+      stateRef.current.dragging = false;
+      // Reset pinch state when touch ends
+      initialPinchDistance = 0;
+      initialZoom = 1;
+      isPinching = false;
+      pinchCenterX = 0;
+      pinchCenterY = 0;
+      initialPanX = 0;
+      initialPanY = 0;
+    };
+
     canvas.addEventListener("mousemove", onMouseMove);
     canvas.addEventListener("mousedown", onMouseDown);
     canvas.addEventListener("mouseleave", onMouseLeave);
     window.addEventListener("mouseup", onMouseUp);
     canvas.addEventListener("click", onClick);
+
+    // Add touch events for mobile
+    canvas.addEventListener("touchstart", onTouchStart, { passive: false });
+    canvas.addEventListener("touchmove", onTouchMove, { passive: false });
+    canvas.addEventListener("touchend", onTouchEnd);
+    canvas.addEventListener("touchcancel", onTouchEnd);
+
+    // Add wheel event for desktop zoom
+    canvas.addEventListener("wheel", onWheel, { passive: false });
 
     let frameId = 0;
     const animate = () => {
@@ -443,10 +618,10 @@ export function MemoryConstellation({
 
       const background = ctx.createRadialGradient(
         width * 0.5,
-        height * 0.4,
+        height * 0.5,
         40,
         width * 0.5,
-        height * 0.55,
+        height * 0.5,
         Math.max(width, height) * 0.85,
       );
       background.addColorStop(0, "rgba(28, 22, 18, 0.94)");
@@ -615,6 +790,11 @@ export function MemoryConstellation({
       canvas.removeEventListener("mouseleave", onMouseLeave);
       window.removeEventListener("mouseup", onMouseUp);
       canvas.removeEventListener("click", onClick);
+      canvas.removeEventListener("touchstart", onTouchStart);
+      canvas.removeEventListener("touchmove", onTouchMove);
+      canvas.removeEventListener("touchend", onTouchEnd);
+      canvas.removeEventListener("touchcancel", onTouchEnd);
+      canvas.removeEventListener("wheel", onWheel);
       window.cancelAnimationFrame(frameId);
     };
   }, [graph, onSelectId]);
