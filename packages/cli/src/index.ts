@@ -9,6 +9,7 @@ import type { Readable } from "node:stream";
 import {
   defaultRuntime,
   ensureDataFiles,
+  getDataRoot,
   initializeMemoryInfrastructure,
   readSettings,
   readRuntime,
@@ -20,7 +21,8 @@ import {
   type DashboardServiceStatus,
   stripAnsi,
 } from "./dashboard.js";
-import { buildRuntimeEnv, hasManagedRuntime, resolveEmberRoot } from "./runtime.js";
+import { buildRuntimeEnv, ensureLocalEnvFile, hasManagedRuntime, resolveEmberRoot } from "./runtime.js";
+import { runUpdate } from "./update.js";
 
 const runtimePort = "3005";
 const webPort = "3000";
@@ -281,6 +283,7 @@ Commands:
   ember doctor         Check local readiness
   ember status         Show runtime status
   ember stop           Stop the local runtime
+  ember update         Pull latest code, preserve local state, reinstall Ember
   ember tailscale enable  Print local tailnet guidance
 `);
 }
@@ -736,6 +739,7 @@ async function runForeground(
 async function start(mode: StartMode) {
   const repoRoot = resolveEmberRoot(process.cwd(), process.env.EMBER_ROOT);
   process.env.EMBER_ROOT = repoRoot;
+  ensureLocalEnvFile(repoRoot);
   const runtime = await readRuntime().catch(() => defaultRuntime());
   await ensureDataFiles(repoRoot);
   const settings = await readSettings();
@@ -868,6 +872,7 @@ async function start(mode: StartMode) {
 async function stop() {
   const repoRoot = resolveEmberRoot(process.cwd(), process.env.EMBER_ROOT);
   process.env.EMBER_ROOT = repoRoot;
+  ensureLocalEnvFile(repoRoot);
   await ensureDataFiles(repoRoot);
   const runtime = await readRuntime();
   await stopRuntimeChildren(runtime);
@@ -877,6 +882,7 @@ async function stop() {
 async function status() {
   const repoRoot = resolveEmberRoot(process.cwd(), process.env.EMBER_ROOT);
   process.env.EMBER_ROOT = repoRoot;
+  ensureLocalEnvFile(repoRoot);
   await ensureDataFiles(repoRoot);
   const runtime = await readRuntime().catch(() => defaultRuntime());
   const apiBaseUrl = runtime.apiUrl || localApiUrl;
@@ -898,7 +904,9 @@ async function status() {
 async function doctor() {
   const repoRoot = resolveEmberRoot(process.cwd(), process.env.EMBER_ROOT);
   process.env.EMBER_ROOT = repoRoot;
+  ensureLocalEnvFile(repoRoot);
   const checks = [
+    ["git", commandExists("git")],
     ["node", commandExists("node")],
     ["npm", commandExists("npm")],
     ["pnpm", commandExists("pnpm")],
@@ -915,6 +923,33 @@ async function doctor() {
 function tailscaleEnable() {
   console.log("EMBER now binds to all interfaces by default.");
   console.log(`Connect to the web UI using this machine's Tailscale IP on port ${webPort}.`);
+}
+
+async function update() {
+  const repoRoot = resolveEmberRoot(process.cwd(), process.env.EMBER_ROOT);
+  process.env.EMBER_ROOT = repoRoot;
+  ensureLocalEnvFile(repoRoot);
+  await ensureDataFiles(repoRoot);
+
+  const runtime = await readRuntime().catch(() => defaultRuntime());
+  if (hasManagedRuntime(runtime)) {
+    console.log("Stopping managed Ember services before update...");
+    await stopRuntimeChildren(runtime);
+  } else if (runtime.status !== "idle") {
+    await writeRuntime(defaultRuntime());
+  }
+
+  try {
+    const result = runUpdate(repoRoot);
+    const dataRoot = getDataRoot(repoRoot);
+    console.log(`EMBER updated from ${result.upstream}.`);
+    console.log(`Preserved local state in ${dataRoot}.`);
+    console.log("Restart Ember with `ember`.");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`EMBER update failed: ${message}`);
+    process.exitCode = 1;
+  }
 }
 
 const command = process.argv[2] ?? "start";
@@ -935,6 +970,9 @@ switch (command) {
     break;
   case "stop":
     await stop();
+    break;
+  case "update":
+    await update();
     break;
   case "tailscale":
     if (process.argv[3] === "enable") {

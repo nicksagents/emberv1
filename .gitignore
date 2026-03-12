@@ -4,5 +4,5 @@ dist
 *.tsbuildinfo
 .DS_Store
 *.log
-data/provider-secrets.json
-data/runtime.json
+.env
+data/

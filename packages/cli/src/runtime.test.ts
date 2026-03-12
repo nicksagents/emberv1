@@ -2,9 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 
-import { appendNodeOption, buildRuntimeEnv, hasManagedRuntime, resolveEmberRoot } from "./runtime.js";
+import { appendNodeOption, buildRuntimeEnv, ensureLocalEnvFile, hasManagedRuntime, resolveEmberRoot } from "./runtime.js";
 
 function createWorkspaceFixture(): { root: string; nested: string } {
   const root = mkdtempSync(path.join(os.tmpdir(), "ember-cli-workspace-"));
@@ -67,4 +67,19 @@ test("appendNodeOption avoids duplicate flags", () => {
     appendNodeOption("--disable-warning=ExperimentalWarning", "--disable-warning=ExperimentalWarning"),
     "--disable-warning=ExperimentalWarning",
   );
+});
+
+test("ensureLocalEnvFile copies .env.example only when .env is missing", () => {
+  const workspace = createWorkspaceFixture();
+  const examplePath = path.join(workspace.root, ".env.example");
+  const envPath = path.join(workspace.root, ".env");
+
+  writeFileSync(examplePath, "EMBER_WEB_PORT=3000\n", "utf8");
+  ensureLocalEnvFile(workspace.root);
+  assert.equal(existsSync(envPath), true);
+  assert.equal(readFileSync(envPath, "utf8"), "EMBER_WEB_PORT=3000\n");
+
+  writeFileSync(envPath, "EMBER_WEB_PORT=4010\n", "utf8");
+  ensureLocalEnvFile(workspace.root);
+  assert.equal(readFileSync(envPath, "utf8"), "EMBER_WEB_PORT=4010\n");
 });

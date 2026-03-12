@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { copyFileSync, existsSync } from "node:fs";
 import path from "node:path";
 
 import { resolveRepoRoot, type RuntimeState } from "@ember/core";
@@ -22,6 +22,15 @@ export function resolveEmberRoot(
   }
 
   return resolveRepoRoot(from);
+}
+
+export function ensureLocalEnvFile(repoRoot: string): void {
+  const envPath = path.join(repoRoot, ".env");
+  const examplePath = path.join(repoRoot, ".env.example");
+
+  if (!existsSync(envPath) && existsSync(examplePath)) {
+    copyFileSync(examplePath, envPath);
+  }
 }
 
 export function hasManagedRuntime(runtime: Pick<RuntimeState, "serverPid" | "webPid">): boolean {

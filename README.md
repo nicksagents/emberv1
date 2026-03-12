@@ -47,6 +47,22 @@ This starts the API server (`http://localhost:3005`) and the web UI (`http://loc
 
 To stop, press **Ctrl-C**.
 
+### Update an existing install
+
+```bash
+ember update
+```
+
+This command:
+
+- Stops managed Ember services before updating
+- Pulls the latest code from the tracked GitHub branch
+- Reapplies your local repo changes
+- Reinstalls dependencies and rebuilds packages
+- Preserves local `.env`, chats, memories, providers, and other files in `data/`
+
+Local files such as `.env` and everything in `data/` are user-owned state and should stay out of git. Ember recreates missing local state files on install/startup.
+
 ---
 
 ## UI Setup
