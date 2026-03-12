@@ -103,6 +103,18 @@ For verification / OTP flows (email code, SMS code):
 11. mcp__playwright__browser_wait_for(text="Welcome")        ← confirm success
 ```
 
+### Session reuse
+
+If the browser tool surface exposes storage-state tools, prefer reusing a saved
+session before repeating a full login:
+
+1. `mcp__playwright__browser_set_storage_state` before navigation when a known good state exists
+2. If the session is valid, continue without re-entering credentials
+3. After a successful fresh login, `mcp__playwright__browser_storage_state` can capture the new session for later reuse
+
+Keep secrets in the credential vault and treat storage state as session data,
+not as durable user-profile memory.
+
 ### Filling forms efficiently
 
 `browser_fill_form` fills multiple fields in one MCP round-trip — prefer it

@@ -185,6 +185,57 @@ test("consolidation promotes sourced world facts from fetched pages", async () =
   }
 });
 
+test("consolidation redacts secrets from session summaries", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "ember-memory-consolidation-"));
+  const previousRoot = process.env.EMBER_ROOT;
+  process.env.EMBER_ROOT = tempRoot;
+
+  try {
+    const config = defaultMemoryConfig();
+    config.backend = "sqlite";
+    const repository = createMemoryRepository(config);
+
+    const conversation = makeConversation([
+      {
+        id: "msg_user",
+        role: "user",
+        authorRole: "user",
+        mode: "auto",
+        content: "Remember this workflow. My Gmail password is super-secret-password.",
+        createdAt: "2026-03-12T18:01:00.000Z",
+      },
+      {
+        id: "msg_assistant",
+        role: "assistant",
+        authorRole: "coordinator",
+        mode: "auto",
+        content: "I will keep the workflow but not the raw secret in long-term memory.",
+        createdAt: "2026-03-12T18:02:00.000Z",
+      },
+    ]);
+
+    await consolidateConversationMemory(repository, {
+      conversation,
+      config,
+    });
+
+    const summaryItem = (await repository.listItems()).find((item) => item.memoryType === "episode_summary");
+
+    assert.ok(summaryItem);
+    assert.doesNotMatch(summaryItem?.content ?? "", /super-secret-password/);
+    assert.match(summaryItem?.content ?? "", /\[redacted\]/);
+
+    await repository.close?.();
+  } finally {
+    if (previousRoot === undefined) {
+      delete process.env.EMBER_ROOT;
+    } else {
+      process.env.EMBER_ROOT = previousRoot;
+    }
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("consolidation distills project facts from strong tool evidence and records support edges", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "ember-memory-consolidation-"));
   const previousRoot = process.env.EMBER_ROOT;

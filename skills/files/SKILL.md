@@ -1,11 +1,24 @@
 ---
 name: files
-description: File system read, write, edit, and directory listing tools.
+description: File system inspection, read, write, edit, and directory listing tools.
 roles: [coordinator, advisor, director, inspector]
-tools: [read_file, write_file, edit_file, list_directory]
+tools: [stat_path, read_file, write_file, edit_file, list_directory]
 ---
 
 ## File Tools
+
+These tools operate on local-machine paths, not just repo-relative paths. Use
+absolute paths like `/Users/nick/Desktop`, `~/Downloads`, or another host path
+when the task is outside the current project. The workspace root is only the
+default starting point.
+
+### `stat_path`
+
+Inspect a path before assuming what it is.
+
+- Use this when you need to know whether a target is a file, directory, or symlink
+- Check size, timestamps, extension, and entry count before heavy reads or destructive edits
+- Use this before `delete_file` on unfamiliar paths
 
 ### `read_file`
 

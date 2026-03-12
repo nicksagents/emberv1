@@ -15,6 +15,8 @@ import {
   compactConversationHistory,
   consolidateConversationMemory,
   createMemoryRepository,
+  deriveCompressionPromptBudget,
+  estimatePromptExtraTokens,
   revalidateMemoryItem,
   retireProcedureMemory,
   suppressMemoryItem,
@@ -332,6 +334,7 @@ function compactChatRequest(
   settings: Awaited<ReturnType<typeof readSettings>>,
   promptStack: PromptStack,
   provider: Provider | null,
+  tools: ToolDefinition[],
 ): ChatRequest {
   const result = compactConversationForContext(
     request.conversation,
@@ -339,6 +342,7 @@ function compactChatRequest(
     settings,
     promptStack,
     provider,
+    tools,
   );
   if (!result.didCompact) {
     return request;
@@ -356,15 +360,23 @@ function compactConversationForContext(
   settings: Awaited<ReturnType<typeof readSettings>>,
   promptStack: PromptStack,
   provider: Provider | null,
+  tools: ToolDefinition[],
+  extraPromptTokens = 0,
 ) {
   const promptBudget = resolveExecutionPromptBudget(settings, provider);
+  const compressionBudget = deriveCompressionPromptBudget(
+    settings.compression,
+    promptBudget.contextWindowTokens,
+  );
 
   return compactConversationHistory(conversation, {
     enabled: settings.compression.enabled,
-    maxPromptTokens: promptBudget.maxPromptTokens,
-    targetPromptTokens: promptBudget.targetPromptTokens,
+    maxPromptTokens: compressionBudget.maxPromptTokens,
+    targetPromptTokens: compressionBudget.targetPromptTokens,
     preserveRecentMessages: settings.compression.preserveRecentMessages,
     minimumRecentMessages: settings.compression.minimumRecentMessages,
+    extraPromptTokens:
+      estimatePromptExtraTokens({ tools }) + Math.max(0, Math.floor(extraPromptTokens)),
     promptStack,
     currentUserContent: content,
   });
@@ -535,7 +547,7 @@ async function buildHandoffContext(
     tools,
     providers: source.providers,
     assignmentMap: source.assignmentMap,
-    compactRolePrompt: executionProfile.compactCoordinatorProfile,
+    compactRolePrompt: executionProfile.compactRolePrompt,
     compactToolPrompt: executionProfile.compactToolPrompt,
     extraSharedSections: [buildDeliveryWorkflowPrompt(workflowState, targetRole)],
   });
@@ -1201,7 +1213,9 @@ async function prepareExecution(
     extraSharedSections: [buildDeliveryWorkflowPrompt(workflowState, "dispatch")],
   });
   const routingRequest =
-    mode === "auto" ? compactChatRequest(request, settings, dispatchPromptStack, routerProvider) : request;
+    mode === "auto"
+      ? compactChatRequest(request, settings, dispatchPromptStack, routerProvider, [])
+      : request;
   const routeDecision =
     mode === "auto"
       ? await resolveAutoRouteDecision(routingRequest, settings, providers, assignmentMap, secrets)
@@ -1253,11 +1267,11 @@ async function prepareExecution(
     tools,
     providers,
     assignmentMap,
-    compactRolePrompt: executionProfile.compactCoordinatorProfile,
+    compactRolePrompt: executionProfile.compactRolePrompt,
     compactToolPrompt: executionProfile.compactToolPrompt,
     extraSharedSections: [buildDeliveryWorkflowPrompt(workflowState, activeRole)],
   });
-  const compactedRequest = compactChatRequest(request, settings, promptStack, provider);
+  const compactedRequest = compactChatRequest(request, settings, promptStack, provider, tools);
   const modelDecision = provider
     ? await resolveExecutionModelDecision({
         role: activeRole,
@@ -1522,6 +1536,11 @@ async function buildExecution(
         currentCtx.settings,
         currentCtx.promptStack,
         iterProvider,
+        currentCtx.tools,
+        estimatePromptExtraTokens({
+          memoryContextText: memoryContext?.text ?? null,
+          procedureContextText: procedureContext?.text ?? null,
+        }),
       ).messages;
       let iterContent: string;
       let iterThinking: string | null;
@@ -2709,7 +2728,7 @@ app.get("/api/prompts/:role", async (request, reply) => {
       tools,
       providers,
       assignmentMap,
-      compactRolePrompt: executionProfile.compactCoordinatorProfile,
+      compactRolePrompt: executionProfile.compactRolePrompt,
       compactToolPrompt: executionProfile.compactToolPrompt,
     }),
   };
@@ -2896,6 +2915,11 @@ app.post("/api/chat/stream", async (request, reply) => {
         streamCtx.settings,
         streamCtx.promptStack,
         iterProvider,
+        streamCtx.tools,
+        estimatePromptExtraTokens({
+          memoryContextText: memoryContext?.text ?? null,
+          procedureContextText: procedureContext?.text ?? null,
+        }),
       ).messages;
       let iterThinking = "";
       let iterContent = "";

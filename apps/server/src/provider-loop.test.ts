@@ -461,3 +461,38 @@ test("streamProviderChat keeps learned procedures in a separate prompt block", a
     globalThis.fetch = originalFetch;
   }
 });
+
+test("streamProviderChat surfaces provider error details for rejected requests", async () => {
+  const originalFetch = globalThis.fetch;
+  const promptStack: PromptStack = { shared: "", role: "", tools: "" };
+
+  globalThis.fetch = (async () =>
+    new Response(
+      JSON.stringify({
+        error: {
+          message: "request (22688 tokens) exceeds the available context size (10240 tokens)",
+        },
+      }),
+      {
+        status: 400,
+        headers: {
+          "content-type": "application/json",
+        },
+      },
+    )) as typeof fetch;
+
+  try {
+    await assert.rejects(
+      () =>
+        streamProviderChat(makeProvider(), {}, {
+          modelId: null,
+          promptStack,
+          conversation: [],
+          content: "Continue.",
+        }, {}),
+      /exceeds the available context size \(10240 tokens\)/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

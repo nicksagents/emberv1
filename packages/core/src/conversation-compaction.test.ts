@@ -194,3 +194,37 @@ test("compactConversationHistory can reduce recent tail down to the configured m
   );
   assert.ok(result.compactedTokenCount < result.originalTokenCount);
 });
+
+test("compactConversationHistory reserves space for non-conversation prompt payloads", () => {
+  const conversation = Array.from({ length: 8 }, (_, index): ChatMessage =>
+    makeMessage({
+      id: `reserve_${index}`,
+      role: index % 2 === 0 ? "user" : "assistant",
+      authorRole: index % 2 === 0 ? "user" : "coordinator",
+      mode: "auto",
+      content: `Reserve-aware message ${index + 1}. ${"Extra context. ".repeat(20)}`,
+    }),
+  );
+
+  const withoutReserve = compactConversationHistory(conversation, {
+    promptStack: PROMPT_STACK,
+    currentUserContent: "Continue.",
+    maxPromptTokens: 1_200,
+    targetPromptTokens: 900,
+    preserveRecentMessages: 4,
+    minimumRecentMessages: 4,
+  });
+  const withReserve = compactConversationHistory(conversation, {
+    promptStack: PROMPT_STACK,
+    currentUserContent: "Continue.",
+    maxPromptTokens: 1_200,
+    targetPromptTokens: 900,
+    extraPromptTokens: 500,
+    preserveRecentMessages: 4,
+    minimumRecentMessages: 4,
+  });
+
+  assert.equal(withoutReserve.didCompact, false);
+  assert.equal(withReserve.didCompact, true);
+  assert.ok(withReserve.compactedTokenCount <= 1_200);
+});

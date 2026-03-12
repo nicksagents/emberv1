@@ -208,14 +208,14 @@ export const projectOverviewTool: EmberTool = {
   definition: {
     name: "project_overview",
     description:
-      "Summarize the current project or repo: root path, git branch/status, top-level structure, package manager, scripts, and detected workspace packages. " +
+      "Summarize a local project or repo: root path, git branch/status, top-level structure, package manager, scripts, and detected workspace packages. " +
       "Use this first when entering an unfamiliar codebase so you can orient yourself before searching files or running commands.",
     inputSchema: {
       type: "object",
       properties: {
         path: {
           type: "string",
-          description: "Optional file or directory path to inspect. Defaults to the current workspace root.",
+          description: "Optional absolute or relative file or directory path to inspect. Defaults to the current workspace/project root.",
         },
       },
     },

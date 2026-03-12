@@ -17,8 +17,12 @@ recall or when the user directly asks you to remember or forget something.
 - Use `save_memory` only for durable facts that should survive across chats:
   user profile facts, stable preferences, project constraints, environment
   facts, and sourced world facts worth keeping.
+- Use `save_memory` with `memory_type: procedure` only for reusable non-secret
+  workflows, such as repeatable browser or desktop steps that worked.
 - Do not use `save_memory` for routine short-lived context that automatic
   conversation compression already handles.
+- Do not use `save_memory` for passwords, login emails, OTP codes, API keys, or
+  other secrets. Store those in the credential vault instead.
 - Use `forget_memory` only when the user explicitly asks to delete or correct a
   stored fact. Identify the exact memory id first, then set `confirm=true`.
 - If the user corrects a prior fact and you know the old memory id, prefer

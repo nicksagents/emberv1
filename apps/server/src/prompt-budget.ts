@@ -14,6 +14,7 @@ const MIN_MEMORY_RESERVE_TOKENS = 96;
 const MIN_PROCEDURE_RESERVE_TOKENS = 48;
 const MIN_PROMPT_TOKENS_AFTER_MEMORY_RESERVE = 1_000;
 const COMPACT_COORDINATOR_CONTEXT_WINDOW_TOKENS = 28_000;
+const ULTRA_COMPACT_CONTEXT_WINDOW_TOKENS = 16_000;
 
 export interface AdaptiveMemoryRetrievalBudget {
   maxResults: number;
@@ -32,7 +33,7 @@ export interface ExecutionPromptBudget {
 }
 
 export interface ExecutionModelProfile {
-  compactCoordinatorProfile: boolean;
+  compactRolePrompt: boolean;
   compactToolPrompt: boolean;
   compactToolset: boolean;
 }
@@ -174,10 +175,12 @@ export function resolveExecutionModelProfile(
   const contextWindowTokens = resolveProviderContextWindowTokens(provider, settings);
   const compactCoordinatorProfile =
     role === "coordinator" && contextWindowTokens <= COMPACT_COORDINATOR_CONTEXT_WINDOW_TOKENS;
+  const ultraCompactProfile = contextWindowTokens <= ULTRA_COMPACT_CONTEXT_WINDOW_TOKENS;
+  const compactRolePrompt = compactCoordinatorProfile || ultraCompactProfile;
 
   return {
-    compactCoordinatorProfile,
-    compactToolPrompt: compactCoordinatorProfile,
-    compactToolset: compactCoordinatorProfile,
+    compactRolePrompt,
+    compactToolPrompt: compactRolePrompt,
+    compactToolset: compactRolePrompt,
   };
 }

@@ -1,4 +1,5 @@
 import {
+  containsSensitiveCredentialContent,
   MEMORY_SCOPES,
   MEMORY_SOURCE_TYPES,
   MEMORY_TYPES,
@@ -205,6 +206,11 @@ async function saveMemoryExecute(input: Record<string, unknown>): Promise<string
   if ((input.valid_until ?? input.expires_at) && !validUntil) {
     return "Error: valid_until must be an ISO-8601 timestamp.";
   }
+  const jsonValue = normalizeJsonValue(input.json_value ?? input.metadata);
+  const secretCheckText = [content, jsonValue ? JSON.stringify(jsonValue) : ""].filter(Boolean).join("\n");
+  if (containsSensitiveCredentialContent(secretCheckText)) {
+    return "Error: credentials and secrets must not be stored with save_memory. Use credential_save for logins and keep long-term memory for non-secret facts or procedures.";
+  }
 
   return await withMemoryRepository(async (repository) => {
     const items = await repository.listItems({ includeSuperseded: true });
@@ -240,7 +246,6 @@ async function saveMemoryExecute(input: Record<string, unknown>): Promise<string
       typeof input.source_ref === "string" && input.source_ref.trim()
         ? input.source_ref.trim()
         : "tool:save_memory";
-    const jsonValue = normalizeJsonValue(input.json_value ?? input.metadata);
     const confidence = typeof input.confidence === "number" ? input.confidence : undefined;
     const salience = typeof input.salience === "number" ? input.salience : undefined;
 

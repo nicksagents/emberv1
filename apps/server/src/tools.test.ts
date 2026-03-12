@@ -16,7 +16,9 @@ skillManager.initialize({
   bundledDir: join(__testDir, "..", "..", "..", "skills"),
 });
 
-import { deleteFileTool, editFileTool, listDirectoryTool, readFileTool, writeFileTool } from "./tools/files.js";
+import { deleteFileTool, editFileTool, listDirectoryTool, readFileTool, statPathTool, writeFileTool } from "./tools/files.js";
+import { credentialGetTool, credentialListTool, credentialSaveTool } from "./tools/credentials.js";
+import { resetMockCredentialSecretStore } from "./tools/credential-secret-store.js";
 import { fetchPageTool } from "./tools/fetch-page.js";
 import { gitInspectTool } from "./tools/git-inspect.js";
 import { httpRequestTool } from "./tools/http-request.js";
@@ -127,6 +129,22 @@ test("list_directory supports recursive listing", async () => {
   assert.match(result, /Directory:/);
   assert.match(result, /nested\//);
   assert.match(result, /file\.txt/);
+});
+
+test("stat_path reports type, size, and timestamps", async () => {
+  const dir = tempDir();
+  const filePath = path.join(dir, "meta.txt");
+  writeFileSync(filePath, "hello", "utf8");
+
+  const result = expectText(await statPathTool.execute({
+    path: filePath,
+  }));
+
+  assert.match(result, /Path:/);
+  assert.match(result, /Type: file/);
+  assert.match(result, /Size: 5 bytes/);
+  assert.match(result, /Modified:/);
+  assert.match(result, /Extension: \.txt/);
 });
 
 test("fetch_page formats JSON and includes links", async () => {
@@ -381,6 +399,24 @@ test("memory-tools skill teaches save, search, inspect, and forget workflow", ()
   assert.match(skill!.body, /forget_memory/);
 });
 
+test("credential vault skill teaches local-only login reuse", () => {
+  const skill = skillManager.loadSkill("credential-vault");
+  assert.ok(skill, "credential-vault skill must exist");
+  assert.deepEqual(skill!.roles, ["coordinator", "advisor", "director", "inspector"]);
+  assert.deepEqual(skill!.tools, ["credential_save", "credential_list", "credential_get"]);
+  assert.match(skill!.body, /local-only/i);
+  assert.match(skill!.body, /save_memory/i);
+});
+
+test("desktop-small-model skill enforces screenshot-first verification", () => {
+  const skill = skillManager.loadSkill("desktop-small-model");
+  assert.ok(skill, "desktop-small-model skill must exist");
+  assert.deepEqual(skill!.roles, ["coordinator", "advisor", "director", "inspector"]);
+  assert.deepEqual(skill!.tools, ["mcp__desktop__describe_environment", "mcp__desktop__take_screenshot"]);
+  assert.match(skill!.body, /describe_environment -> get_active_window\/list_windows -> take_screenshot -> OCR text search/i);
+  assert.match(skill!.body, /one action/i);
+});
+
 test("ops cleanup skill exists and generic file skill excludes ops", () => {
   const opsSkill = skillManager.loadSkill("ops-file-cleanup");
   const filesSkill = skillManager.loadSkill("files");
@@ -468,6 +504,77 @@ test("compact coordinator tool selection keeps scaffold MCP tools reachable", ()
   assert.ok(toolNames.includes("mcp__scaffold__post_setup"));
 });
 
+test("compact coordinator tool selection keeps desktop window tools reachable", () => {
+  registerMcpTools([
+    {
+      tool: makeNoopTool(
+        "mcp__desktop__describe_environment",
+        "Describe desktop automation capabilities.",
+      ),
+      roles: ["coordinator"],
+    },
+    {
+      tool: makeNoopTool(
+        "mcp__desktop__get_active_window",
+        "Get the currently focused window.",
+      ),
+      roles: ["coordinator"],
+    },
+    {
+      tool: makeNoopTool(
+        "mcp__desktop__list_windows",
+        "List visible desktop windows.",
+      ),
+      roles: ["coordinator"],
+    },
+    {
+      tool: makeNoopTool(
+        "mcp__desktop__take_screenshot",
+        "Take a desktop screenshot.",
+      ),
+      roles: ["coordinator"],
+    },
+    {
+      tool: makeNoopTool(
+        "mcp__desktop__find_text_on_screen",
+        "Find visible text on the screen.",
+      ),
+      roles: ["coordinator"],
+    },
+    {
+      tool: makeNoopTool(
+        "mcp__desktop__drag_mouse",
+        "Drag the mouse between two screen coordinates.",
+      ),
+      roles: ["coordinator"],
+    },
+    {
+      tool: makeNoopTool(
+        "mcp__desktop__scroll_mouse",
+        "Scroll the mouse wheel.",
+      ),
+      roles: ["coordinator"],
+    },
+  ]);
+
+  const tools = getExecutionToolsForRole("coordinator", {
+    compact: true,
+    content: "Focus the right desktop window, inspect the active window, use OCR to find the Continue button, then drag and scroll if needed and verify with a screenshot.",
+    conversation: [],
+  });
+  const toolNames = tools.map((tool) => tool.name);
+
+  assert.ok(toolNames.includes("mcp__desktop__describe_environment"));
+  assert.ok(toolNames.includes("mcp__desktop__get_active_window"));
+  assert.ok(toolNames.includes("mcp__desktop__list_windows"));
+  assert.ok(toolNames.includes("mcp__desktop__take_screenshot"));
+  assert.ok(toolNames.includes("mcp__desktop__find_text_on_screen"));
+  assert.ok(toolNames.includes("mcp__desktop__drag_mouse"));
+  assert.ok(toolNames.includes("mcp__desktop__scroll_mouse"));
+
+  replaceMcpTools([]);
+});
+
 test("tool schemas expose small-model-friendly aliases; skills inject correctly by role", () => {
   assert.ok("file" in (readFileTool.definition.inputSchema.properties ?? {}));
   assert.ok("text" in (searchFilesTool.definition.inputSchema.properties ?? {}));
@@ -491,16 +598,34 @@ test("tool schemas expose small-model-friendly aliases; skills inject correctly 
     description: "List scaffold templates",
     inputSchema: { type: "object", properties: {} },
   };
+  const desktopDescribeTool: import("@ember/core").ToolDefinition = {
+    name: "mcp__desktop__describe_environment",
+    description: "Describe desktop automation capabilities.",
+    inputSchema: { type: "object", properties: {} },
+  };
+  const desktopScreenshotTool: import("@ember/core").ToolDefinition = {
+    name: "mcp__desktop__take_screenshot",
+    description: "Take a desktop screenshot.",
+    inputSchema: { type: "object", properties: {} },
+  };
   const memorySearchDefinition = memorySearchTool.definition;
   const memoryGetDefinition = memoryGetTool.definition;
   const saveMemoryDefinition = saveMemoryTool.definition;
   const forgetMemoryDefinition = forgetMemoryTool.definition;
+  const credentialSaveDefinition = credentialSaveTool.definition;
+  const credentialListDefinition = credentialListTool.definition;
+  const credentialGetDefinition = credentialGetTool.definition;
 
   // Without a role: tool-gated skills fire, role-scoped skills do not
   const promptNoRole = getToolSystemPrompt([
     playwrightNavTool,
     scaffoldTool,
     scaffoldListTool,
+    desktopDescribeTool,
+    desktopScreenshotTool,
+    credentialSaveDefinition,
+    credentialListDefinition,
+    credentialGetDefinition,
     memorySearchDefinition,
     memoryGetDefinition,
     saveMemoryDefinition,
@@ -519,10 +644,14 @@ test("tool schemas expose small-model-friendly aliases; skills inject correctly 
   assert.match(promptNoRole, /navigate.*snapshot/i);
   // Scaffold workflow hint present
   assert.match(promptNoRole, /list_templates.*scaffold_project.*director/i);
+  // Credential workflow hints present
+  assert.match(promptNoRole, /credential_list.*credential_get/i);
+  assert.match(promptNoRole, /credential_save.*save_memory/i);
   // Memory workflow hints present
   assert.match(promptNoRole, /memory_search first, then memory_get/i);
   assert.match(promptNoRole, /Use save_memory only for durable facts/i);
   assert.match(promptNoRole, /Parallel Subtasks/);
+  assert.match(promptNoRole, /host machine/i);
 
   // With a coordinator role, role-scoped skills are also injected
   const promptWithRole = getToolSystemPrompt(
@@ -530,6 +659,11 @@ test("tool schemas expose small-model-friendly aliases; skills inject correctly 
       playwrightNavTool,
       scaffoldTool,
       scaffoldListTool,
+      desktopDescribeTool,
+      desktopScreenshotTool,
+      credentialSaveDefinition,
+      credentialListDefinition,
+      credentialGetDefinition,
       memorySearchDefinition,
       memoryGetDefinition,
       saveMemoryDefinition,
@@ -552,9 +686,15 @@ test("tool schemas expose small-model-friendly aliases; skills inject correctly 
   // project-scaffold skill injected for coordinator
   assert.match(promptWithRole, /Project Scaffolding/);
   assert.match(promptWithRole, /curated templates/);
+  // credential-vault skill injected for coordinator
+  assert.match(promptWithRole, /## Credential Vault/);
+  assert.match(promptWithRole, /credential_get/);
   // memory-tools skill injected for coordinator
   assert.match(promptWithRole, /## Memory Tools/);
   assert.match(promptWithRole, /forget_memory/);
+  // desktop-small-model skill injected for coordinator
+  assert.match(promptWithRole, /Desktop Automation — Small-Model Rules/);
+  assert.match(promptWithRole, /host machine/i);
 
   const promptForOps = getToolSystemPrompt(
     [
@@ -651,6 +791,56 @@ test("compact coordinator tool selection keeps only tools relevant to the curren
   assert.equal(recallToolNames.has("project_overview"), false);
 });
 
+test("compact coordinator tool selection keeps stat_path for filesystem inspection tasks", () => {
+  const tools = getExecutionToolsForRole("coordinator", {
+    compact: true,
+    content: "Check whether this path exists, whether it is a file or directory, and inspect its size before editing.",
+    conversation: [],
+  });
+  const toolNames = new Set(tools.map((tool) => tool.name));
+
+  assert.ok(toolNames.has("stat_path"));
+  assert.ok(toolNames.has("read_file"));
+});
+
+test("compact coordinator tool selection keeps host filesystem tools for Desktop listing tasks", () => {
+  const tools = getExecutionToolsForRole("coordinator", {
+    compact: true,
+    content: "List off the items in my Desktop folder.",
+    conversation: [],
+  });
+  const toolNames = new Set(tools.map((tool) => tool.name));
+
+  assert.ok(toolNames.has("list_directory"));
+  assert.ok(toolNames.has("stat_path"));
+  assert.equal(toolNames.has("project_overview"), false);
+  assert.equal(toolNames.has("git_inspect"), false);
+});
+
+test("compact coordinator tool selection keeps credential tools for login tasks", () => {
+  const tools = getExecutionToolsForRole("coordinator", {
+    compact: true,
+    content: "Sign in to Gmail with the saved password and email.",
+    conversation: [],
+  });
+  const toolNames = new Set(tools.map((tool) => tool.name));
+
+  assert.ok(toolNames.has("credential_list"));
+  assert.ok(toolNames.has("credential_get"));
+  assert.ok(toolNames.has("fetch_page"));
+  assert.ok(toolNames.has("http_request"));
+});
+
+test("compact coordinator tool selection stays minimal for casual greetings", () => {
+  const tools = getExecutionToolsForRole("coordinator", {
+    compact: true,
+    content: "hey",
+    conversation: [],
+  });
+
+  assert.deepEqual(tools.map((tool) => tool.name), ["handoff"]);
+});
+
 test("compact coordinator tool definitions are trimmed for small local models", () => {
   const compactTools = getExecutionToolsForRole("coordinator", {
     compact: true,
@@ -670,6 +860,99 @@ test("compact coordinator tool definitions are trimmed for small local models", 
   assert.ok(compactCommandProperty?.description);
   assert.ok(fullCommandProperty?.description);
   assert.ok(compactCommandProperty!.description!.length < fullCommandProperty!.description!.length);
+});
+
+test("terminal tool can report session status, list sessions, and close a session", async () => {
+  const sessionKey = "terminal-test";
+  const runResult = expectText(await terminalTool.execute({
+    __sessionKey: sessionKey,
+    command: "printf 'hello'",
+    timeout_ms: 5_000,
+  }));
+  assert.equal(runResult, "hello");
+
+  const statusResult = expectText(await terminalTool.execute({
+    __sessionKey: sessionKey,
+    session_action: "status",
+  }));
+  assert.match(statusResult, /Session: terminal-test/);
+  assert.match(statusResult, /Commands run: 1/);
+  assert.match(statusResult, /Last command: printf 'hello'/);
+
+  const listResult = expectText(await terminalTool.execute({
+    session_action: "list_sessions",
+  }));
+  assert.match(listResult, /terminal-test/);
+
+  const closeResult = expectText(await terminalTool.execute({
+    __sessionKey: sessionKey,
+    session_action: "close",
+  }));
+  assert.match(closeResult, /has been closed/);
+});
+
+test("credential tools store secrets locally while redacting memory observations", async () => {
+  const dir = tempDir();
+  const previousRoot = process.env.EMBER_ROOT;
+  const previousBackend = process.env.EMBER_CREDENTIAL_SECRET_BACKEND;
+  process.env.EMBER_ROOT = dir;
+  process.env.EMBER_CREDENTIAL_SECRET_BACKEND = "mock";
+  resetMockCredentialSecretStore();
+
+  try {
+    const saveResult = expectText(await credentialSaveTool.execute({
+      label: "Gmail",
+      target: "mail.google.com",
+      email: "demo@example.com",
+      password: "super-secret-password",
+      login_url: "https://accounts.google.com",
+    }));
+    assert.match(saveResult, /Saved credential vault entry using Mock keychain/);
+    assert.doesNotMatch(saveResult, /super-secret-password/);
+
+    const listResult = expectText(await credentialListTool.execute({ query: "gmail" }));
+    assert.match(listResult, /Credential vault entries/);
+    assert.doesNotMatch(listResult, /super-secret-password/);
+    assert.match(listResult, /fields=email,password,login_url/);
+
+    const rawVault = expectText(await readFileTool.execute({ path: path.join(dir, "data", "credential-vault.json") }));
+    assert.doesNotMatch(rawVault, /super-secret-password/);
+    assert.match(rawVault, /"secretBackend": "mock"/);
+
+    const observations: import("@ember/core").MemoryToolObservation[] = [];
+    const handler = createToolHandler({
+      onToolResult(observation) {
+        observations.push(observation);
+      },
+    });
+
+    const getResult = expectText(await handler.onToolCall("credential_get", { label: "Gmail" }));
+    assert.match(getResult, /Password: super-secret-password/);
+    assert.equal(observations.length, 1);
+    assert.doesNotMatch(observations[0]?.resultText ?? "", /super-secret-password/);
+    assert.match(observations[0]?.resultText ?? "", /omitted from memory traces/i);
+  } finally {
+    if (previousRoot === undefined) {
+      delete process.env.EMBER_ROOT;
+    } else {
+      process.env.EMBER_ROOT = previousRoot;
+    }
+    if (previousBackend === undefined) {
+      delete process.env.EMBER_CREDENTIAL_SECRET_BACKEND;
+    } else {
+      process.env.EMBER_CREDENTIAL_SECRET_BACKEND = previousBackend;
+    }
+    resetMockCredentialSecretStore();
+  }
+});
+
+test("save_memory rejects credential-like content", async () => {
+  const result = expectText(await saveMemoryTool.execute({
+    content: "The Gmail password is super-secret-password.",
+    scope: "user",
+  }));
+
+  assert.match(result, /must not be stored with save_memory/i);
 });
 
 test("git_inspect reports status and diff stats", async () => {

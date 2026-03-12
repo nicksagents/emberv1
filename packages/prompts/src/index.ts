@@ -1,11 +1,11 @@
 import type { PromptStack, Role, Settings } from "@ember/core";
 
-import { advisorPrompt } from "./advisor.js";
+import { advisorPrompt, compactAdvisorPrompt } from "./advisor.js";
 import { compactCoordinatorPrompt, coordinatorPrompt } from "./coordinator.js";
-import { directorPrompt } from "./director.js";
+import { compactDirectorPrompt, directorPrompt } from "./director.js";
 import { dispatchPrompt } from "./dispatch.js";
-import { inspectorPrompt } from "./inspector.js";
-import { opsPrompt } from "./ops.js";
+import { compactInspectorPrompt, inspectorPrompt } from "./inspector.js";
+import { compactOpsPrompt, opsPrompt } from "./ops.js";
 import { buildSharedPrompt } from "./shared.js";
 
 const rolePromptMap: Record<Role, string> = {
@@ -15,6 +15,14 @@ const rolePromptMap: Record<Role, string> = {
   director: directorPrompt,
   inspector: inspectorPrompt,
   ops: opsPrompt,
+};
+
+const compactRolePromptMap: Partial<Record<Role, string>> = {
+  coordinator: compactCoordinatorPrompt,
+  advisor: compactAdvisorPrompt,
+  director: compactDirectorPrompt,
+  inspector: compactInspectorPrompt,
+  ops: compactOpsPrompt,
 };
 
 export function getPromptStack(
@@ -37,10 +45,7 @@ export function getPromptStack(
   const roleOverride = settings.systemPrompts.roles[role].trim();
   const compact = options.compact === true;
   const sharedPrompt = buildSharedPrompt(settings, role, { compact });
-  const rolePrompt =
-    compact && role === "coordinator"
-      ? compactCoordinatorPrompt
-      : rolePromptMap[role];
+  const rolePrompt = compact ? compactRolePromptMap[role] ?? rolePromptMap[role] : rolePromptMap[role];
 
   return {
     shared: [sharedPrompt, sharedOverride].filter(Boolean).join("\n\n"),

@@ -179,10 +179,10 @@ tool surface; the difference between the roles is execution strategy, not tool a
 | Role        | Native tools                                                                                                              |
 |-------------|---------------------------------------------------------------------------------------------------------------------------|
 | dispatch    | none (classification only)                                                                                                |
-| coordinator | project_overview, git_inspect, list_directory, search_files, read_file, write_file, edit_file, run_terminal_command, web_search, http_request, fetch_page, save_memory, memory_search, memory_get, forget_memory, handoff + MCP |
-| advisor     | project_overview, git_inspect, list_directory, search_files, read_file, run_terminal_command, web_search, http_request, fetch_page, save_memory, memory_search, memory_get, forget_memory, handoff + MCP |
-| director    | project_overview, git_inspect, list_directory, search_files, read_file, write_file, edit_file, run_terminal_command, web_search, http_request, fetch_page, save_memory, memory_search, memory_get, forget_memory, handoff + MCP |
-| inspector   | project_overview, git_inspect, list_directory, search_files, read_file, run_terminal_command, web_search, http_request, fetch_page, save_memory, memory_search, memory_get, forget_memory, handoff + MCP |
+| coordinator | project_overview, git_inspect, stat_path, list_directory, search_files, read_file, write_file, edit_file, run_terminal_command, web_search, http_request, fetch_page, credential_save, credential_list, credential_get, save_memory, memory_search, memory_get, forget_memory, handoff + MCP |
+| advisor     | project_overview, git_inspect, stat_path, list_directory, search_files, read_file, run_terminal_command, web_search, http_request, fetch_page, credential_save, credential_list, credential_get, save_memory, memory_search, memory_get, forget_memory, handoff + MCP |
+| director    | project_overview, git_inspect, stat_path, list_directory, search_files, read_file, write_file, edit_file, run_terminal_command, web_search, http_request, fetch_page, credential_save, credential_list, credential_get, save_memory, memory_search, memory_get, forget_memory, handoff + MCP |
+| inspector   | project_overview, git_inspect, stat_path, list_directory, search_files, read_file, run_terminal_command, web_search, http_request, fetch_page, credential_save, credential_list, credential_get, save_memory, memory_search, memory_get, forget_memory, handoff + MCP |
 | ops         | edit_file, delete_file |
 
 ---

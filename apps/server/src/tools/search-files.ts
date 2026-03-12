@@ -368,7 +368,7 @@ export const searchFilesTool: EmberTool = {
   definition: {
     name: "search_files",
     description:
-      "Search file contents across the workspace using ripgrep when available, with a built-in cross-platform fallback. " +
+      "Search file contents across a chosen local-machine path using ripgrep when available, with a built-in cross-platform fallback. " +
       "Returns path, line, and column matches. Use this to locate symbols, config keys, strings, TODOs, routes, prompts, or error messages before opening files.",
     inputSchema: {
       type: "object",
@@ -383,7 +383,7 @@ export const searchFilesTool: EmberTool = {
         },
         path: {
           type: "string",
-          description: "Optional root path to search. Defaults to the current workspace.",
+          description: "Optional absolute or relative root path to search. Defaults to the current workspace/project root.",
         },
         glob: {
           type: "string",

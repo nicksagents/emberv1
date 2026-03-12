@@ -1,4 +1,5 @@
 import { getHistorySummaryMessage, isHistorySummaryMessage } from "../conversation-compaction";
+import { redactSensitiveText } from "../privacy";
 import type { ChatMessage, Conversation } from "../types";
 import { defaultMemoryConfig } from "./defaults";
 import { extractProcedureMemory } from "./procedures";
@@ -2159,7 +2160,7 @@ function buildEdgeKey(edge: { fromId: string; toId: string; relation: string }):
 }
 
 function summarizeText(value: string, limit: number): string {
-  const normalized = normalizeWhitespace(value);
+  const normalized = normalizeWhitespace(redactSensitiveText(value));
   if (normalized.length <= limit) {
     return normalized;
   }

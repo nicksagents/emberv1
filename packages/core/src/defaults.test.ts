@@ -57,6 +57,21 @@ test("normalizeSettings clamps recent-message preservation and token floors", ()
 
 test("provider context windows use local override only for local openai-compatible endpoints", () => {
   const settings = normalizeSettings({}, "/tmp/workspace");
+  const lowContextSettings = normalizeSettings(
+    {
+      compression: {
+        enabled: true,
+        contextWindowTokens: 12_000,
+        responseHeadroomTokens: 24_000,
+        safetyMarginTokens: 12_000,
+        maxPromptTokens: 1,
+        targetPromptTokens: 1,
+        preserveRecentMessages: 6,
+        minimumRecentMessages: 4,
+      },
+    },
+    "/tmp/workspace",
+  );
   const makeProvider = (
     overrides: Partial<Provider> & { typeId: Provider["typeId"] },
   ): Provider => {
@@ -102,6 +117,12 @@ test("provider context windows use local override only for local openai-compatib
       contextWindowTokens: "32000",
     },
   });
+  const localProviderWithoutOverride = makeProvider({
+    typeId: "openai-compatible",
+    config: {
+      baseUrl: "http://127.0.0.1:11434/v1",
+    },
+  });
 
   assert.equal(localProvider.config.contextWindowTokens, "65536");
   assert.equal(resolveProviderContextWindowTokens(localProvider, settings), 65_536);
@@ -111,6 +132,9 @@ test("provider context windows use local override only for local openai-compatib
 
   assert.equal(anthropicProvider.config.contextWindowTokens, undefined);
   assert.equal(resolveProviderContextWindowTokens(anthropicProvider, settings), 300_000);
+
+  assert.equal(resolveProviderContextWindowTokens(localProviderWithoutOverride, settings), 16_000);
+  assert.equal(resolveProviderContextWindowTokens(localProviderWithoutOverride, lowContextSettings), 12_000);
 });
 
 test("deriveCompressionPromptBudget caps fixed reserves for low-context models", () => {

@@ -88,7 +88,7 @@ test("resolveAdaptiveProcedureRetrievalBudget keeps learned procedure recall tig
   assert.ok(budget.reservedPromptTokens >= 48);
 });
 
-test("resolveExecutionModelProfile enables compact coordinator mode for small local models only", () => {
+test("resolveExecutionModelProfile enables compact prompts for small coordinators and ultra-small specialists", () => {
   const settings = normalizeSettings({}, "/tmp/workspace");
   const localSmallProvider = makeProvider({
     typeId: "openai-compatible",
@@ -104,16 +104,26 @@ test("resolveExecutionModelProfile enables compact coordinator mode for small lo
       contextWindowTokens: "64000",
     },
   });
+  const localTinyProvider = makeProvider({
+    typeId: "openai-compatible",
+    config: {
+      baseUrl: "http://127.0.0.1:11434/v1",
+      contextWindowTokens: "10240",
+    },
+  });
 
   const compactCoordinator = resolveExecutionModelProfile(settings, localSmallProvider, "coordinator");
   const fullCoordinator = resolveExecutionModelProfile(settings, localLargeProvider, "coordinator");
   const directorProfile = resolveExecutionModelProfile(settings, localSmallProvider, "director");
+  const ultraCompactDirector = resolveExecutionModelProfile(settings, localTinyProvider, "director");
 
-  assert.equal(compactCoordinator.compactCoordinatorProfile, true);
+  assert.equal(compactCoordinator.compactRolePrompt, true);
   assert.equal(compactCoordinator.compactToolPrompt, true);
   assert.equal(compactCoordinator.compactToolset, true);
-  assert.equal(fullCoordinator.compactCoordinatorProfile, false);
-  assert.equal(directorProfile.compactCoordinatorProfile, false);
+  assert.equal(fullCoordinator.compactRolePrompt, false);
+  assert.equal(directorProfile.compactRolePrompt, false);
+  assert.equal(ultraCompactDirector.compactRolePrompt, true);
+  assert.equal(ultraCompactDirector.compactToolset, true);
 });
 
 test("compact coordinator profile keeps prompt and tool overhead small for local models", () => {
@@ -148,7 +158,7 @@ test("compact coordinator profile keeps prompt and tool overhead small for local
     tools,
     providers: [provider],
     assignmentMap,
-    compactRolePrompt: executionProfile.compactCoordinatorProfile,
+    compactRolePrompt: executionProfile.compactRolePrompt,
     compactToolPrompt: executionProfile.compactToolPrompt,
   });
 
@@ -168,4 +178,35 @@ test("compact coordinator profile keeps prompt and tool overhead small for local
   assert.ok(toolBodyChars < 3_600);
   assert.ok(tools.length <= 6);
   assert.match(promptStack.shared, /Current lane:/);
+});
+
+test("ultra compact specialist profile trims the tool surface for tiny local models", () => {
+  const settings = normalizeSettings({}, "/tmp/workspace");
+  const provider = makeProvider({
+    typeId: "openai-compatible",
+    config: {
+      baseUrl: "http://127.0.0.1:11434/v1",
+      contextWindowTokens: "10240",
+    },
+  });
+
+  const profile = resolveExecutionModelProfile(settings, provider, "director");
+  const task = "Inspect the repo, edit the failing server file, run the build, and fix any errors.";
+  const fullTools = getExecutionToolsForRole("director", {
+    compact: false,
+    content: task,
+    conversation: [],
+  });
+  const compactTools = getExecutionToolsForRole("director", {
+    compact: profile.compactToolset,
+    content: task,
+    conversation: [],
+  });
+
+  const fullToolBodyChars = JSON.stringify(fullTools).length;
+  const compactToolBodyChars = JSON.stringify(compactTools).length;
+
+  assert.equal(profile.compactRolePrompt, true);
+  assert.ok(compactTools.length < fullTools.length);
+  assert.ok(compactToolBodyChars < fullToolBodyChars);
 });

@@ -9,6 +9,7 @@ export interface ConversationCompactionOptions {
   enabled?: boolean;
   maxPromptTokens?: number;
   targetPromptTokens?: number;
+  extraPromptTokens?: number;
   preserveRecentMessages?: number;
   minimumRecentMessages?: number;
   promptStack?: PromptStack;
@@ -292,6 +293,10 @@ export function compactConversationHistory(
   const promptStack = options.promptStack ?? { shared: "", role: "", tools: "" };
   const currentUserContent = options.currentUserContent ?? "";
   const enabled = options.enabled ?? DEFAULT_ENABLED;
+  const extraPromptTokens = Math.max(
+    0,
+    Math.floor(options.extraPromptTokens ?? 0),
+  );
   const maxPromptTokens = Math.max(
     1_000,
     Math.floor(options.maxPromptTokens ?? DEFAULT_MAX_PROMPT_TOKENS),
@@ -314,11 +319,13 @@ export function compactConversationHistory(
       Math.floor(options.minimumRecentMessages ?? DEFAULT_MINIMUM_RECENT_MESSAGES),
     ),
   );
-  const originalTokenCount = estimatePromptInputTokens({
-    promptStack,
-    conversation,
-    content: currentUserContent,
-  });
+  const originalTokenCount =
+    extraPromptTokens +
+    estimatePromptInputTokens({
+      promptStack,
+      conversation,
+      content: currentUserContent,
+    });
 
   if (!enabled || conversation.length === 0) {
     return {
@@ -353,11 +360,13 @@ export function compactConversationHistory(
     };
   }
 
-  const promptOverheadTokens = estimatePromptInputTokens({
-    promptStack,
-    conversation: [],
-    content: currentUserContent,
-  });
+  const promptOverheadTokens =
+    extraPromptTokens +
+    estimatePromptInputTokens({
+      promptStack,
+      conversation: [],
+      content: currentUserContent,
+    });
 
   let bestResult: ConversationCompactionResult | null = null;
 
@@ -403,11 +412,13 @@ export function compactConversationHistory(
     };
 
     const messages = [summaryMessage, ...preservedMessages];
-    const compactedTokenCount = estimatePromptInputTokens({
-      promptStack,
-      conversation: messages,
-      content: currentUserContent,
-    });
+    const compactedTokenCount =
+      extraPromptTokens +
+      estimatePromptInputTokens({
+        promptStack,
+        conversation: messages,
+        content: currentUserContent,
+      });
     const result: ConversationCompactionResult = {
       messages,
       didCompact: true,

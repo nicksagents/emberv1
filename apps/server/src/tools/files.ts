@@ -1,5 +1,5 @@
-import { Dirent, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { Dirent, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { dirname, extname, join, resolve } from "node:path";
 
 import type { EmberTool } from "./types.js";
 
@@ -141,6 +141,61 @@ function executeDeleteFile(input: Record<string, unknown>): string {
   }
 }
 
+function formatMode(stats: ReturnType<typeof lstatSync>): string {
+  return `0o${(stats.mode & 0o777).toString(8).padStart(3, "0")}`;
+}
+
+function executeStatPath(input: Record<string, unknown>): string {
+  const targetPath =
+    typeof input.path === "string" && input.path.trim()
+      ? input.path
+      : typeof input.file === "string" && input.file.trim()
+        ? input.file
+        : "";
+
+  if (!targetPath) {
+    return "Error: no path provided.";
+  }
+
+  console.log(`[tool:stat_path] ${targetPath}`);
+
+  try {
+    const stats = lstatSync(targetPath);
+    const absolutePath = formatPath(targetPath);
+    const type = stats.isDirectory()
+      ? "directory"
+      : stats.isFile()
+        ? "file"
+        : stats.isSymbolicLink()
+          ? "symlink"
+          : "other";
+    const lines = [
+      `Path: ${absolutePath}`,
+      `Type: ${type}`,
+      `Size: ${stats.size} bytes`,
+      `Mode: ${formatMode(stats)}`,
+      `Modified: ${stats.mtime.toISOString()}`,
+      `Created: ${stats.birthtime.toISOString()}`,
+    ];
+
+    if (type === "file") {
+      lines.push(`Extension: ${extname(targetPath) || "(none)"}`);
+    }
+
+    if (type === "directory") {
+      lines.push(`Entries: ${readdirSync(targetPath).length}`);
+    }
+
+    if (type === "symlink") {
+      lines.push(`Symlink target: ${readlinkSync(targetPath)}`);
+    }
+
+    return lines.join("\n");
+  } catch (err) {
+    return `Error inspecting path: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
 function describeDirectoryEntry(basePath: string, entry: Dirent): string {
   const fullPath = join(basePath, entry.name);
   const suffix = entry.isDirectory()
@@ -226,7 +281,7 @@ export const readFileTool: EmberTool = {
   definition: {
     name: "read_file",
     description:
-      "Read the contents of a file at the given path. Returns the file contents as text. " +
+      "Read the contents of a file at the given path on the local machine. Returns the file contents as text. " +
       "Always read a file before attempting to edit it so you know the exact current content.",
     inputSchema: {
       type: "object",
@@ -254,11 +309,34 @@ export const readFileTool: EmberTool = {
   execute: executeReadFile,
 };
 
+export const statPathTool: EmberTool = {
+  definition: {
+    name: "stat_path",
+    description:
+      "Inspect a local-machine file system path without reading the full file contents. Returns whether the path is a file, directory, or symlink plus metadata like size, timestamps, mode, and entry count.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Absolute or relative path to inspect.",
+        },
+        file: {
+          type: "string",
+          description: "Alias for path.",
+        },
+      },
+      required: ["path"],
+    },
+  },
+  execute: executeStatPath,
+};
+
 export const writeFileTool: EmberTool = {
   definition: {
     name: "write_file",
     description:
-      "Write content to a file, creating it (and any missing parent directories) if it does not exist, " +
+      "Write content to a file on the local machine, creating it (and any missing parent directories) if it does not exist, " +
       "or fully overwriting it if it does. For targeted changes to an existing file, prefer edit_file.",
     inputSchema: {
       type: "object",
@@ -286,7 +364,7 @@ export const editFileTool: EmberTool = {
   definition: {
     name: "edit_file",
     description:
-      "Replace an exact string in a file with a new string. The old_string must appear exactly once " +
+      "Replace an exact string in a local-machine file with a new string. The old_string must appear exactly once " +
       "in the file — read the file first to confirm the exact text. Use write_file for full rewrites.",
     inputSchema: {
       type: "object",
@@ -322,8 +400,8 @@ export const listDirectoryTool: EmberTool = {
   definition: {
     name: "list_directory",
     description:
-      "List the contents of a directory. Supports recursive listing, depth limits, hidden files, and entry limits. " +
-      "Use this before reading or editing when you need to discover files or inspect repository structure.",
+      "List the contents of a directory on the local machine. Supports recursive listing, depth limits, hidden files, and entry limits. " +
+      "Use this before reading or editing when you need to discover files or inspect repo structure, Desktop folders, or other host paths.",
     inputSchema: {
       type: "object",
       properties: {
@@ -358,7 +436,7 @@ export const deleteFileTool: EmberTool = {
   definition: {
     name: "delete_file",
     description:
-      "Delete a file at the given path. Can also delete a directory only when recursive=true is set. " +
+      "Delete a file at the given local-machine path. Can also delete a directory only when recursive=true is set. " +
       "Use with care for cleanup passes and remove only paths you are confident should be deleted.",
     inputSchema: {
       type: "object",

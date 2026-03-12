@@ -1,4 +1,11 @@
-import type { ChatMessage, MemoryToolObservation, Role, ToolDefinition, ToolResult } from "@ember/core";
+import {
+  redactSensitiveText,
+  type ChatMessage,
+  type MemoryToolObservation,
+  type Role,
+  type ToolDefinition,
+  type ToolResult,
+} from "@ember/core";
 import { skillManager } from "@ember/core/skills";
 import type { DeliveryWorkflowState } from "../delivery-workflow.js";
 import { resolveDeliveryWorkflowAfterHandoff } from "../delivery-workflow.js";
@@ -7,10 +14,11 @@ import { resolveDeliveryWorkflowAfterHandoff } from "../delivery-workflow.js";
 // See apps/server/mcp.default.json and skills/playwright-browser/SKILL.md.
 // To roll back: re-import browserTool and add it to REGISTRY + ROLE_TOOLS.
 import { fetchPageTool } from "./fetch-page.js";
-import { deleteFileTool, editFileTool, listDirectoryTool, readFileTool, writeFileTool } from "./files.js";
+import { deleteFileTool, editFileTool, listDirectoryTool, readFileTool, statPathTool, writeFileTool } from "./files.js";
 import { gitInspectTool } from "./git-inspect.js";
 import { handoffTool } from "./handoff.js";
 import { httpRequestTool } from "./http-request.js";
+import { credentialGetTool, credentialListTool, credentialSaveTool } from "./credentials.js";
 import { forgetMemoryTool, memoryGetTool, memorySearchTool, saveMemoryTool } from "./memory.js";
 import { parallelTasksTool } from "./parallel-tasks.js";
 import { projectOverviewTool } from "./project-overview.js";
@@ -30,6 +38,7 @@ const BASE_REGISTRY: EmberTool[] = [
   projectOverviewTool,
   gitInspectTool,
   terminalTool,
+  statPathTool,
   listDirectoryTool,
   searchFilesTool,
   readFileTool,
@@ -39,6 +48,9 @@ const BASE_REGISTRY: EmberTool[] = [
   webSearchTool,
   httpRequestTool,
   fetchPageTool,
+  credentialSaveTool,
+  credentialListTool,
+  credentialGetTool,
   saveMemoryTool,
   memorySearchTool,
   memoryGetTool,
@@ -64,10 +76,10 @@ const TOOL_MAP = new Map<string, EmberTool>(
 // Roles: coordinator, advisor, director, inspector get mcp__playwright__browser_*
 const BASE_ROLE_TOOLS: Record<Role, EmberTool[]> = {
   dispatch:    [],
-  coordinator: [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, parallelTasksTool, handoffTool],
-  advisor:     [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, parallelTasksTool, handoffTool],
-  director:    [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, parallelTasksTool, handoffTool],
-  inspector:   [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, parallelTasksTool, handoffTool],
+  coordinator: [projectOverviewTool, gitInspectTool, statPathTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, credentialSaveTool, credentialListTool, credentialGetTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, parallelTasksTool, handoffTool],
+  advisor:     [projectOverviewTool, gitInspectTool, statPathTool, listDirectoryTool, searchFilesTool, readFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, credentialSaveTool, credentialListTool, credentialGetTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, parallelTasksTool, handoffTool],
+  director:    [projectOverviewTool, gitInspectTool, statPathTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, credentialSaveTool, credentialListTool, credentialGetTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, parallelTasksTool, handoffTool],
+  inspector:   [projectOverviewTool, gitInspectTool, statPathTool, listDirectoryTool, searchFilesTool, readFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, credentialSaveTool, credentialListTool, credentialGetTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, parallelTasksTool, handoffTool],
   ops:         [editFileTool, deleteFileTool],
 };
 
@@ -107,6 +119,10 @@ const COMPACT_BROWSER_TOOL_SUFFIXES = new Set([
 const COMPACT_DESKTOP_TOOL_SUFFIXES = new Set([
   "describe_environment",
   "take_screenshot",
+  "list_windows",
+  "get_active_window",
+  "detect_text_on_screen",
+  "find_text_on_screen",
   "list_open_applications",
   "open_application",
   "focus_application",
@@ -115,6 +131,8 @@ const COMPACT_DESKTOP_TOOL_SUFFIXES = new Set([
   "press_keys",
   "move_mouse",
   "click_mouse",
+  "drag_mouse",
+  "scroll_mouse",
 ]);
 const HANDOFF_REQUIRED_SECTIONS = ["GOAL", "DONE", "TODO", "FILES", "NOTES"] as const;
 const TOOL_DESCRIPTION_LIMIT = 110;
@@ -154,6 +172,31 @@ function toolResultToText(result: ToolResult): string {
   return typeof result === "string" ? result : result.text;
 }
 
+function sanitizeToolObservationResult(
+  name: string,
+  input: Record<string, unknown>,
+  resultText: string,
+): string {
+  if (name === "credential_get") {
+    const label =
+      (typeof input.label === "string" && input.label.trim()) ||
+      (typeof input.id === "string" && input.id.trim()) ||
+      (typeof input.target === "string" && input.target.trim()) ||
+      "credential";
+    return `Credential vault entry retrieved for ${label}. Sensitive fields were returned to the model but omitted from memory traces.`;
+  }
+
+  if (name === "credential_save") {
+    const label =
+      (typeof input.label === "string" && input.label.trim()) ||
+      (typeof input.target === "string" && input.target.trim()) ||
+      "credential";
+    return `Credential vault entry saved for ${label}. Sensitive fields were stored locally and omitted from memory traces.`;
+  }
+
+  return redactSensitiveText(resultText);
+}
+
 function normalizeObservationText(value: unknown): string | null {
   if (typeof value !== "string") {
     return null;
@@ -177,6 +220,7 @@ function resolveToolObservation(
   result: ToolResult,
 ): MemoryToolObservation {
   const resultText = toolResultToText(result);
+  const sanitizedResultText = sanitizeToolObservationResult(name, input, resultText);
   const rawSourceRef = typeof input.url === "string"
     ? input.url.trim()
     : typeof input.path === "string"
@@ -189,7 +233,7 @@ function resolveToolObservation(
   return {
     toolName: name,
     input,
-    resultText,
+    resultText: sanitizedResultText,
     createdAt: new Date().toISOString(),
     sourceRef,
     sourceType,
@@ -203,7 +247,7 @@ function resolveToolObservation(
           : null,
     ),
     queryText: normalizeObservationText(input.query),
-    exitCode: name === "run_terminal_command" ? parseTerminalExitCode(resultText) : null,
+    exitCode: name === "run_terminal_command" ? parseTerminalExitCode(sanitizedResultText) : null,
   };
 }
 
@@ -492,7 +536,7 @@ export function getExecutionToolsForRole(
   } = {},
 ): ToolDefinition[] {
   const tools = selectExecutionToolsForRole(role, options);
-  if (!options.compact || role !== "coordinator") {
+  if (!options.compact) {
     return tools.map((tool) => tool.definition);
   }
 
@@ -521,32 +565,67 @@ function selectExecutionToolsForRole(
   } = {},
 ): EmberTool[] {
   const tools = ROLE_TOOLS[role] ?? [];
-  if (!options.compact || role !== "coordinator") {
+  if (!options.compact) {
     return [...tools];
   }
 
   const contextText = buildToolSelectionContext(options.content ?? "", options.conversation ?? []);
-  const workspaceContext =
-    /\b(repo|workspace|codebase|project files?|source code|file|files|path|directory|folder|tree|layout|tsconfig|package\.json|component|class|function|module|build|test|lint|typecheck|pnpm|npm|git|diff|branch|commit)\b/i.test(
+  const repoContext =
+    /\b(repo|workspace|codebase|project root|project files?|source code|tsconfig|package\.json|component|class|function|module|typescript|javascript|react|backend|frontend|build|test|lint|typecheck|pnpm|npm|git|diff|branch|commit)\b/i.test(
       contextText,
     ) ||
+    /\b(this|the)\s+(project|repo|workspace|codebase)\b/i.test(contextText) ||
     (/\b(fix|implement|change|edit|update|patch|write|create|add|refactor|rename|remove|debug)\b/i.test(
       contextText,
     ) &&
       /\b(api|server|endpoint|typescript|javascript|react|backend|frontend|component|function|module)\b/i.test(
         contextText,
       ));
-  const needsWorkspaceRead = workspaceContext;
+  const hostFilesystemContext =
+    /\b(desktop|downloads|documents|pictures|videos|music|finder|explorer|filesystem|local machine|host machine|host path|absolute path|home directory|home folder)\b/i.test(
+      contextText,
+    ) ||
+    (/\b(list|show|inspect|check|open|read|browse|look at|find|search|rename|move|copy|delete|remove|create|write|edit|update|what(?:'s| is)|contents?|items)\b/i.test(
+      contextText,
+    ) &&
+      /\b(file|files|path|paths|directory|directories|folder|folders|desktop|downloads|documents)\b/i.test(
+        contextText,
+      ));
+  const needsWorkspaceRead = repoContext;
   const needsWorkspaceWrite =
-    workspaceContext &&
+    repoContext &&
     /\b(fix|implement|change|edit|update|patch|write|create|add|refactor|rename|remove)\b/i.test(
       contextText,
     );
   const needsDirectoryContext =
-    workspaceContext && /\b(path|directory|folder|tree|layout|list files|list dir)\b/i.test(contextText);
+    (repoContext || hostFilesystemContext) &&
+    /\b(path|directory|folder|tree|layout|list files|list dir|desktop|downloads|documents|contents?|items)\b/i.test(
+      contextText,
+    );
+  const needsPathInspection =
+    (repoContext || hostFilesystemContext) &&
+    /\b(path|exists|existence|directory|folder|file type|extension|size|modified|timestamp|permissions?|symlink|stat)\b/i.test(
+      contextText,
+    );
   const needsTerminal =
-    workspaceContext &&
+    (repoContext || hostFilesystemContext) &&
     /\b(build|test|lint|typecheck|run|start|serve|install|command|terminal|shell|pnpm|npm|node|python|script)\b/i.test(
+      contextText,
+    );
+  const needsFilesystemRead =
+    repoContext ||
+    (hostFilesystemContext &&
+      /\b(read|open|show|display|view|print|contents?|content|desktop|downloads|documents|file|files|folder|directory)\b/i.test(
+        contextText,
+      ));
+  const needsFilesystemWrite =
+    (repoContext || hostFilesystemContext) &&
+    /\b(write|edit|update|change|replace|rename|move|copy|delete|remove|create)\b/i.test(contextText) &&
+    /\b(file|files|path|folder|directory|desktop|downloads|documents)\b/i.test(contextText);
+  const needsFilesystemSearch =
+    (repoContext || hostFilesystemContext) &&
+    /\b(search|find|grep|look for|match|contains?|containing)\b/i.test(contextText) &&
+    /\b(file|files|path|folder|directory|repo|workspace|desktop|downloads|documents|text|string)\b/i.test(
       contextText,
     );
   const needsWeb =
@@ -557,8 +636,16 @@ function selectExecutionToolsForRole(
     /\b(login|log in|sign in|browser|click|button|form|fill|otp|navigate|page state|session|interactive)\b/i.test(
       contextText,
     );
+  const needsCredentialVault =
+    /\b(credential|credentials|password|passcode|username|login email|account email|saved login|sign in|signin|log in)\b/i.test(
+      contextText,
+    );
+  const needsParallelTasks =
+    /\b(parallel|in parallel|fan out|fan-out|independent subtasks?|split up|split into subtasks?|simultaneous)\b/i.test(
+      contextText,
+    );
   const needsDesktopAutomation =
-    /\b(desktop|native app|application|window|screen|cursor|mouse|keyboard|type text|press key|focus app|open app|open application|mail app|chatgpt app|desktop screenshot)\b/i.test(
+    /\b(desktop|native app|application|window|screen|cursor|mouse|keyboard|type text|press key|focus app|open app|open application|mail app|chatgpt app|desktop screenshot|ocr|text on screen|find text|drag|scroll)\b/i.test(
       contextText,
     );
   const needsProjectScaffold =
@@ -576,20 +663,35 @@ function selectExecutionToolsForRole(
     );
 
   const selected = new Set<string>(["handoff"]);
-  if (needsWorkspaceRead || needsWorkspaceWrite || needsDirectoryContext || needsTerminal) {
+  if (repoContext) {
     selected.add("project_overview");
   }
-  if (needsWorkspaceRead || needsWorkspaceWrite || needsTerminal || needsDirectoryContext) {
+  if (repoContext) {
     selected.add("git_inspect");
+  }
+  if (repoContext || needsPathInspection || needsDirectoryContext || needsFilesystemRead || needsFilesystemWrite) {
+    selected.add("stat_path");
+  }
+  if (repoContext || needsFilesystemSearch) {
     selected.add("search_files");
+  }
+  if (repoContext || needsFilesystemRead || needsFilesystemWrite) {
     selected.add("read_file");
   }
-  if (needsDirectoryContext || needsWorkspaceRead) {
+  if (needsDirectoryContext || needsWorkspaceRead || hostFilesystemContext) {
     selected.add("list_directory");
+  }
+  if (needsPathInspection) {
+    selected.add("stat_path");
   }
   if (needsWorkspaceWrite) {
     selected.add("write_file");
     selected.add("edit_file");
+  }
+  if (needsFilesystemWrite) {
+    selected.add("write_file");
+    selected.add("edit_file");
+    selected.add("delete_file");
   }
   if (needsTerminal) {
     selected.add("run_terminal_command");
@@ -599,6 +701,16 @@ function selectExecutionToolsForRole(
     selected.add("http_request");
     selected.add("fetch_page");
   }
+  if (needsCredentialVault) {
+    selected.add("credential_list");
+    selected.add("credential_get");
+  }
+  if (
+    /\b(save|store|remember|update|change|replace)\b/i.test(contextText) &&
+    needsCredentialVault
+  ) {
+    selected.add("credential_save");
+  }
   if (needsMemoryRecall) {
     selected.add("memory_search");
     selected.add("memory_get");
@@ -607,7 +719,9 @@ function selectExecutionToolsForRole(
     selected.add("save_memory");
     selected.add("forget_memory");
   }
-  selected.add("launch_parallel_tasks");
+  if (needsParallelTasks) {
+    selected.add("launch_parallel_tasks");
+  }
 
   const compactMcpTools = selectRelevantCompactMcpTools(
     tools.map((tool) => tool.definition),
@@ -686,6 +800,14 @@ export function getToolSystemPrompt(
   if (toolNames.has("search_files") && toolNames.has("read_file")) {
     workflows.push("For code tasks: search_files first, then read_file before editing.");
   }
+  if (toolNames.has("list_directory")) {
+    workflows.push(
+      "For local folders like Desktop or Downloads: use list_directory directly on the absolute host path instead of assuming a workspace-only boundary.",
+    );
+  }
+  if (toolNames.has("stat_path")) {
+    workflows.push("Use stat_path before guessing whether a path is a file, directory, or symlink, and before deleting or rewriting unfamiliar targets.");
+  }
   if (toolNames.has("http_request")) {
     workflows.push("For APIs and health checks: prefer http_request over browser automation.");
   }
@@ -694,6 +816,16 @@ export function getToolSystemPrompt(
   }
   if (toolNames.has("memory_search") && toolNames.has("memory_get")) {
     workflows.push("For cross-session recall: memory_search first, then memory_get on the best id before asking the user to repeat themselves.");
+  }
+  if (toolNames.has("credential_list") && toolNames.has("credential_get")) {
+    workflows.push(
+      "For stored logins: credential_list if you need to locate the right account, then credential_get immediately before browser or desktop sign-in. Do not echo secrets back to the user unless they explicitly ask.",
+    );
+  }
+  if (toolNames.has("credential_save")) {
+    workflows.push(
+      "Store passwords, login emails, and account secrets with credential_save, not save_memory. Ember uses the OS keychain when the host supports it and falls back to its private local credential store otherwise. Use save_memory only for reusable procedures or non-secret facts.",
+    );
   }
   if (toolNames.has("save_memory")) {
     workflows.push("Use save_memory only for durable facts worth keeping across chats, not routine turn-by-turn context.");
@@ -714,11 +846,11 @@ export function getToolSystemPrompt(
   }
   if ([...toolNames].some((n) => n.startsWith("mcp__desktop__"))) {
     workflows.push(
-      "For desktop automation: describe_environment first, then screenshot → open/focus app → move/click or type/press → screenshot to verify. Use browser tools for websites and terminal/filesystem tools for code or file tasks.",
+      "For desktop automation: describe_environment first, then use get_active_window or list_windows when window targeting matters, then screenshot → use OCR text detection before raw coordinate clicks when labels are visible → open/focus app → move/click, drag, scroll, or type/press → screenshot to verify. Use browser tools for websites and terminal/filesystem tools for code or file tasks.",
     );
   }
   if (toolNames.has("run_terminal_command")) {
-    workflows.push("Use the terminal for commands or interactive workflows only after a narrower tool would not be enough.");
+    workflows.push("Use the terminal for commands or interactive workflows only after a narrower tool would not be enough. Use status or list_sessions instead of guessing session state.");
   }
   if (toolNames.has("mcp__scaffold__scaffold_project")) {
     workflows.push(
@@ -751,6 +883,7 @@ export function getToolSystemPrompt(
     "Choose the smallest tool that fits the job.",
     "Prefer short-output tools and the smallest valid input shape.",
     "Prefer one tool call per step, then reassess.",
+    "Filesystem, terminal, browser, and desktop tools act on the host machine when active. The workspace root is the default project path, not a hard access boundary.",
   ];
 
   if (workflows.length) {

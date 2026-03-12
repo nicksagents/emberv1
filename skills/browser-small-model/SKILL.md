@@ -19,12 +19,21 @@ mcp__playwright__browser_navigate(url) → mcp__playwright__browser_snapshot() �
 Never skip the post-action snapshot. State verification after each action
 prevents wasted round-trips from acting on stale assumptions.
 
+For login work, fetch a saved credential just before filling the form when one
+should already exist locally. Do not ask the user to repeat a stored email or
+password unless `credential_list` and `credential_get` fail.
+If storage-state tools are active, try restoring session state before repeating
+the full login flow.
+
 ### Preferred input strategies (in priority order)
 
 1. `mcp__playwright__browser_fill_form` with `ref` from snapshot — always try this first
 2. `mcp__playwright__browser_fill_form` with accessible name / label — when ref is unavailable
 3. `mcp__playwright__browser_click` the input first, then `mcp__playwright__browser_type` — only for OTP boxes that reject fill
 4. `mcp__playwright__browser_evaluate` — absolute last resort; only when no accessible interaction works
+
+For login forms, prefer one `mcp__playwright__browser_fill_form` call that fills
+all visible auth fields together after the snapshot gives you the correct refs.
 
 ### Preferred button strategies
 
@@ -47,3 +56,4 @@ prevents wasted round-trips from acting on stale assumptions.
   or `mcp__playwright__browser_wait_for`
 - Do **not** re-navigate if already on the right page — check with `mcp__playwright__browser_snapshot` first
 - Do **not** re-use stale refs — take a fresh `mcp__playwright__browser_snapshot` after any DOM change
+- Do **not** put passwords or tokens into `save_memory` — use the credential vault for secrets and memory for reusable procedures

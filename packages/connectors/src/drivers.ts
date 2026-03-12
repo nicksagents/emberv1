@@ -52,6 +52,34 @@ function truncateToolText(value: string, limit = 8_000): string {
   return value.length > limit ? `${value.slice(0, limit)}\n\n[truncated at ${limit} chars]` : value;
 }
 
+async function buildProviderHttpError(
+  response: Response,
+  fallback: string,
+): Promise<string> {
+  const bodyText = (await response.text().catch(() => "")).trim();
+  if (!bodyText) {
+    return fallback;
+  }
+
+  try {
+    const payload = JSON.parse(bodyText) as {
+      error?: string | { message?: string };
+      message?: string;
+    };
+    const detail =
+      typeof payload.error === "string"
+        ? payload.error
+        : payload.error?.message ?? payload.message ?? "";
+    if (detail.trim()) {
+      return `${fallback} ${detail.trim()}`;
+    }
+  } catch {
+    // Fall back to raw response text.
+  }
+
+  return `${fallback} ${truncateToolText(bodyText, 280)}`;
+}
+
 const DEFAULT_PROVIDER_TOOL_LOOP_LIMIT = 30;
 
 function getProviderToolLoopLimit(): number {
@@ -1652,7 +1680,12 @@ async function executeOpenAiCompatible(
     });
 
     if (!response.ok) {
-      throw new Error(`Provider responded with ${response.status}.`);
+      throw new Error(
+        await buildProviderHttpError(
+          response,
+          `Provider responded with ${response.status}.`,
+        ),
+      );
     }
 
     const payload = (await response.json()) as {
@@ -1816,7 +1849,12 @@ async function streamOpenAiCompatible(
     });
 
     if (!response.ok) {
-      throw new Error(`Provider responded with ${response.status}.`);
+      throw new Error(
+        await buildProviderHttpError(
+          response,
+          `Provider responded with ${response.status}.`,
+        ),
+      );
     }
 
     if (!response.body) {

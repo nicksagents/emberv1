@@ -12,7 +12,7 @@ import type { MemoryConfig } from "./memory/types";
 import { defaultMemoryConfig, normalizeMemoryConfig } from "./memory/defaults";
 
 const REMOTE_PROVIDER_CONTEXT_WINDOW_TOKENS = 300_000;
-const DEFAULT_LOCAL_PROVIDER_CONTEXT_WINDOW_TOKENS = 100_000;
+const DEFAULT_LOCAL_PROVIDER_CONTEXT_WINDOW_TOKENS = 16_000;
 const RESPONSE_HEADROOM_CONTEXT_RATIO = 0.32;
 const SAFETY_MARGIN_CONTEXT_RATIO = 0.12;
 
@@ -332,5 +332,11 @@ export function resolveProviderContextWindowTokens(
     return Math.floor(configured);
   }
 
-  return DEFAULT_LOCAL_PROVIDER_CONTEXT_WINDOW_TOKENS;
+  return Math.max(
+    4_000,
+    Math.min(
+      DEFAULT_LOCAL_PROVIDER_CONTEXT_WINDOW_TOKENS,
+      Math.floor(settings.compression.contextWindowTokens),
+    ),
+  );
 }

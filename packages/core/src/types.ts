@@ -142,6 +142,29 @@ export interface ProviderSecrets {
   [providerId: string]: Record<string, string>;
 }
 
+export type CredentialKind = "website" | "application" | "service" | "other";
+export type CredentialSecretBackend = "os-keychain" | "local-file" | "mock" | "none";
+
+export interface CredentialEntry {
+  id: string;
+  label: string;
+  target: string | null;
+  kind: CredentialKind;
+  username: string | null;
+  email: string | null;
+  password: string | null;
+  loginUrl: string | null;
+  appName: string | null;
+  notes: string | null;
+  tags: string[];
+  hasSecret: boolean;
+  secretBackend: CredentialSecretBackend;
+  secretRef: string | null;
+  createdAt: string;
+  updatedAt: string;
+  lastUsedAt: string | null;
+}
+
 export interface ToolCall {
   id: string;
   name: string;

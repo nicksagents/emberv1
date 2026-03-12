@@ -507,6 +507,14 @@ function createProviderEditorState(provider: Provider): ProviderEditorState {
   };
 }
 
+function sanitizeRoleAssignments(assignments: RoleAssignment[]): RoleAssignment[] {
+  return assignments.map(({ role, providerId, modelId }) => ({
+    role,
+    providerId,
+    modelId,
+  }));
+}
+
 export function SettingsClient({
   initialSettings,
   runtime,
@@ -526,7 +534,11 @@ export function SettingsClient({
 }) {
   const [settings, setSettings] = useState(initialSettings);
   const [providers, setProviders] = useState(initialProviders);
-  const [assignments, setAssignments] = useState(initialAssignments);
+  const [assignments, setAssignments] = useState(() => sanitizeRoleAssignments(initialAssignments));
+  const [savedSettings, setSavedSettings] = useState(initialSettings);
+  const [savedAssignments, setSavedAssignments] = useState(() =>
+    sanitizeRoleAssignments(initialAssignments),
+  );
   const [savingWorkspace, setSavingWorkspace] = useState(false);
   const [busyProviderId, setBusyProviderId] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ tone: "success" | "danger"; message: string } | null>(null);
@@ -616,6 +628,16 @@ export function SettingsClient({
   const assignedRoleCount = assignments.filter(
     (assignment) => assignment.providerId && assignment.modelId,
   ).length;
+  const normalizedAssignments = useMemo(
+    () => sanitizeRoleAssignments(assignments),
+    [assignments],
+  );
+  const hasWorkspaceChanges = useMemo(
+    () =>
+      JSON.stringify(settings) !== JSON.stringify(savedSettings) ||
+      JSON.stringify(normalizedAssignments) !== JSON.stringify(savedAssignments),
+    [normalizedAssignments, savedAssignments, savedSettings, settings],
+  );
 
   useEffect(() => {
     if (roleReadyProviders.length === 0) {
@@ -769,7 +791,7 @@ export function SettingsClient({
         fetch(clientApiPath("/roles"), {
           method: "PUT",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ items: assignments }),
+          body: JSON.stringify({ items: normalizedAssignments }),
         }),
       ]);
 
@@ -777,6 +799,8 @@ export function SettingsClient({
         throw new Error("Saving settings failed.");
       }
 
+      setSavedSettings(settings);
+      setSavedAssignments(normalizedAssignments);
       setNotice({ tone: "success", message: "Settings saved successfully." });
     } catch (error) {
       setNotice({
@@ -1188,6 +1212,23 @@ export function SettingsClient({
     }
   }
 
+  function renderWorkspaceSaveAction(label: string) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+        <span className="helper-copy" style={{ margin: 0 }}>
+          {hasWorkspaceChanges ? "Unsaved changes" : "All changes saved"}
+        </span>
+        <button
+          className="button primary"
+          onClick={saveWorkspace}
+          disabled={savingWorkspace || !hasWorkspaceChanges}
+        >
+          {savingWorkspace ? "Saving..." : label}
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div className="settings-page">
       {/* Topbar */}
@@ -1251,9 +1292,7 @@ export function SettingsClient({
                     <h2>General</h2>
                     <p className="helper-copy">Workspace identity, runtime status, and defaults.</p>
                   </div>
-                  <button className="button primary" onClick={saveWorkspace} disabled={savingWorkspace}>
-                    {savingWorkspace ? "Saving..." : "Save Changes"}
-                  </button>
+                  {renderWorkspaceSaveAction("Save Changes")}
                 </div>
 
                 {/* Profile Section */}
@@ -1882,13 +1921,16 @@ export function SettingsClient({
                     <h2>Roles</h2>
                     <p className="helper-copy">Assign providers and models to each role.</p>
                   </div>
-                  <button
-                    className="button"
-                    onClick={autoAssignRoles}
-                    disabled={roleReadyProviders.length === 0}
-                  >
-                    Auto-Assign
-                  </button>
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+                    <button
+                      className="button"
+                      onClick={autoAssignRoles}
+                      disabled={roleReadyProviders.length === 0}
+                    >
+                      Auto-Assign
+                    </button>
+                    {renderWorkspaceSaveAction("Save Roles")}
+                  </div>
                 </div>
 
                 <section className="settings-block">
@@ -2251,6 +2293,7 @@ export function SettingsClient({
                     <h2>Prompts</h2>
                     <p className="helper-copy">Override default system prompts for specific roles.</p>
                   </div>
+                  {renderWorkspaceSaveAction("Save Changes")}
                 </div>
 
                 {/* Shared Prompt */}

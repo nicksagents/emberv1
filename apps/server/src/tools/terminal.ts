@@ -45,7 +45,10 @@ interface TerminalSession {
   buffer: string;
   readCursor: number;
   pending: PendingCommand | null;
+  createdAt: number;
   lastUsedAt: number;
+  lastCommand: string | null;
+  commandCount: number;
   waiters: Set<() => void>;
 }
 
@@ -323,6 +326,36 @@ function destroySession(sessionKey: string, reason?: string) {
   }
 }
 
+function formatSessionSummary(session: TerminalSession): string {
+  return [
+    `Session: ${session.key}`,
+    `Transport: ${session.backend.transport}`,
+    `Shell: ${session.shellKind}`,
+    `Pending command: ${session.pending ? "yes" : "no"}`,
+    `Commands run: ${session.commandCount}`,
+    `Last command: ${session.lastCommand ?? "(none)"}`,
+    `Terminal size: ${session.cols}x${session.rows}`,
+    `Created: ${new Date(session.createdAt).toISOString()}`,
+    `Last used: ${new Date(session.lastUsedAt).toISOString()}`,
+  ].join("\n");
+}
+
+function formatSessionList(): string {
+  if (SESSIONS.size === 0) {
+    return "No terminal sessions are active.";
+  }
+
+  return [
+    "Active terminal sessions:",
+    ...[...SESSIONS.values()]
+      .sort((left, right) => left.key.localeCompare(right.key))
+      .map((session) => {
+        const pending = session.pending ? "pending" : "idle";
+        return `- ${session.key} transport=${session.backend.transport} shell=${session.shellKind} state=${pending} commands=${session.commandCount}`;
+      }),
+  ].join("\n");
+}
+
 function reapIdleSessions() {
   const cutoff = Date.now() - SESSION_IDLE_TTL_MS;
   for (const [sessionKey, session] of SESSIONS.entries()) {
@@ -357,7 +390,10 @@ function createSession(sessionKey: string, cwd?: string, cols = DEFAULT_COLS, ro
     buffer: "",
     readCursor: 0,
     pending: null,
+    createdAt: Date.now(),
     lastUsedAt: Date.now(),
+    lastCommand: null,
+    commandCount: 0,
     waiters: new Set(),
   };
 
@@ -567,6 +603,25 @@ async function execute(input: Record<string, unknown>): Promise<string> {
   const command = typeof input.command === "string" ? input.command : "";
   const rawInput = typeof input.input === "string" ? input.input : "";
 
+  if (sessionAction === "list_sessions") {
+    return formatSessionList();
+  }
+
+  if (sessionAction === "status") {
+    const session = SESSIONS.get(sessionKey);
+    return session
+      ? formatSessionSummary(session)
+      : `Terminal session "${sessionKey}" does not exist.`;
+  }
+
+  if (sessionAction === "close") {
+    if (!SESSIONS.has(sessionKey)) {
+      return `Terminal session "${sessionKey}" does not exist.`;
+    }
+    destroySession(sessionKey, "explicit close");
+    return `Terminal session "${sessionKey}" has been closed.`;
+  }
+
   if (sessionAction === "reset") {
     destroySession(sessionKey, "explicit reset");
     return `Terminal session "${sessionKey}" has been reset.`;
@@ -615,6 +670,8 @@ async function execute(input: Record<string, unknown>): Promise<string> {
     startIndex: session.buffer.length,
   };
   session.readCursor = session.buffer.length;
+  session.lastCommand = command.trim();
+  session.commandCount += 1;
 
   console.log(
     `[tool:terminal] session="${sessionKey}" (${session.backend.transport}) $ ${command}${cwd ? ` (cwd: ${cwd})` : ""}`,
@@ -628,7 +685,7 @@ export const terminalTool: EmberTool = {
   definition: {
     name: "run_terminal_command",
     description:
-      "Execute commands in a persistent cross-platform terminal session. EMBER prefers a PTY-backed terminal emulator when the host allows it and falls back to a persistent shell session otherwise. " +
+      "Execute host-machine commands in a persistent cross-platform terminal session. EMBER prefers a PTY-backed terminal emulator when the host allows it and falls back to a persistent shell session otherwise. " +
       "The session persists across tool calls within the same conversation, keeps working directory and environment state, and supports reading output, sending raw input, interrupting running programs, resizing the terminal, and resetting the session.",
     inputSchema: {
       type: "object",
@@ -665,12 +722,12 @@ export const terminalTool: EmberTool = {
         session_action: {
           type: "string",
           description:
-            'Optional control action. One of: "run" (default), "read", "input", "interrupt", "resize", "reset".',
+            'Optional control action. One of: "run" (default), "read", "input", "interrupt", "resize", "status", "list_sessions", "close", "reset".',
         },
         action: {
           type: "string",
           description:
-            'Alias for session_action. One of: "run", "read", "input", "interrupt", "resize", "reset".',
+            'Alias for session_action. One of: "run", "read", "input", "interrupt", "resize", "status", "list_sessions", "close", "reset".',
         },
       },
     },
