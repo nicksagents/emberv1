@@ -8,6 +8,8 @@ import process from "node:process";
 import {
   defaultRuntime,
   ensureDataFiles,
+  initializeMemoryInfrastructure,
+  readSettings,
   readRuntime,
   resolveRepoRoot,
   writeRuntime,
@@ -289,8 +291,11 @@ async function runForeground(
 
 async function start(mode: StartMode) {
   const repoRoot = resolveRepoRoot(process.cwd());
+  process.env.EMBER_ROOT = repoRoot;
   const runtime = await readRuntime().catch(() => defaultRuntime());
   await ensureDataFiles(repoRoot);
+  const settings = await readSettings();
+  await initializeMemoryInfrastructure(settings.memory);
 
   if (runtime.serverPid && runtime.webPid) {
     await stopRuntimeChildren(runtime);

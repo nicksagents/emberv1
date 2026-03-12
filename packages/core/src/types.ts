@@ -1,4 +1,5 @@
 import type { UiBlock } from "@ember/ui-schema";
+import type { MemoryConfig, MemoryPromptContext } from "./memory/types";
 
 export const ROLES = [
   "dispatch",
@@ -125,6 +126,7 @@ export interface Settings {
     webUrl: string;
     apiUrl: string;
   };
+  memory: MemoryConfig;
 }
 
 export interface RuntimeState {
@@ -238,6 +240,7 @@ export interface Conversation {
   mode: ChatMode;
   createdAt: string;
   updatedAt: string;
+  archivedAt: string | null;
   lastMessageAt: string | null;
   preview: string;
   messageCount: number;
@@ -250,6 +253,7 @@ export interface ConversationSummary {
   mode: ChatMode;
   createdAt: string;
   updatedAt: string;
+  archivedAt: string | null;
   lastMessageAt: string | null;
   preview: string;
   messageCount: number;
@@ -286,6 +290,8 @@ export type ToolResult = string | ToolImageResult;
 export interface ProviderExecutionRequest {
   modelId: string | null;
   promptStack: PromptStack;
+  memoryContext?: MemoryPromptContext | null;
+  procedureContext?: MemoryPromptContext | null;
   conversation: ChatMessage[];
   content: string;
   role?: Role;

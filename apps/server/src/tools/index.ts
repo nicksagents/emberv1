@@ -1,4 +1,4 @@
-import type { Role, ToolDefinition } from "@ember/core";
+import type { ChatMessage, MemoryToolObservation, Role, ToolDefinition, ToolResult } from "@ember/core";
 import { skillManager } from "@ember/core/skills";
 
 // browserTool is intentionally NOT imported here — replaced by @playwright/mcp (Phase 3).
@@ -9,6 +9,7 @@ import { deleteFileTool, editFileTool, listDirectoryTool, readFileTool, writeFil
 import { gitInspectTool } from "./git-inspect.js";
 import { handoffTool } from "./handoff.js";
 import { httpRequestTool } from "./http-request.js";
+import { forgetMemoryTool, memoryGetTool, memorySearchTool, saveMemoryTool } from "./memory.js";
 import { projectOverviewTool } from "./project-overview.js";
 import { searchFilesTool } from "./search-files.js";
 import { setSudoPassword, terminalTool } from "./terminal.js";
@@ -35,6 +36,10 @@ const REGISTRY: EmberTool[] = [
   webSearchTool,
   httpRequestTool,
   fetchPageTool,
+  saveMemoryTool,
+  memorySearchTool,
+  memoryGetTool,
+  forgetMemoryTool,
   // browserTool removed — replaced by @playwright/mcp (mcp__playwright__browser_*)
   handoffTool,
 ];
@@ -53,10 +58,10 @@ const TOOL_MAP = new Map<string, EmberTool>(
 // Roles: coordinator, advisor, director, inspector get mcp__playwright__browser_*
 const ROLE_TOOLS: Record<Role, EmberTool[]> = {
   dispatch:    [],
-  coordinator: [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, handoffTool],
-  advisor:     [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, handoffTool],
-  director:    [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, handoffTool],
-  inspector:   [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, handoffTool],
+  coordinator: [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, handoffTool],
+  advisor:     [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, handoffTool],
+  director:    [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, handoffTool],
+  inspector:   [projectOverviewTool, gitInspectTool, listDirectoryTool, searchFilesTool, readFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, handoffTool],
   ops:         [editFileTool, deleteFileTool],
 };
 
@@ -68,12 +73,83 @@ export interface PendingHandoff {
 }
 
 const VALID_HANDOFF_ROLES = ["advisor", "coordinator", "director", "inspector", "ops"];
+const COMPACT_BROWSER_TOOL_SUFFIXES = new Set([
+  "browser_navigate",
+  "browser_snapshot",
+  "browser_click",
+  "browser_fill_form",
+  "browser_type",
+  "browser_wait_for",
+  "browser_get_url",
+  "browser_screenshot",
+  "browser_evaluate",
+]);
+
+function toolResultToText(result: ToolResult): string {
+  return typeof result === "string" ? result : result.text;
+}
+
+function normalizeObservationText(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function parseTerminalExitCode(resultText: string): number | null {
+  const match = resultText.match(/^Exit code (\d+):/);
+  if (!match) {
+    return null;
+  }
+  const parsed = Number.parseInt(match[1] ?? "", 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function resolveToolObservation(
+  name: string,
+  input: Record<string, unknown>,
+  result: ToolResult,
+): MemoryToolObservation {
+  const resultText = toolResultToText(result);
+  const rawSourceRef = typeof input.url === "string"
+    ? input.url.trim()
+    : typeof input.path === "string"
+      ? input.path.trim()
+      : null;
+  const sourceRef = rawSourceRef && rawSourceRef.length > 0 ? rawSourceRef : null;
+  const sourceType =
+    sourceRef && /^https?:\/\//i.test(sourceRef) ? "web_page" : "tool_result";
+
+  return {
+    toolName: name,
+    input,
+    resultText,
+    createdAt: new Date().toISOString(),
+    sourceRef,
+    sourceType,
+    command: normalizeObservationText(input.command),
+    workingDirectory: normalizeObservationText(input.cwd),
+    targetPath: normalizeObservationText(
+      typeof input.path === "string"
+        ? input.path
+        : typeof input.file === "string"
+          ? input.file
+          : null,
+    ),
+    queryText: normalizeObservationText(input.query),
+    exitCode: name === "run_terminal_command" ? parseTerminalExitCode(resultText) : null,
+  };
+}
 
 /**
  * Creates a per-execution tool handler that intercepts `handoff` calls and
  * delegates everything else to the global handleToolCall.
  */
-export function createToolHandler(options?: { browserSessionKey?: string }) {
+export function createToolHandler(options?: {
+  browserSessionKey?: string;
+  onToolResult?: (observation: MemoryToolObservation) => void;
+}) {
   let pendingHandoff: PendingHandoff | null = null;
 
   return {
@@ -94,13 +170,17 @@ export function createToolHandler(options?: { browserSessionKey?: string }) {
       // Only terminal tools use __sessionKey for session persistence.
       // Playwright MCP manages its own sessions internally via the MCP server process.
       if (name === "run_terminal_command" && options?.browserSessionKey) {
-        return handleToolCall(name, {
+        const result = await handleToolCall(name, {
           ...input,
           __sessionKey: options.browserSessionKey,
         });
+        options.onToolResult?.(resolveToolObservation(name, input, result));
+        return result;
       }
 
-      return handleToolCall(name, input);
+      const result = await handleToolCall(name, input);
+      options?.onToolResult?.(resolveToolObservation(name, input, result));
+      return result;
     },
     getPendingHandoff(): PendingHandoff | null {
       return pendingHandoff;
@@ -154,6 +234,90 @@ export function getToolsForRole(role: Role): ToolDefinition[] {
   return (ROLE_TOOLS[role] ?? []).map((t) => t.definition);
 }
 
+export function getExecutionToolsForRole(
+  role: Role,
+  options: {
+    compact?: boolean;
+    content?: string;
+    conversation?: ChatMessage[];
+  } = {},
+): ToolDefinition[] {
+  const tools = getToolsForRole(role);
+  if (!options.compact || role !== "coordinator") {
+    return tools;
+  }
+
+  const contextText = buildToolSelectionContext(options.content ?? "", options.conversation ?? []);
+  const needsWorkspaceRead =
+    /\b(repo|workspace|project|file|files|code|typescript|tsconfig|function|class|server|debug|fix|build|test|lint|package|component|api)\b/i.test(
+      contextText,
+    );
+  const needsWorkspaceWrite =
+    /\b(fix|implement|change|edit|update|patch|write|create|add|refactor|rename|remove)\b/i.test(
+      contextText,
+    );
+  const needsDirectoryContext = /\b(path|directory|folder|tree|layout|list files|list dir)\b/i.test(contextText);
+  const needsTerminal =
+    /\b(build|test|lint|typecheck|run|start|serve|install|command|terminal|shell|pnpm|npm|node|python|script)\b/i.test(
+      contextText,
+    );
+  const needsWeb =
+    /\b(web|website|page|url|article|docs|documentation|search|research|latest|current|news|fetch|http|api|endpoint|source|cite)\b/i.test(
+      contextText,
+    );
+  const needsInteractiveBrowser =
+    /\b(login|log in|sign in|browser|click|button|form|fill|otp|navigate|page state|session|interactive)\b/i.test(
+      contextText,
+    );
+  const needsMemoryMutation =
+    /\b(remember|save memory|forget|stop remembering|remove memory|delete memory|correct memory)\b/i.test(
+      contextText,
+    );
+
+  const selected = new Set<string>(["handoff", "project_overview", "memory_search", "memory_get"]);
+  if (needsWorkspaceRead || needsWorkspaceWrite || needsTerminal || needsDirectoryContext) {
+    selected.add("git_inspect");
+    selected.add("search_files");
+    selected.add("read_file");
+  }
+  if (needsDirectoryContext || needsWorkspaceRead) {
+    selected.add("list_directory");
+  }
+  if (needsWorkspaceWrite) {
+    selected.add("write_file");
+    selected.add("edit_file");
+  }
+  if (needsTerminal) {
+    selected.add("run_terminal_command");
+  }
+  if (needsWeb || needsInteractiveBrowser) {
+    selected.add("web_search");
+    selected.add("http_request");
+    selected.add("fetch_page");
+  }
+  if (needsMemoryMutation) {
+    selected.add("save_memory");
+    selected.add("forget_memory");
+  }
+  if (selected.size <= 4) {
+    selected.add("search_files");
+    selected.add("read_file");
+    selected.add("http_request");
+    selected.add("fetch_page");
+  }
+
+  return tools.filter((tool) => {
+    if (selected.has(tool.name)) {
+      return true;
+    }
+    if (!needsInteractiveBrowser || !tool.name.startsWith("mcp__playwright__")) {
+      return false;
+    }
+    const suffix = tool.name.split("__").slice(-1)[0] ?? "";
+    return COMPACT_BROWSER_TOOL_SUFFIXES.has(suffix);
+  });
+}
+
 /**
  * Build the tools section of a role's system prompt.
  *
@@ -164,7 +328,13 @@ export function getToolsForRole(role: Role): ToolDefinition[] {
  *     (e.g. loop-prevention, coordinator-behavior).
  *   - Dynamic workflow hints: short one-liners derived from the active tool set.
  */
-export function getToolSystemPrompt(tools: ToolDefinition[], role?: Role): string {
+export function getToolSystemPrompt(
+  tools: ToolDefinition[],
+  role?: Role,
+  options: {
+    compact?: boolean;
+  } = {},
+): string {
   if (!tools.length) return "";
 
   const toolNames = new Set(tools.map((t) => t.name));
@@ -191,6 +361,15 @@ export function getToolSystemPrompt(tools: ToolDefinition[], role?: Role): strin
   if (toolNames.has("web_search") && toolNames.has("fetch_page")) {
     workflows.push("For external research: web_search first, then fetch_page on the best source.");
   }
+  if (toolNames.has("memory_search") && toolNames.has("memory_get")) {
+    workflows.push("For cross-session recall: memory_search first, then memory_get on the best id before asking the user to repeat themselves.");
+  }
+  if (toolNames.has("save_memory")) {
+    workflows.push("Use save_memory only for durable facts worth keeping across chats, not routine turn-by-turn context.");
+  }
+  if (toolNames.has("forget_memory")) {
+    workflows.push("For corrections or deletion requests: identify the target memory first, then call forget_memory with confirm=true.");
+  }
   // Detect Playwright MCP tools (registered as mcp__playwright__browser_*)
   if ([...toolNames].some((n) => n.startsWith("mcp__playwright__browser_"))) {
     workflows.push(
@@ -204,6 +383,23 @@ export function getToolSystemPrompt(tools: ToolDefinition[], role?: Role): strin
     workflows.push(
       "For new projects: list_templates → get_template_options → scaffold_project → post_setup, then hand off to director for real implementation.",
     );
+  }
+
+  if (options.compact) {
+    const compactSkills = [...toolSkills, ...roleSkills]
+      .slice(0, 8)
+      .map((skill) => `- ${skill.name}: ${skill.description}`);
+    const compactWorkflows = workflows.slice(0, 6);
+
+    return [
+      "## Tools",
+      "Use tools only when they materially help.",
+      "Choose the smallest tool that fits and prefer one tool call per step.",
+      "Base every claim on tool results. Never say you checked, changed, or verified something without a tool result.",
+      "If the task grows beyond a compact tool loop, use handoff once and stop.",
+      ...(compactWorkflows.length > 0 ? ["", "## Quick Workflows", ...compactWorkflows.map((workflow) => `- ${workflow}`)] : []),
+      ...(compactSkills.length > 0 ? ["", "## Active Skills", ...compactSkills] : []),
+    ].join("\n");
   }
 
   // ── Assemble ──────────────────────────────────────────────────────────────
@@ -232,6 +428,11 @@ export function getToolSystemPrompt(tools: ToolDefinition[], role?: Role): strin
   }
 
   return out.join("\n");
+}
+
+function buildToolSelectionContext(content: string, conversation: ChatMessage[]): string {
+  const recentMessages = conversation.slice(-6).map((message) => message.content);
+  return [content, ...recentMessages].join(" ").toLowerCase();
 }
 
 export async function handleToolCall(

@@ -530,17 +530,29 @@ async function testAnthropicApi(
   }
 }
 
-function buildSystemPrompt(stack: PromptStack): string {
-  return [stack.shared, stack.role, stack.tools].filter(Boolean).join("\n\n");
+function buildSystemPrompt(
+  stack: PromptStack,
+  memoryContextText?: string | null,
+  procedureContextText?: string | null,
+): string {
+  return [stack.shared, stack.role, stack.tools, memoryContextText?.trim() ?? "", procedureContextText?.trim() ?? ""]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 function toOpenAiMessages(
   conversation: ChatMessage[],
   promptStack: PromptStack,
   content: string,
+  memoryContextText?: string | null,
+  procedureContextText?: string | null,
   purpose: "chat" | "route" = "chat",
 ) {
-  const systemContent = buildSystemPrompt(promptStack);
+  const systemContent = buildSystemPrompt(
+    promptStack,
+    purpose === "route" ? null : memoryContextText,
+    purpose === "route" ? null : procedureContextText,
+  );
 
   if (purpose === "route") {
     return [
@@ -563,7 +575,10 @@ function toOpenAiMessages(
   ];
 }
 
-function toAnthropicMessages(conversation: ChatMessage[], content: string) {
+function toAnthropicMessages(
+  conversation: ChatMessage[],
+  content: string,
+) {
   const historySummary = getHistorySummaryMessage(conversation);
   const recentConversation = conversation.filter((message) => !isHistorySummaryMessage(message)).slice(-12);
   const alreadyHasLatest =
@@ -728,6 +743,8 @@ function formatCliConversation(
   conversation: ChatMessage[],
   promptStack: PromptStack,
   content: string,
+  memoryContextText?: string | null,
+  procedureContextText?: string | null,
   purpose: "chat" | "route" = "chat",
 ): string {
   const systemParts = [promptStack.shared, promptStack.role, promptStack.tools].filter(Boolean);
@@ -750,6 +767,8 @@ function formatCliConversation(
 
   return [
     ...systemParts,
+    ...(memoryContextText?.trim() ? [memoryContextText.trim()] : []),
+    ...(procedureContextText?.trim() ? [procedureContextText.trim()] : []),
     ...(historySummary ? [`Conversation memory:\n${historySummary.content}`] : []),
     transcript ? `Conversation so far:\n${transcript}` : "",
     ...(alreadyHasLatest ? [] : [`User: ${content}`]),
@@ -838,6 +857,8 @@ function formatCodexConversation(request: ProviderExecutionRequest): string {
     request.conversation,
     request.promptStack,
     request.content,
+    request.memoryContext?.text ?? null,
+    request.procedureContext?.text ?? null,
     request.purpose,
   );
   const toolProtocol = buildCodexToolProtocol(request.tools ?? []);
@@ -1599,6 +1620,8 @@ async function executeOpenAiCompatible(
     request.conversation,
     request.promptStack,
     request.content,
+    request.memoryContext?.text ?? null,
+    request.procedureContext?.text ?? null,
     request.purpose,
   );
 
@@ -1760,6 +1783,8 @@ async function streamOpenAiCompatible(
     request.conversation,
     request.promptStack,
     request.content,
+    request.memoryContext?.text ?? null,
+    request.procedureContext?.text ?? null,
     request.purpose,
   );
   let totalContent = "";
@@ -1983,7 +2008,11 @@ async function executeAnthropic(
     throw new Error("No model is assigned or discovered for this provider.");
   }
 
-  const systemPrompt = buildSystemPrompt(request.promptStack);
+  const systemPrompt = buildSystemPrompt(
+    request.promptStack,
+    request.memoryContext?.text ?? null,
+    request.procedureContext?.text ?? null,
+  );
   const maxTokens = request.tools?.length ? 4096 : 1200;
   let messages: unknown[] = toAnthropicMessages(request.conversation, request.content);
   let lastTextContent = "";
@@ -2086,7 +2115,11 @@ async function streamAnthropic(
     throw new Error("No model is assigned or discovered for this provider.");
   }
 
-  const systemPrompt = buildSystemPrompt(request.promptStack);
+  const systemPrompt = buildSystemPrompt(
+    request.promptStack,
+    request.memoryContext?.text ?? null,
+    request.procedureContext?.text ?? null,
+  );
   const maxTokens = request.tools?.length ? 4096 : 1200;
   let messages: unknown[] = toAnthropicMessages(request.conversation, request.content);
   let totalContent = "";

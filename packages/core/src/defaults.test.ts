@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  deriveCompressionPromptBudget,
   normalizeProvider,
   normalizeSettings,
   resolveProviderContextWindowTokens,
@@ -58,13 +59,14 @@ test("provider context windows use local override only for local openai-compatib
   const settings = normalizeSettings({}, "/tmp/workspace");
   const makeProvider = (
     overrides: Partial<Provider> & { typeId: Provider["typeId"] },
-  ): Provider =>
-    normalizeProvider({
+  ): Provider => {
+    const { typeId, ...rest } = overrides;
+    return normalizeProvider({
       id: "provider_test",
       name: "Provider",
-      typeId: overrides.typeId,
+      typeId,
       status: "connected",
-      config: overrides.config ?? {},
+      config: rest.config ?? {},
       availableModels: [],
       capabilities: {
         canChat: true,
@@ -76,8 +78,9 @@ test("provider context windows use local override only for local openai-compatib
       lastError: null,
       createdAt: "2026-03-10T00:00:00.000Z",
       updatedAt: "2026-03-10T00:00:00.000Z",
-      ...overrides,
+      ...rest,
     });
+  };
 
   const localProvider = makeProvider({
     typeId: "openai-compatible",
@@ -108,4 +111,67 @@ test("provider context windows use local override only for local openai-compatib
 
   assert.equal(anthropicProvider.config.contextWindowTokens, undefined);
   assert.equal(resolveProviderContextWindowTokens(anthropicProvider, settings), 300_000);
+});
+
+test("deriveCompressionPromptBudget caps fixed reserves for low-context models", () => {
+  const budget = deriveCompressionPromptBudget({
+    contextWindowTokens: 25_000,
+    responseHeadroomTokens: 24_000,
+    safetyMarginTokens: 12_000,
+  });
+
+  assert.equal(budget.responseHeadroomTokens, 8_000);
+  assert.equal(budget.safetyMarginTokens, 3_000);
+  assert.equal(budget.maxPromptTokens, 14_000);
+  assert.equal(budget.targetPromptTokens, 12_000);
+});
+
+test("normalizeSettings preserves memory rollout flags", () => {
+  const settings = normalizeSettings(
+    {
+      memory: {
+        enabled: true,
+        backend: "sqlite",
+        storage: {
+          fileName: "memory.json",
+          sqliteFileName: "memory.sqlite",
+        },
+        embeddings: {
+          enabled: true,
+          model: "token-hash",
+          dimensions: 192,
+          maxCandidates: 48,
+        },
+        retrieval: {
+          maxResults: 8,
+          minScore: 0.18,
+          maxInjectedItems: 5,
+          maxInjectedChars: 1800,
+          lexicalWeight: 0.45,
+          semanticWeight: 0.2,
+          salienceWeight: 0.2,
+          confidenceWeight: 0.15,
+        },
+        consolidation: {
+          enabled: true,
+          autoExtractUserFacts: true,
+          autoExtractWorldFacts: true,
+          autoSummarizeSessions: true,
+          maxWriteCandidatesPerTurn: 6,
+        },
+        rollout: {
+          traceCaptureEnabled: false,
+          inspectionApiEnabled: false,
+          cortexUiEnabled: true,
+          replaySchedulerEnabled: false,
+        },
+      },
+    },
+    "/tmp/workspace",
+  );
+
+  assert.equal(settings.memory.rollout.traceCaptureEnabled, false);
+  assert.equal(settings.memory.rollout.inspectionApiEnabled, false);
+  assert.equal(settings.memory.rollout.cortexUiEnabled, true);
+  assert.equal(settings.memory.rollout.replaySchedulerEnabled, false);
 });

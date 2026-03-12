@@ -19,10 +19,13 @@ import type {
   RuntimeState,
   Settings,
 } from "./types";
+import { createEmptyMemoryStoreData } from "./memory/defaults";
+import type { MemoryStoreData } from "./memory/types";
 
 const DATA_FILES = {
   connectorTypes: "connector-types.json",
   conversations: "conversations.json",
+  memory: "memory.json",
   providers: "providers.json",
   providerSecrets: "provider-secrets.json",
   roleAssignments: "role-assignments.json",
@@ -74,6 +77,7 @@ export async function ensureDataFiles(from = process.cwd()): Promise<void> {
   const defaults = {
     [DATA_FILES.connectorTypes]: defaultConnectorTypes,
     [DATA_FILES.conversations]: [] satisfies Conversation[],
+    [DATA_FILES.memory]: createEmptyMemoryStoreData() satisfies MemoryStoreData,
     [DATA_FILES.providers]: [] satisfies Provider[],
     [DATA_FILES.providerSecrets]: {} satisfies ProviderSecrets,
     [DATA_FILES.roleAssignments]: defaultRoleAssignments(),
@@ -115,7 +119,14 @@ export async function readProviders(): Promise<Provider[]> {
 }
 
 export async function readConversations(): Promise<Conversation[]> {
-  return readJsonFile<Conversation[]>(DATA_FILES.conversations, []);
+  const conversations = await readJsonFile<Conversation[]>(DATA_FILES.conversations, []);
+  return conversations.map((conversation) => ({
+    ...conversation,
+    archivedAt:
+      typeof conversation.archivedAt === "string" && conversation.archivedAt.trim()
+        ? conversation.archivedAt
+        : null,
+  }));
 }
 
 export async function writeConversations(value: Conversation[]): Promise<void> {

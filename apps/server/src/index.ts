@@ -10,12 +10,19 @@ import {
   streamProviderChat,
 } from "@ember/connectors";
 import {
+  approveMemoryItem,
+  buildProcedurePromptContext,
   compactConversationHistory,
+  consolidateConversationMemory,
+  createMemoryRepository,
+  revalidateMemoryItem,
+  retireProcedureMemory,
+  suppressMemoryItem,
   type ConnectorTypeId,
   ensureDataFiles,
+  initializeMemoryInfrastructure,
   getProviderCapabilities,
   sanitizeProviderConfig,
-  resolveProviderContextWindowTokens,
   readConnectorTypes,
   readConversations,
   readProviderSecrets,
@@ -38,6 +45,9 @@ import type {
   ChatStreamEvent,
   Conversation,
   ConversationSummary,
+  MemoryPromptContext,
+  MemoryRepository,
+  MemoryToolObservation,
   Provider,
   Role,
   RoleAssignment,
@@ -51,7 +61,13 @@ import {
   routeAutoRequestPolicy,
   type AutoRouteDecision,
 } from "./routing.js";
-import { createToolHandler, getToolsForRole, getToolSystemPrompt, registerMcpTools, setToolConfig } from "./tools/index.js";
+import {
+  createToolHandler,
+  getExecutionToolsForRole,
+  getToolSystemPrompt,
+  registerMcpTools,
+  setToolConfig,
+} from "./tools/index.js";
 import { skillManager } from "@ember/core/skills";
 import { McpClientManager } from "./mcp/mcp-client-manager.js";
 import type { McpConfig } from "@ember/core/mcp";
@@ -59,7 +75,25 @@ import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { prepareAttachmentUploads } from "./chat-attachments.js";
-
+import { listMemoryRetrievalTraces, recordMemoryRetrievalTrace } from "./memory-traces.js";
+import {
+  getMemoryReplayState,
+  maybeRunMemoryReplayWithRepository,
+  runScheduledMemoryReplay,
+  startMemoryReplayScheduler,
+} from "./memory-maintenance.js";
+import { buildMemoryGraph, buildMemoryOverview } from "./memory-visualization.js";
+import {
+  resolveExecutionModelProfile,
+  resolveExecutionPromptBudget,
+  toMemorySearchBudgetOverrides,
+} from "./prompt-budget.js";
+import {
+  buildProcedureMemorySearchQuery,
+  buildStructuredMemorySearchQuery,
+  hasProcedureMemorySearchCues,
+  hasStructuredMemorySearchCues,
+} from "./memory-query.js";
 const host = process.env.EMBER_RUNTIME_HOST ?? "0.0.0.0";
 const port = Number(process.env.EMBER_RUNTIME_PORT ?? "3005");
 
@@ -126,6 +160,7 @@ function createConversationRecord(
     mode: normalizedMode,
     createdAt,
     updatedAt: new Date().toISOString(),
+    archivedAt: newMessages.length > 0 ? null : (existing?.archivedAt ?? null),
     lastMessageAt: lastMessage?.createdAt ?? null,
     preview: summarizeText(lastMessage?.content ?? firstUserMessage?.content ?? ""),
     messageCount: finalMessages.length,
@@ -267,32 +302,14 @@ function compactConversationForContext(
   promptStack: ReturnType<typeof getPromptStack>,
   provider: Provider | null,
 ) {
-  const providerContextWindowTokens = resolveProviderContextWindowTokens(provider, settings);
-  const compressionSettings = {
-    ...settings.compression,
-    contextWindowTokens: providerContextWindowTokens,
-    maxPromptTokens: Math.max(
-      1_000,
-      providerContextWindowTokens -
-        settings.compression.responseHeadroomTokens -
-        settings.compression.safetyMarginTokens,
-    ),
-  };
-  compressionSettings.targetPromptTokens = Math.max(
-    1_000,
-    Math.min(
-      compressionSettings.maxPromptTokens,
-      compressionSettings.maxPromptTokens -
-        Math.min(8_000, Math.max(2_000, Math.floor(compressionSettings.maxPromptTokens * 0.12))),
-    ),
-  );
+  const promptBudget = resolveExecutionPromptBudget(settings, provider);
 
   return compactConversationHistory(conversation, {
-    enabled: compressionSettings.enabled,
-    maxPromptTokens: compressionSettings.maxPromptTokens,
-    targetPromptTokens: compressionSettings.targetPromptTokens,
-    preserveRecentMessages: compressionSettings.preserveRecentMessages,
-    minimumRecentMessages: compressionSettings.minimumRecentMessages,
+    enabled: settings.compression.enabled,
+    maxPromptTokens: promptBudget.maxPromptTokens,
+    targetPromptTokens: promptBudget.targetPromptTokens,
+    preserveRecentMessages: settings.compression.preserveRecentMessages,
+    minimumRecentMessages: settings.compression.minimumRecentMessages,
     promptStack,
     currentUserContent: content,
   });
@@ -302,6 +319,7 @@ interface ExecutionContext {
   compactedRequest: ChatRequest;
   mode: ChatMode;
   settings: Awaited<ReturnType<typeof readSettings>>;
+  memoryRepository: MemoryRepository | null;
   providers: Provider[];
   secrets: Awaited<ReturnType<typeof readProviderSecrets>>;
   assignmentMap: Map<Role, RoleAssignment>;
@@ -309,12 +327,19 @@ interface ExecutionContext {
   routedTo: Role | null;
   activeRole: Role;
   promptStack: ReturnType<typeof getPromptStack>;
-  tools: ReturnType<typeof getToolsForRole>;
+  tools: ReturnType<typeof getExecutionToolsForRole>;
   assignment: RoleAssignment | undefined;
   provider: Provider | null;
   responseModelId: string | null;
   routeNote: string | null;
+  handoffSourceRole: Role | null;
   browserSessionKey: string;
+}
+
+interface BuiltExecution {
+  context: ExecutionContext;
+  result: ChatExecutionResult;
+  toolObservations: MemoryToolObservation[];
 }
 
 function sendStreamEvent(
@@ -365,9 +390,18 @@ function buildHandoffContext(source: ExecutionContext, targetRole: ExecutionRole
   const provider = source.providers.find((p) => p.id === assignment?.providerId) ?? null;
   const responseModelId =
     assignment?.modelId ?? provider?.config.defaultModelId ?? provider?.availableModels[0] ?? null;
-  const tools = provider && !provider.capabilities.canUseTools ? [] : getToolsForRole(targetRole);
+  const executionProfile = resolveExecutionModelProfile(source.settings, provider, targetRole);
+  const tools = provider && !provider.capabilities.canUseTools
+    ? []
+    : getExecutionToolsForRole(targetRole, {
+        compact: executionProfile.compactToolset,
+        content: source.compactedRequest.content,
+        conversation: source.compactedRequest.conversation,
+      });
   const promptStack = getPromptStack(source.settings, targetRole);
-  promptStack.tools = getToolSystemPrompt(tools, targetRole);
+  promptStack.tools = getToolSystemPrompt(tools, targetRole, {
+    compact: executionProfile.compactToolPrompt,
+  });
   return {
     ...source,
     activeRole: targetRole,
@@ -378,7 +412,216 @@ function buildHandoffContext(source: ExecutionContext, targetRole: ExecutionRole
     responseModelId,
     routedTo: targetRole,
     routeNote: `${source.activeRole} chained to ${targetRole}.`,
+    handoffSourceRole: source.activeRole,
   };
+}
+
+async function buildPersistentMemoryContext(
+  context: ExecutionContext,
+  conversation: ChatMessage[],
+  content: string,
+  activeSessionId: string | null,
+): Promise<MemoryPromptContext | null> {
+  if (!context.settings.memory.enabled || !context.memoryRepository) {
+    return null;
+  }
+
+  const promptBudget = resolveExecutionPromptBudget(context.settings, context.provider);
+  const query = {
+    ...buildStructuredMemorySearchQuery({
+      content,
+      conversation,
+      activeRole: context.activeRole,
+      activeSessionId,
+      handoffSourceRole: context.handoffSourceRole,
+    }),
+    ...toMemorySearchBudgetOverrides(promptBudget.memory),
+  };
+  if (!query.text.trim() && !hasStructuredMemorySearchCues(query)) {
+    return null;
+  }
+
+  try {
+    const memoryContext = await context.memoryRepository.buildPromptContext(query);
+
+    if (memoryContext.text.trim() && context.settings.memory.rollout.traceCaptureEnabled) {
+      recordMemoryRetrievalTrace({
+        kind: "persistent",
+        conversationId: activeSessionId,
+        query,
+        memoryContext,
+      });
+    }
+
+    return memoryContext.text.trim() ? memoryContext : null;
+  } catch (error) {
+    console.warn(
+      `[memory] retrieval failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return null;
+  }
+}
+
+async function buildProcedureMemoryContext(
+  context: ExecutionContext,
+  conversation: ChatMessage[],
+  content: string,
+  activeSessionId: string | null,
+): Promise<MemoryPromptContext | null> {
+  if (!context.settings.memory.enabled || !context.memoryRepository) {
+    return null;
+  }
+
+  const promptBudget = resolveExecutionPromptBudget(context.settings, context.provider);
+  const query = {
+    ...buildProcedureMemorySearchQuery({
+      content,
+      conversation,
+      activeRole: context.activeRole,
+      activeSessionId,
+      handoffSourceRole: context.handoffSourceRole,
+    }),
+    ...toMemorySearchBudgetOverrides(promptBudget.procedures),
+  };
+  if (!hasProcedureMemorySearchCues(query)) {
+    return null;
+  }
+
+  try {
+    const results = await context.memoryRepository.search(query);
+    const procedureContext = buildProcedurePromptContext(results, {
+      maxInjectedItems: query.maxInjectedItems,
+      maxInjectedChars: query.maxInjectedChars,
+    });
+
+    if (procedureContext.text.trim() && context.settings.memory.rollout.traceCaptureEnabled) {
+      recordMemoryRetrievalTrace({
+        kind: "procedure",
+        conversationId: activeSessionId,
+        query,
+        memoryContext: procedureContext,
+      });
+    }
+
+    return procedureContext.text.trim() ? procedureContext : null;
+  } catch (error) {
+    console.warn(
+      `[memory] procedure retrieval failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return null;
+  }
+}
+
+async function recordMemoryRetrievalSuccesses(
+  repository: MemoryRepository | null,
+  memoryContext: MemoryPromptContext | null,
+  now = new Date().toISOString(),
+): Promise<void> {
+  if (!repository || !memoryContext || memoryContext.results.length === 0) {
+    return;
+  }
+
+  const memoryIds = [...new Set(memoryContext.results.map((result) => result.item.id))];
+  for (const memoryId of memoryIds) {
+    await repository.reinforceItem(memoryId, {
+      now,
+      salienceDelta: 0.01,
+      confidenceDelta: 0,
+      reinforcementDelta: 0,
+      retrievalSuccessDelta: 1,
+      lastRetrievedAt: now,
+    });
+  }
+}
+
+async function withMemoryRepository<T>(
+  handler: (
+    repository: MemoryRepository,
+    settings: Awaited<ReturnType<typeof readSettings>>,
+  ) => Promise<T>,
+): Promise<T> {
+  const settings = await readSettings();
+  if (!settings.memory.enabled) {
+    throw createStatusError(503, "Long-term memory is disabled in settings.");
+  }
+  if (!settings.memory.rollout.inspectionApiEnabled) {
+    throw createStatusError(404, "Memory inspection APIs are disabled by rollout settings.");
+  }
+
+  const repository = createMemoryRepository(settings.memory);
+  try {
+    return await handler(repository, settings);
+  } finally {
+    await repository.close?.();
+  }
+}
+
+function parsePositiveInteger(value: unknown, fallback: number, maximum: number): number {
+  if (typeof value !== "string" || !value.trim()) {
+    return fallback;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+
+  return Math.min(maximum, parsed);
+}
+
+async function consolidatePersistedConversation(
+  context: ExecutionContext,
+  conversation: Conversation,
+  toolObservations: MemoryToolObservation[],
+): Promise<void> {
+  if (!context.settings.memory.enabled || !context.memoryRepository) {
+    return;
+  }
+
+  try {
+    await consolidateConversationMemory(context.memoryRepository, {
+      conversation,
+      toolObservations,
+      config: context.settings.memory,
+    });
+  } catch (error) {
+    console.warn(
+      `[memory] consolidation failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+async function finalizeConversationLifecycle(
+  conversation: Conversation,
+  reason: "archived" | "deleted" | "reset" | "completed",
+  endedAt = new Date().toISOString(),
+): Promise<void> {
+  const settings = await readSettings();
+  if (!settings.memory.enabled) {
+    return;
+  }
+
+  const repository = createMemoryRepository(settings.memory);
+  try {
+    await consolidateConversationMemory(repository, {
+      conversation,
+      config: settings.memory,
+      lifecycle: "archived",
+      endReason: reason,
+      now: endedAt,
+    });
+    await maybeRunMemoryReplayWithRepository(repository, {
+      reason: "archive-finalization",
+      force: true,
+      now: endedAt,
+    });
+  } catch (error) {
+    console.warn(
+      `[memory] lifecycle finalization failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  } finally {
+    await repository.close?.();
+  }
 }
 
 async function resolveAutoRouteDecision(
@@ -474,20 +717,33 @@ async function prepareExecution(request: ChatRequest): Promise<ExecutionContext>
   const activeRole = mode === "auto" ? routedTo ?? "coordinator" : resolveSpeakingRole(mode);
   const assignment = assignmentMap.get(activeRole);
   const provider = providers.find((candidate) => candidate.id === assignment?.providerId) ?? null;
-  const tools = provider && !provider.capabilities.canUseTools ? [] : getToolsForRole(activeRole);
+  const executionProfile = resolveExecutionModelProfile(settings, provider, activeRole);
+  const tools = provider && !provider.capabilities.canUseTools
+    ? []
+    : getExecutionToolsForRole(activeRole, {
+        compact: executionProfile.compactToolset,
+        content: request.content,
+        conversation: request.conversation,
+      });
   const promptStack = getPromptStack(settings, activeRole);
-  promptStack.tools = getToolSystemPrompt(tools, activeRole);
+  promptStack.tools = getToolSystemPrompt(tools, activeRole, {
+    compact: executionProfile.compactToolPrompt,
+  });
   const compactedRequest = compactChatRequest(request, settings, promptStack, provider);
   const responseModelId =
     assignment?.modelId ?? provider?.config.defaultModelId ?? provider?.availableModels[0] ?? null;
   const routeNote = routeDecision
     ? `Auto routed to ${routeDecision.role} via ${formatRouteSource(routeDecision.source)}.`
     : null;
+  const memoryRepository = settings.memory.enabled
+    ? createMemoryRepository(settings.memory)
+    : null;
 
   return {
     compactedRequest,
     mode,
     settings,
+    memoryRepository,
     providers,
     secrets,
     assignmentMap,
@@ -500,6 +756,7 @@ async function prepareExecution(request: ChatRequest): Promise<ExecutionContext>
     provider,
     responseModelId,
     routeNote,
+    handoffSourceRole: null,
     browserSessionKey: resolveBrowserSessionKey(request),
   };
 }
@@ -543,100 +800,139 @@ async function persistConversationFromResult(
 
 async function buildExecution(
   request: ChatRequest,
-): Promise<ChatExecutionResult> {
+): Promise<BuiltExecution> {
   const context = await prepareExecution(request);
-  const compactedRequest = context.compactedRequest;
-  const provider = context.provider;
-  if (!provider || provider.status !== "connected" || !providerCanChat(provider)) {
-    resolveExecutionGuard(context);
-  }
-
-  if (requestHasImageAttachments(compactedRequest) && !provider.capabilities.canUseImages) {
-    throw createStatusError(
-      409,
-      `${provider.name} does not accept image inputs. Switch to an image-capable provider or remove the image.`,
-    );
-  }
-
-  const messages: ChatMessage[] = [];
-  const visitCounts = new Map<string, number>();
-  let currentCtx = context;
-  let currentConversation = compactedRequest.conversation;
-  let currentContent = compactedRequest.content;
-
-  for (let iteration = 0; iteration < MAX_AGENT_LOOP; iteration++) {
-    const iterProvider = currentCtx.provider;
-    if (!iterProvider || iterProvider.status !== "connected" || !providerCanChat(iterProvider)) {
-      if (iteration === 0) resolveExecutionGuard(currentCtx);
-      console.warn(`[loop] no usable provider for ${currentCtx.activeRole}, stopping`);
-      break;
+  try {
+    const compactedRequest = context.compactedRequest;
+    const provider = context.provider;
+    if (!provider || provider.status !== "connected" || !providerCanChat(provider)) {
+      resolveExecutionGuard(context);
     }
 
-    const handler = createToolHandler({ browserSessionKey: currentCtx.browserSessionKey });
-    const compactedConversation = compactConversationForContext(
-      currentConversation,
-      currentContent,
-      currentCtx.settings,
-      currentCtx.promptStack,
-      iterProvider,
-    ).messages;
-    let iterContent: string;
-    let iterThinking: string | null;
-    let iterModelId: string | null;
+    if (requestHasImageAttachments(compactedRequest) && !provider.capabilities.canUseImages) {
+      throw createStatusError(
+        409,
+        `${provider.name} does not accept image inputs. Switch to an image-capable provider or remove the image.`,
+      );
+    }
 
-    try {
-      const iterExecution = await executeProviderChat(iterProvider, currentCtx.secrets, {
-        modelId: currentCtx.assignment?.modelId ?? null,
-        promptStack: currentCtx.promptStack,
-        role: currentCtx.activeRole,
-        conversation: compactedConversation,
-        content: currentContent,
-        tools: currentCtx.tools,
-        onToolCall: handler.onToolCall,
+    const messages: ChatMessage[] = [];
+    const toolObservations: MemoryToolObservation[] = [];
+    const visitCounts = new Map<string, number>();
+    let currentCtx = context;
+    let currentConversation = compactedRequest.conversation;
+    let currentContent = compactedRequest.content;
+
+    for (let iteration = 0; iteration < MAX_AGENT_LOOP; iteration++) {
+      const iterProvider = currentCtx.provider;
+      if (!iterProvider || iterProvider.status !== "connected" || !providerCanChat(iterProvider)) {
+        if (iteration === 0) resolveExecutionGuard(currentCtx);
+        console.warn(`[loop] no usable provider for ${currentCtx.activeRole}, stopping`);
+        break;
+      }
+
+      const memoryContext = await buildPersistentMemoryContext(
+        currentCtx,
+        currentConversation,
+        currentContent,
+        request.conversationId ?? null,
+      );
+      const procedureContext = await buildProcedureMemoryContext(
+        currentCtx,
+        currentConversation,
+        currentContent,
+        request.conversationId ?? null,
+      );
+      const handler = createToolHandler({
+        browserSessionKey: currentCtx.browserSessionKey,
+        onToolResult(observation) {
+          toolObservations.push(observation);
+        },
       });
-      iterContent = iterExecution.content;
-      iterThinking = iterExecution.thinking ?? null;
-      iterModelId = iterExecution.modelId;
-    } catch (error) {
-      const note = `${currentCtx.routeNote ? `${currentCtx.routeNote} ` : ""}Live provider execution failed: ${
-        error instanceof Error ? error.message : "Unknown error."
-      }`;
-      if (iteration === 0) throw createStatusError(502, note);
-      console.warn(`[loop] ${currentCtx.activeRole} failed: ${note}`);
-      break;
+      const compactedConversation = compactConversationForContext(
+        currentConversation,
+        currentContent,
+        currentCtx.settings,
+        currentCtx.promptStack,
+        iterProvider,
+      ).messages;
+      let iterContent: string;
+      let iterThinking: string | null;
+      let iterModelId: string | null;
+
+      try {
+        const iterExecution = await executeProviderChat(iterProvider, currentCtx.secrets, {
+          modelId: currentCtx.assignment?.modelId ?? null,
+          promptStack: currentCtx.promptStack,
+          memoryContext,
+          procedureContext,
+          role: currentCtx.activeRole,
+          conversation: compactedConversation,
+          content: currentContent,
+          tools: currentCtx.tools,
+          onToolCall: handler.onToolCall,
+        });
+        iterContent = iterExecution.content;
+        iterThinking = iterExecution.thinking ?? null;
+        iterModelId = iterExecution.modelId;
+        await recordMemoryRetrievalSuccesses(
+          currentCtx.memoryRepository,
+          memoryContext,
+          new Date().toISOString(),
+        );
+        await recordMemoryRetrievalSuccesses(
+          currentCtx.memoryRepository,
+          procedureContext,
+          new Date().toISOString(),
+        );
+      } catch (error) {
+        const note = `${currentCtx.routeNote ? `${currentCtx.routeNote} ` : ""}Live provider execution failed: ${
+          error instanceof Error ? error.message : "Unknown error."
+        }`;
+        if (iteration === 0) throw createStatusError(502, note);
+        console.warn(`[loop] ${currentCtx.activeRole} failed: ${note}`);
+        break;
+      }
+
+      const iterNote = `${currentCtx.routeNote ?? ""} Live response via ${iterProvider.name}.`.trim();
+      const iterMsg = buildReplyMessage(currentCtx, request, iterContent, iterThinking, iterModelId, iterNote);
+      messages.push(iterMsg);
+
+      const handoff = handler.getPendingHandoff();
+      if (!handoff) break;
+
+      const visits = (visitCounts.get(handoff.role) ?? 0) + 1;
+      if (visits > MAX_ROLE_VISITS) {
+        console.warn(`[loop] ${handoff.role} hit visit limit (${MAX_ROLE_VISITS}), stopping`);
+        break;
+      }
+      visitCounts.set(handoff.role, visits);
+      console.log(`[loop] ${currentCtx.activeRole} → handoff: ${handoff.role} (visit ${visits})`);
+
+      currentConversation = [...compactedConversation, iterMsg];
+      currentContent = handoff.message;
+      currentCtx = buildHandoffContext(currentCtx, handoff.role as ExecutionRole);
     }
 
-    const iterNote = `${currentCtx.routeNote ?? ""} Live response via ${iterProvider.name}.`.trim();
-    const iterMsg = buildReplyMessage(currentCtx, request, iterContent, iterThinking, iterModelId, iterNote);
-    messages.push(iterMsg);
-
-    const handoff = handler.getPendingHandoff();
-    if (!handoff) break;
-
-    const visits = (visitCounts.get(handoff.role) ?? 0) + 1;
-    if (visits > MAX_ROLE_VISITS) {
-      console.warn(`[loop] ${handoff.role} hit visit limit (${MAX_ROLE_VISITS}), stopping`);
-      break;
-    }
-    visitCounts.set(handoff.role, visits);
-    console.log(`[loop] ${currentCtx.activeRole} → handoff: ${handoff.role} (visit ${visits})`);
-
-    currentConversation = [...compactedConversation, iterMsg];
-    currentContent = handoff.message;
-    currentCtx = buildHandoffContext(currentCtx, handoff.role as ExecutionRole);
+    const lastMessage = messages.at(-1)!;
+    return {
+      context,
+      result: {
+        messages,
+        activeRole: (lastMessage.authorRole as Role) ?? context.activeRole,
+        providerId: lastMessage.providerId ?? provider.id,
+        providerName: lastMessage.providerName ?? provider.name,
+        modelId: lastMessage.modelId ?? context.responseModelId,
+        promptStack: context.promptStack,
+        routedTo: context.routedTo,
+        conversationId: request.conversationId ?? null,
+      },
+      toolObservations,
+    };
+  } catch (error) {
+    await context.memoryRepository?.close?.();
+    throw error;
   }
-
-  const lastMessage = messages.at(-1)!;
-  return {
-    messages,
-    activeRole: (lastMessage.authorRole as Role) ?? context.activeRole,
-    providerId: lastMessage.providerId ?? provider.id,
-    providerName: lastMessage.providerName ?? provider.name,
-    modelId: lastMessage.modelId ?? context.responseModelId,
-    promptStack: context.promptStack,
-    routedTo: context.routedTo,
-    conversationId: request.conversationId ?? null,
-  };
 }
 
 const app = Fastify({
@@ -645,6 +941,11 @@ const app = Fastify({
 });
 
 await ensureDataFiles();
+const bootSettings = await readSettings();
+await initializeMemoryInfrastructure(bootSettings.memory);
+if (bootSettings.memory.enabled && bootSettings.memory.rollout.replaySchedulerEnabled) {
+  startMemoryReplayScheduler();
+}
 
 // ── Startup: skills + MCP ─────────────────────────────────────────────────
 const __serverDir = dirname(fileURLToPath(import.meta.url));
@@ -803,6 +1104,228 @@ app.get("/api/runtime", async () => {
   };
 });
 
+app.get("/api/memory/overview", async (request, reply) => {
+  try {
+    const memory = await withMemoryRepository(async (repository) => {
+      const [items, sessions, edges] = await Promise.all([
+        repository.listItems({ includeSuperseded: true }),
+        repository.listSessions(),
+        repository.listEdges(),
+      ]);
+      return buildMemoryOverview({
+        items,
+        sessions,
+        edges,
+        traces: listMemoryRetrievalTraces(
+          parsePositiveInteger((request.query as { trace_limit?: string }).trace_limit, 12, 48),
+        ),
+        maintenance: {
+          replay: getMemoryReplayState(),
+        },
+      });
+    });
+
+    return memory;
+  } catch (error) {
+    const statusCode = typeof (error as { statusCode?: number }).statusCode === "number"
+      ? (error as { statusCode: number }).statusCode
+      : 500;
+    reply.code(statusCode);
+    return {
+      error: error instanceof Error ? error.message : "Failed to load memory overview.",
+    };
+  }
+});
+
+app.get("/api/memory/graph", async (request, reply) => {
+  try {
+    const query = request.query as {
+      limit?: string;
+      trace_limit?: string;
+    };
+    const graph = await withMemoryRepository(async (repository) => {
+      const [items, sessions, edges] = await Promise.all([
+        repository.listItems({ includeSuperseded: true }),
+        repository.listSessions(),
+        repository.listEdges(),
+      ]);
+      return buildMemoryGraph({
+        items,
+        sessions,
+        edges,
+        limit: parsePositiveInteger(query.limit, 220, 320),
+        traces: listMemoryRetrievalTraces(parsePositiveInteger(query.trace_limit, 18, 72)),
+      });
+    });
+
+    return graph;
+  } catch (error) {
+    const statusCode = typeof (error as { statusCode?: number }).statusCode === "number"
+      ? (error as { statusCode: number }).statusCode
+      : 500;
+    reply.code(statusCode);
+    return {
+      error: error instanceof Error ? error.message : "Failed to load memory graph.",
+    };
+  }
+});
+
+app.get("/api/memory/traces", async (request, reply) => {
+  try {
+    const settings = await readSettings();
+    if (!settings.memory.enabled || !settings.memory.rollout.inspectionApiEnabled) {
+      throw createStatusError(404, "Memory inspection APIs are disabled by rollout settings.");
+    }
+    if (!settings.memory.rollout.traceCaptureEnabled) {
+      return {
+        items: [],
+      };
+    }
+    const limit = parsePositiveInteger((request.query as { limit?: string }).limit, 16, 72);
+    return {
+      items: listMemoryRetrievalTraces(limit),
+    };
+  } catch (error) {
+    const statusCode = typeof (error as { statusCode?: number }).statusCode === "number"
+      ? (error as { statusCode: number }).statusCode
+      : 500;
+    reply.code(statusCode);
+    return {
+      error: error instanceof Error ? error.message : "Failed to load memory traces.",
+    };
+  }
+});
+
+app.post("/api/memory/replay", async (request, reply) => {
+  try {
+    const settings = await readSettings();
+    if (!settings.memory.enabled || !settings.memory.rollout.inspectionApiEnabled) {
+      throw createStatusError(404, "Memory inspection APIs are disabled by rollout settings.");
+    }
+    const body = (request.body as { force?: boolean } | undefined) ?? {};
+    const result = await runScheduledMemoryReplay({
+      reason: "operator-manual",
+      force: body.force !== false,
+    });
+    return result;
+  } catch (error) {
+    const statusCode = typeof (error as { statusCode?: number }).statusCode === "number"
+      ? (error as { statusCode: number }).statusCode
+      : 500;
+    reply.code(statusCode);
+    return {
+      error: error instanceof Error ? error.message : "Failed to run memory replay.",
+    };
+  }
+});
+
+app.post("/api/memory/items/:id/suppress", async (request, reply) => {
+  try {
+    const id = (request.params as { id: string }).id;
+    const body = (request.body as { reason?: string } | undefined) ?? {};
+    const item = await withMemoryRepository(async (repository) => {
+      const suppressed = await suppressMemoryItem(repository, id, {
+        reason: body.reason ?? null,
+      });
+      if (!suppressed) {
+        throw createStatusError(404, "Memory not found.");
+      }
+      return suppressed;
+    });
+    return { item };
+  } catch (error) {
+    const statusCode = typeof (error as { statusCode?: number }).statusCode === "number"
+      ? (error as { statusCode: number }).statusCode
+      : 500;
+    reply.code(statusCode);
+    return {
+      error: error instanceof Error ? error.message : "Failed to suppress memory.",
+    };
+  }
+});
+
+app.post("/api/memory/items/:id/revalidate", async (request, reply) => {
+  try {
+    const id = (request.params as { id: string }).id;
+    const body = (request.body as { reason?: string } | undefined) ?? {};
+    const item = await withMemoryRepository(async (repository) => {
+      const revalidated = await revalidateMemoryItem(repository, id, {
+        reason: body.reason ?? null,
+      });
+      if (!revalidated) {
+        throw createStatusError(404, "Memory not found or no longer active.");
+      }
+      return revalidated;
+    });
+    return { item };
+  } catch (error) {
+    const statusCode = typeof (error as { statusCode?: number }).statusCode === "number"
+      ? (error as { statusCode: number }).statusCode
+      : 500;
+    reply.code(statusCode);
+    return {
+      error: error instanceof Error ? error.message : "Failed to revalidate memory.",
+    };
+  }
+});
+
+app.post("/api/memory/items/:id/approve", async (request, reply) => {
+  try {
+    const id = (request.params as { id: string }).id;
+    const body = (request.body as { reason?: string } | undefined) ?? {};
+    const item = await withMemoryRepository(async (repository) => {
+      const approved = await approveMemoryItem(repository, id, {
+        reason: body.reason ?? null,
+      });
+      if (!approved) {
+        throw createStatusError(404, "Memory not found or no longer active.");
+      }
+      return approved;
+    });
+    return { item };
+  } catch (error) {
+    const statusCode = typeof (error as { statusCode?: number }).statusCode === "number"
+      ? (error as { statusCode: number }).statusCode
+      : 500;
+    reply.code(statusCode);
+    return {
+      error: error instanceof Error ? error.message : "Failed to approve memory.",
+    };
+  }
+});
+
+app.post("/api/memory/items/:id/retire", async (request, reply) => {
+  try {
+    const id = (request.params as { id: string }).id;
+    const body = (request.body as { reason?: string } | undefined) ?? {};
+    const item = await withMemoryRepository(async (repository) => {
+      const existing = await repository.getItem(id);
+      if (!existing) {
+        throw createStatusError(404, "Memory not found.");
+      }
+      if (existing.memoryType !== "procedure") {
+        throw createStatusError(400, "Only learned procedures can be retired.");
+      }
+      const retired = await retireProcedureMemory(repository, id, {
+        reason: body.reason ?? null,
+      });
+      if (!retired) {
+        throw createStatusError(409, "Procedure could not be retired.");
+      }
+      return retired;
+    });
+    return { item };
+  } catch (error) {
+    const statusCode = typeof (error as { statusCode?: number }).statusCode === "number"
+      ? (error as { statusCode: number }).statusCode
+      : 500;
+    reply.code(statusCode);
+    return {
+      error: error instanceof Error ? error.message : "Failed to retire procedure.",
+    };
+  }
+});
+
 app.get("/api/connector-types", async () => {
   return {
     items: await readConnectorTypes(),
@@ -866,14 +1389,54 @@ app.patch("/api/conversations/:id", async (request, reply) => {
   };
 });
 
+app.post("/api/conversations/:id/archive", async (request, reply) => {
+  const id = (request.params as { id: string }).id;
+  const conversations = await readConversations();
+  const existing = conversations.find((item) => item.id === id);
+
+  if (!existing) {
+    reply.code(404);
+    return { error: "Conversation not found." };
+  }
+
+  const archivedAt = new Date().toISOString();
+  const archivedConversation: Conversation = {
+    ...existing,
+    archivedAt,
+    updatedAt: archivedAt,
+  };
+  const updated = conversations.map((item) => (item.id === id ? archivedConversation : item));
+
+  await writeConversations(sortConversations(updated));
+  await finalizeConversationLifecycle(archivedConversation, "archived", archivedAt);
+
+  return {
+    item: archivedConversation,
+  };
+});
+
 app.delete("/api/conversations/:id", async (request, reply) => {
   const id = (request.params as { id: string }).id;
   const conversations = await readConversations();
+  const existing = conversations.find((item) => item.id === id) ?? null;
   const remaining = conversations.filter((item) => item.id !== id);
 
   if (remaining.length === conversations.length) {
     reply.code(404);
     return { error: "Conversation not found." };
+  }
+
+  if (existing) {
+    const archivedAt = new Date().toISOString();
+    await finalizeConversationLifecycle(
+      {
+        ...existing,
+        archivedAt: existing.archivedAt ?? archivedAt,
+        updatedAt: archivedAt,
+      },
+      "deleted",
+      archivedAt,
+    );
   }
 
   await writeConversations(sortConversations(remaining));
@@ -1201,14 +1764,20 @@ app.get("/api/prompts/:role", async (request, reply) => {
 
 app.post("/api/chat", async (request) => {
   const body = request.body as ChatRequest;
-  const result = await buildExecution(body);
-  const conversation = await persistConversationFromResult(body, result);
+  const built = await buildExecution(body);
 
-  return {
-    ...result,
-    conversationId: conversation.id,
-    conversation: toConversationSummary(conversation),
-  };
+  try {
+    const conversation = await persistConversationFromResult(body, built.result);
+    await consolidatePersistedConversation(built.context, conversation, built.toolObservations);
+
+    return {
+      ...built.result,
+      conversationId: conversation.id,
+      conversation: toConversationSummary(conversation),
+    };
+  } finally {
+    await built.context.memoryRepository?.close?.();
+  }
 });
 
 app.post("/api/chat/attachments/prepare", async (request, reply) => {
@@ -1231,6 +1800,7 @@ app.post("/api/chat/attachments/prepare", async (request, reply) => {
 
 app.post("/api/chat/stream", async (request, reply) => {
   const body = request.body as ChatRequest;
+  let streamExecutionContext: ExecutionContext | null = null;
 
   reply.hijack();
   reply.raw.writeHead(200, {
@@ -1271,6 +1841,7 @@ app.post("/api/chat/stream", async (request, reply) => {
 
   try {
     const context = await prepareExecution(body);
+    streamExecutionContext = context;
     const compactedBody = context.compactedRequest;
 
     if (context.routeDecision) {
@@ -1294,6 +1865,7 @@ app.post("/api/chat/stream", async (request, reply) => {
     }
 
     const resultMessages: ChatMessage[] = [];
+    const toolObservations: MemoryToolObservation[] = [];
     const streamVisitCounts = new Map<string, number>();
     let streamCtx = context;
     let streamConversation = [...compactedBody.conversation];
@@ -1327,7 +1899,24 @@ app.post("/api/chat/stream", async (request, reply) => {
         });
       }
 
-      const handler = createToolHandler({ browserSessionKey: streamCtx.browserSessionKey });
+      const memoryContext = await buildPersistentMemoryContext(
+        streamCtx,
+        streamConversation,
+        streamContent,
+        body.conversationId ?? null,
+      );
+      const procedureContext = await buildProcedureMemoryContext(
+        streamCtx,
+        streamConversation,
+        streamContent,
+        body.conversationId ?? null,
+      );
+      const handler = createToolHandler({
+        browserSessionKey: streamCtx.browserSessionKey,
+        onToolResult(observation) {
+          toolObservations.push(observation);
+        },
+      });
       const compactedConversation = compactConversationForContext(
         streamConversation,
         streamContent,
@@ -1345,6 +1934,8 @@ app.post("/api/chat/stream", async (request, reply) => {
           {
             modelId: streamCtx.assignment?.modelId ?? null,
             promptStack: streamCtx.promptStack,
+            memoryContext,
+            procedureContext,
             role: streamCtx.activeRole,
             conversation: compactedConversation,
             content: streamContent,
@@ -1371,6 +1962,16 @@ app.post("/api/chat/stream", async (request, reply) => {
               sendStreamEvent(send, { type: "content", text });
             },
           },
+        );
+        await recordMemoryRetrievalSuccesses(
+          streamCtx.memoryRepository,
+          memoryContext,
+          new Date().toISOString(),
+        );
+        await recordMemoryRetrievalSuccesses(
+          streamCtx.memoryRepository,
+          procedureContext,
+          new Date().toISOString(),
         );
 
         const iterNote = `${streamCtx.routeNote ?? ""} Live response via ${iterProvider.name}.`.trim();
@@ -1422,6 +2023,7 @@ app.post("/api/chat/stream", async (request, reply) => {
     });
 
     const conversation = await persistConversationFromResult(body, result);
+    await consolidatePersistedConversation(context, conversation, toolObservations);
     sendStreamEvent(send, {
       type: "complete",
       message: lastResultMessage,
@@ -1439,6 +2041,7 @@ app.post("/api/chat/stream", async (request, reply) => {
     });
   } finally {
     clearInterval(heartbeat);
+    await streamExecutionContext?.memoryRepository?.close?.();
     reply.raw.end();
   }
 

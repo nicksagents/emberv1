@@ -8,9 +8,13 @@ import type {
   Settings,
 } from "./types";
 import { ROLES } from "./types";
+import type { MemoryConfig } from "./memory/types";
+import { defaultMemoryConfig, normalizeMemoryConfig } from "./memory/defaults";
 
 const REMOTE_PROVIDER_CONTEXT_WINDOW_TOKENS = 300_000;
 const DEFAULT_LOCAL_PROVIDER_CONTEXT_WINDOW_TOKENS = 100_000;
+const RESPONSE_HEADROOM_CONTEXT_RATIO = 0.32;
+const SAFETY_MARGIN_CONTEXT_RATIO = 0.12;
 
 export const defaultConnectorTypes: ConnectorType[] = [
   {
@@ -77,7 +81,62 @@ export const defaultSettings = (workspaceRoot: string): Settings => ({
     webUrl: "http://127.0.0.1:3000",
     apiUrl: "http://127.0.0.1:3005",
   },
+  memory: defaultMemoryConfig(),
 });
+
+export interface CompressionPromptBudget {
+  contextWindowTokens: number;
+  responseHeadroomTokens: number;
+  safetyMarginTokens: number;
+  maxPromptTokens: number;
+  targetPromptTokens: number;
+}
+
+export function deriveCompressionPromptBudget(
+  compression: Pick<
+    Settings["compression"],
+    "contextWindowTokens" | "responseHeadroomTokens" | "safetyMarginTokens"
+  >,
+  contextWindowOverride = compression.contextWindowTokens,
+): CompressionPromptBudget {
+  const contextWindowTokens = Math.max(4_000, Math.floor(contextWindowOverride));
+  const configuredResponseHeadroomTokens = Math.max(
+    512,
+    Math.floor(compression.responseHeadroomTokens),
+  );
+  const configuredSafetyMarginTokens = Math.max(
+    512,
+    Math.floor(compression.safetyMarginTokens),
+  );
+  const responseHeadroomTokens = Math.min(
+    configuredResponseHeadroomTokens,
+    Math.max(512, Math.floor(contextWindowTokens * RESPONSE_HEADROOM_CONTEXT_RATIO)),
+  );
+  const safetyMarginTokens = Math.min(
+    configuredSafetyMarginTokens,
+    Math.max(512, Math.floor(contextWindowTokens * SAFETY_MARGIN_CONTEXT_RATIO)),
+  );
+  const maxPromptTokens = Math.max(
+    1_000,
+    contextWindowTokens - responseHeadroomTokens - safetyMarginTokens,
+  );
+  const targetPromptTokens = Math.max(
+    1_000,
+    Math.min(
+      maxPromptTokens,
+      maxPromptTokens -
+        Math.min(8_000, Math.max(2_000, Math.floor(maxPromptTokens * 0.12))),
+    ),
+  );
+
+  return {
+    contextWindowTokens,
+    responseHeadroomTokens,
+    safetyMarginTokens,
+    maxPromptTokens,
+    targetPromptTokens,
+  };
+}
 
 export function normalizeSettings(
   settings: Partial<Settings>,
@@ -100,17 +159,11 @@ export function normalizeSettings(
     512,
     Math.floor(compression.safetyMarginTokens),
   );
-  const derivedMaxPromptTokens = Math.max(
-    1_000,
-    contextWindowTokens - responseHeadroomTokens - safetyMarginTokens,
-  );
-  const derivedTargetPromptTokens = Math.max(
-    1_000,
-    Math.min(
-      derivedMaxPromptTokens,
-      derivedMaxPromptTokens - Math.min(8_000, Math.max(2_000, Math.floor(derivedMaxPromptTokens * 0.12))),
-    ),
-  );
+  const promptBudget = deriveCompressionPromptBudget({
+    contextWindowTokens,
+    responseHeadroomTokens,
+    safetyMarginTokens,
+  });
   const preserveRecentMessages = Math.max(
     1,
     Math.floor(compression.preserveRecentMessages),
@@ -130,8 +183,8 @@ export function normalizeSettings(
       safetyMarginTokens,
       preserveRecentMessages,
       minimumRecentMessages,
-      maxPromptTokens: derivedMaxPromptTokens,
-      targetPromptTokens: derivedTargetPromptTokens,
+      maxPromptTokens: promptBudget.maxPromptTokens,
+      targetPromptTokens: promptBudget.targetPromptTokens,
     },
     systemPrompts: {
       ...defaults.systemPrompts,
@@ -145,6 +198,7 @@ export function normalizeSettings(
       ...defaults.runtimeInfo,
       ...settings.runtimeInfo,
     },
+    memory: normalizeMemoryConfig(settings.memory as Partial<MemoryConfig> | undefined),
   };
 }
 

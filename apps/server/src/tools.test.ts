@@ -20,9 +20,10 @@ import { deleteFileTool, editFileTool, listDirectoryTool, readFileTool, writeFil
 import { fetchPageTool } from "./tools/fetch-page.js";
 import { gitInspectTool } from "./tools/git-inspect.js";
 import { httpRequestTool } from "./tools/http-request.js";
+import { forgetMemoryTool, memoryGetTool, memorySearchTool, saveMemoryTool } from "./tools/memory.js";
 import { projectOverviewTool } from "./tools/project-overview.js";
 import { searchFilesFallback, searchFilesTool } from "./tools/search-files.js";
-import { getToolSystemPrompt } from "./tools/index.js";
+import { getExecutionToolsForRole, getToolSystemPrompt } from "./tools/index.js";
 import { terminalTool } from "./tools/terminal.js";
 
 function tempDir(): string {
@@ -236,6 +237,77 @@ test("http_request formats status, headers, and JSON body", async () => {
   }
 });
 
+test("memory tools can save, search, inspect, and forget memories", async () => {
+  const dir = tempDir();
+  const previousRoot = process.env.EMBER_ROOT;
+  process.env.EMBER_ROOT = dir;
+
+  try {
+    const saveResult = expectText(await saveMemoryTool.execute({
+      content: "User prefers concise engineering answers.",
+      memory_type: "user_preference",
+      scope: "user",
+      tags: ["style", "preference"],
+    }));
+
+    assert.match(saveResult, /Saved memory\./);
+    const createdId = saveResult.match(/(mem_[a-z0-9_]+)/i)?.[1];
+    assert.ok(createdId, "save_memory should return the created memory id");
+
+    const reinforceResult = expectText(await saveMemoryTool.execute({
+      content: "User prefers concise engineering answers.",
+      memory_type: "user_preference",
+      scope: "user",
+      tags: ["style", "preference"],
+    }));
+    assert.match(reinforceResult, /Reinforced existing memory\./);
+    assert.match(reinforceResult, new RegExp(createdId!));
+
+    const searchResult = expectText(await memorySearchTool.execute({
+      query: "How should you answer the user?",
+    }));
+    assert.match(searchResult, /Memory search results:/);
+    assert.match(searchResult, /concise engineering answers/i);
+    assert.match(searchResult, new RegExp(createdId!));
+
+    const getResult = expectText(await memoryGetTool.execute({
+      id: createdId,
+    }));
+    assert.match(getResult, /Status: active/);
+    assert.match(getResult, /Type: user_preference/);
+    assert.match(getResult, /Reinforcement count: 2/);
+
+    const missingConfirm = expectText(await forgetMemoryTool.execute({
+      id: createdId,
+      confirm: false,
+    }));
+    assert.match(missingConfirm, /confirm=true/);
+
+    const forgetResult = expectText(await forgetMemoryTool.execute({
+      id: createdId,
+      confirm: true,
+      reason: "User changed their preference.",
+    }));
+    assert.match(forgetResult, /Forgot memory\./);
+
+    const getForgotten = expectText(await memoryGetTool.execute({
+      id: createdId,
+    }));
+    assert.match(getForgotten, /Status: forgotten/);
+
+    const searchAfterForget = expectText(await memorySearchTool.execute({
+      query: "How should you answer the user?",
+    }));
+    assert.match(searchAfterForget, /No memory results found/);
+  } finally {
+    if (previousRoot === undefined) {
+      delete process.env.EMBER_ROOT;
+    } else {
+      process.env.EMBER_ROOT = previousRoot;
+    }
+  }
+});
+
 test("project_overview summarizes repo structure and scripts", async () => {
   const dir = tempDir();
   mkdirSync(path.join(dir, "apps", "web"), { recursive: true });
@@ -287,6 +359,15 @@ test("project-scaffold skill teaches small roles to scaffold then hand off", () 
   assert.match(skill!.body, /hand off to `director`/i);
 });
 
+test("memory-tools skill teaches save, search, inspect, and forget workflow", () => {
+  const skill = skillManager.loadSkill("memory-tools");
+  assert.ok(skill, "memory-tools skill must exist");
+  assert.deepEqual(skill!.roles, ["coordinator", "advisor", "director", "inspector"]);
+  assert.deepEqual(skill!.tools, ["save_memory", "memory_search", "memory_get", "forget_memory"]);
+  assert.match(skill!.body, /memory_search/);
+  assert.match(skill!.body, /forget_memory/);
+});
+
 test("ops cleanup skill exists and generic file skill excludes ops", () => {
   const opsSkill = skillManager.loadSkill("ops-file-cleanup");
   const filesSkill = skillManager.loadSkill("files");
@@ -320,12 +401,20 @@ test("tool schemas expose small-model-friendly aliases; skills inject correctly 
     description: "List scaffold templates",
     inputSchema: { type: "object", properties: {} },
   };
+  const memorySearchDefinition = memorySearchTool.definition;
+  const memoryGetDefinition = memoryGetTool.definition;
+  const saveMemoryDefinition = saveMemoryTool.definition;
+  const forgetMemoryDefinition = forgetMemoryTool.definition;
 
   // Without a role: tool-gated skills fire, role-scoped skills do not
   const promptNoRole = getToolSystemPrompt([
     playwrightNavTool,
     scaffoldTool,
     scaffoldListTool,
+    memorySearchDefinition,
+    memoryGetDefinition,
+    saveMemoryDefinition,
+    forgetMemoryDefinition,
     readFileTool.definition,
     searchFilesTool.definition,
     httpRequestTool.definition,
@@ -339,6 +428,9 @@ test("tool schemas expose small-model-friendly aliases; skills inject correctly 
   assert.match(promptNoRole, /navigate.*snapshot/i);
   // Scaffold workflow hint present
   assert.match(promptNoRole, /list_templates.*scaffold_project.*director/i);
+  // Memory workflow hints present
+  assert.match(promptNoRole, /memory_search first, then memory_get/i);
+  assert.match(promptNoRole, /Use save_memory only for durable facts/i);
 
   // With a coordinator role, role-scoped skills are also injected
   const promptWithRole = getToolSystemPrompt(
@@ -346,6 +438,10 @@ test("tool schemas expose small-model-friendly aliases; skills inject correctly 
       playwrightNavTool,
       scaffoldTool,
       scaffoldListTool,
+      memorySearchDefinition,
+      memoryGetDefinition,
+      saveMemoryDefinition,
+      forgetMemoryDefinition,
       readFileTool.definition,
       searchFilesTool.definition,
       httpRequestTool.definition,
@@ -363,6 +459,9 @@ test("tool schemas expose small-model-friendly aliases; skills inject correctly 
   // project-scaffold skill injected for coordinator
   assert.match(promptWithRole, /Project Scaffolding/);
   assert.match(promptWithRole, /curated templates/);
+  // memory-tools skill injected for coordinator
+  assert.match(promptWithRole, /## Memory Tools/);
+  assert.match(promptWithRole, /forget_memory/);
 
   const promptForOps = getToolSystemPrompt(
     [
@@ -373,6 +472,76 @@ test("tool schemas expose small-model-friendly aliases; skills inject correctly 
   );
   assert.match(promptForOps, /Ops File Cleanup/);
   assert.doesNotMatch(promptForOps, /### `read_file`/);
+});
+
+test("compact coordinator tool prompt stays much shorter for small-model execution", () => {
+  const playwrightNavTool: import("@ember/core").ToolDefinition = {
+    name: "mcp__playwright__browser_navigate",
+    description: "Navigate to a URL",
+    inputSchema: { type: "object", properties: {} },
+  };
+
+  const fullPrompt = getToolSystemPrompt(
+    [
+      playwrightNavTool,
+      memorySearchTool.definition,
+      memoryGetTool.definition,
+      saveMemoryTool.definition,
+      forgetMemoryTool.definition,
+      readFileTool.definition,
+      searchFilesTool.definition,
+      httpRequestTool.definition,
+      terminalTool.definition,
+    ],
+    "coordinator",
+  );
+  const compactPrompt = getToolSystemPrompt(
+    [
+      playwrightNavTool,
+      memorySearchTool.definition,
+      memoryGetTool.definition,
+      saveMemoryTool.definition,
+      forgetMemoryTool.definition,
+      readFileTool.definition,
+      searchFilesTool.definition,
+      httpRequestTool.definition,
+      terminalTool.definition,
+    ],
+    "coordinator",
+    { compact: true },
+  );
+
+  assert.match(compactPrompt, /## Active Skills/);
+  assert.match(compactPrompt, /browser-small-model: Supplementary Playwright browser guidance/i);
+  assert.ok(compactPrompt.length < fullPrompt.length / 2);
+  assert.doesNotMatch(compactPrompt, /## Playwright Browser — Small-Model Rules/);
+});
+
+test("compact coordinator tool selection keeps only tools relevant to the current task", () => {
+  const codeTools = getExecutionToolsForRole("coordinator", {
+    compact: true,
+    content: "Fix the TypeScript build in this repo and edit the failing file.",
+    conversation: [],
+  });
+  const codeToolNames = new Set(codeTools.map((tool) => tool.name));
+  assert.ok(codeToolNames.has("project_overview"));
+  assert.ok(codeToolNames.has("search_files"));
+  assert.ok(codeToolNames.has("read_file"));
+  assert.ok(codeToolNames.has("edit_file"));
+  assert.ok(codeToolNames.has("run_terminal_command"));
+  assert.equal(codeToolNames.has("save_memory"), false);
+
+  const webTools = getExecutionToolsForRole("coordinator", {
+    compact: true,
+    content: "Search the latest docs and fetch the relevant page.",
+    conversation: [],
+  });
+  const webToolNames = new Set(webTools.map((tool) => tool.name));
+  assert.ok(webToolNames.has("web_search"));
+  assert.ok(webToolNames.has("fetch_page"));
+  assert.ok(webToolNames.has("http_request"));
+  assert.equal(webToolNames.has("edit_file"), false);
+  assert.equal(webToolNames.has("run_terminal_command"), false);
 });
 
 test("git_inspect reports status and diff stats", async () => {

@@ -347,3 +347,117 @@ test("streamProviderChat keeps the compacted history summary in the provider pro
     globalThis.fetch = originalFetch;
   }
 });
+
+test("streamProviderChat keeps persistent memory separate from compacted chat history", async () => {
+  const originalFetch = globalThis.fetch;
+  const fetchBodies: Array<Record<string, unknown>> = [];
+  const promptStack: PromptStack = { shared: "Shared rules.", role: "Role rules.", tools: "" };
+
+  globalThis.fetch = (async (_input, init) => {
+    fetchBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+    return sseResponse([
+      {
+        choices: [
+          {
+            delta: {
+              content: "Provider reply.",
+            },
+          },
+        ],
+      },
+      {
+        choices: [
+          {
+            delta: {},
+            finish_reason: "stop",
+          },
+        ],
+      },
+    ]);
+  }) as typeof fetch;
+
+  try {
+    const result = await streamProviderChat(makeProvider(), {}, {
+      modelId: null,
+      promptStack,
+      memoryContext: {
+        text: "Persistent memory:\n- User profile: Born 1997-06-16. Current age: 28.",
+        totalChars: 69,
+        results: [],
+      },
+      conversation: [],
+      content: "When is my birthday?",
+    }, {});
+
+    assert.equal(result.content, "Provider reply.");
+
+    const firstBody = fetchBodies[0];
+    const messages = firstBody.messages as Array<{ role?: string; content?: unknown }>;
+    assert.ok(Array.isArray(messages));
+    assert.equal(messages[0]?.role, "system");
+    assert.match(String(messages[0]?.content ?? ""), /Persistent memory/);
+    assert.doesNotMatch(String(messages[1]?.content ?? ""), /Persistent memory/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("streamProviderChat keeps learned procedures in a separate prompt block", async () => {
+  const originalFetch = globalThis.fetch;
+  const fetchBodies: Array<Record<string, unknown>> = [];
+  const promptStack: PromptStack = { shared: "Shared rules.", role: "Role rules.", tools: "" };
+
+  globalThis.fetch = (async (_input, init) => {
+    fetchBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+    return sseResponse([
+      {
+        choices: [
+          {
+            delta: {
+              content: "Provider reply.",
+            },
+          },
+        ],
+      },
+      {
+        choices: [
+          {
+            delta: {},
+            finish_reason: "stop",
+          },
+        ],
+      },
+    ]);
+  }) as typeof fetch;
+
+  try {
+    const result = await streamProviderChat(makeProvider(), {}, {
+      modelId: null,
+      promptStack,
+      memoryContext: {
+        text: "Persistent memory:\n- Project fact: Workspace uses pnpm.",
+        totalChars: 56,
+        results: [],
+      },
+      procedureContext: {
+        text: "Learned procedures:\n- When handling TypeScript build failures, run `pnpm build` after reading tsconfig.",
+        totalChars: 104,
+        results: [],
+      },
+      conversation: [],
+      content: "Fix the TypeScript build.",
+    }, {});
+
+    assert.equal(result.content, "Provider reply.");
+
+    const firstBody = fetchBodies[0];
+    const messages = firstBody.messages as Array<{ role?: string; content?: unknown }>;
+    assert.ok(Array.isArray(messages));
+    assert.equal(messages[0]?.role, "system");
+    assert.match(String(messages[0]?.content ?? ""), /Persistent memory/);
+    assert.match(String(messages[0]?.content ?? ""), /Learned procedures/);
+    assert.doesNotMatch(String(messages[1]?.content ?? ""), /Learned procedures/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

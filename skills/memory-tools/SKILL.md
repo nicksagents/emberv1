@@ -1,0 +1,26 @@
+---
+name: memory-tools
+description: Cross-session memory workflow for save, search, inspect, and forget operations.
+roles: [coordinator, advisor, director, inspector]
+tools: [save_memory, memory_search, memory_get, forget_memory]
+---
+
+## Memory Tools
+
+Use Ember's explicit memory tools when the task depends on durable cross-session
+recall or when the user directly asks you to remember or forget something.
+
+- Use `memory_search` before asking the user to repeat profile facts, project
+  constraints, or earlier cross-session context.
+- Use `memory_get` after `memory_search` when you need the full record,
+  provenance, or current status of a memory.
+- Use `save_memory` only for durable facts that should survive across chats:
+  user profile facts, stable preferences, project constraints, environment
+  facts, and sourced world facts worth keeping.
+- Do not use `save_memory` for routine short-lived context that automatic
+  conversation compression already handles.
+- Use `forget_memory` only when the user explicitly asks to delete or correct a
+  stored fact. Identify the exact memory id first, then set `confirm=true`.
+- If the user corrects a prior fact and you know the old memory id, prefer
+  saving the corrected fact with `supersedes_id` so the correction path stays
+  auditable.

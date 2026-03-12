@@ -33,13 +33,16 @@ import { clientApiPath, clientStreamApiPath } from "../lib/api";
 import { announceConversationsChanged } from "../lib/conversations";
 import { FunnyLoader, MessageRenderer, StreamingContent, ThinkingPanel, ToolCallsPanel } from "./message-renderer";
 
-const directModes = ROLES.filter((role) => role !== "dispatch" && role !== "coordinator");
+const directModes = ROLES.filter((role) => role !== "dispatch" && role !== "coordinator" && role !== "ops");
 const modes = ["auto", "coordinator", ...directModes] as const;
 const MAX_ATTACHMENT_FILES = 6;
 const MAX_ATTACHMENT_FILE_BYTES = 8 * 1024 * 1024;
 
 function normalizeMode(mode: ChatMode): (typeof modes)[number] {
-  return mode === "dispatch" ? "auto" : mode;
+  if (mode === "dispatch" || mode === "ops") {
+    return "auto";
+  }
+  return mode;
 }
 
 const suggestionPrompts = [
