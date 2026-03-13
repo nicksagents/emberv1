@@ -20,9 +20,12 @@ import { handoffTool } from "./handoff.js";
 import { httpRequestTool } from "./http-request.js";
 import { credentialGetTool, credentialListTool, credentialSaveTool } from "./credentials.js";
 import { forgetMemoryTool, memoryGetTool, memorySearchTool, saveMemoryTool } from "./memory.js";
+import { networkToolsTool } from "./network-tools.js";
 import { parallelTasksTool } from "./parallel-tasks.js";
+import { processManagerTool } from "./process-manager.js";
 import { projectOverviewTool } from "./project-overview.js";
 import { searchFilesTool } from "./search-files.js";
+import { systemInfoTool } from "./system-info.js";
 import { setSudoPassword, terminalTool } from "./terminal.js";
 import type { EmberTool } from "./types.js";
 import { webSearchTool } from "./web-search.js";
@@ -56,6 +59,9 @@ const BASE_REGISTRY: EmberTool[] = [
   memoryGetTool,
   forgetMemoryTool,
   parallelTasksTool,
+  systemInfoTool,
+  processManagerTool,
+  networkToolsTool,
   // browserTool removed — replaced by @playwright/mcp (mcp__playwright__browser_*)
   handoffTool,
 ];
@@ -76,10 +82,10 @@ const TOOL_MAP = new Map<string, EmberTool>(
 // Roles: coordinator, advisor, director, inspector get mcp__playwright__browser_*
 const BASE_ROLE_TOOLS: Record<Role, EmberTool[]> = {
   dispatch:    [],
-  coordinator: [projectOverviewTool, gitInspectTool, statPathTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, credentialSaveTool, credentialListTool, credentialGetTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, parallelTasksTool, handoffTool],
-  advisor:     [projectOverviewTool, gitInspectTool, statPathTool, listDirectoryTool, searchFilesTool, readFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, credentialSaveTool, credentialListTool, credentialGetTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, parallelTasksTool, handoffTool],
-  director:    [projectOverviewTool, gitInspectTool, statPathTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, credentialSaveTool, credentialListTool, credentialGetTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, parallelTasksTool, handoffTool],
-  inspector:   [projectOverviewTool, gitInspectTool, statPathTool, listDirectoryTool, searchFilesTool, readFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, credentialSaveTool, credentialListTool, credentialGetTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, parallelTasksTool, handoffTool],
+  coordinator: [projectOverviewTool, gitInspectTool, statPathTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, credentialSaveTool, credentialListTool, credentialGetTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, parallelTasksTool, systemInfoTool, processManagerTool, networkToolsTool, handoffTool],
+  advisor:     [projectOverviewTool, gitInspectTool, statPathTool, listDirectoryTool, searchFilesTool, readFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, credentialSaveTool, credentialListTool, credentialGetTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, parallelTasksTool, systemInfoTool, networkToolsTool, handoffTool],
+  director:    [projectOverviewTool, gitInspectTool, statPathTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, credentialSaveTool, credentialListTool, credentialGetTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, parallelTasksTool, systemInfoTool, processManagerTool, networkToolsTool, handoffTool],
+  inspector:   [projectOverviewTool, gitInspectTool, statPathTool, listDirectoryTool, searchFilesTool, readFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, credentialSaveTool, credentialListTool, credentialGetTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, parallelTasksTool, systemInfoTool, processManagerTool, networkToolsTool, handoffTool],
   ops:         [editFileTool, deleteFileTool],
 };
 
@@ -661,6 +667,22 @@ function selectExecutionToolsForRole(
     /\b(earlier|previous|last time|from before|past chat|past conversation|what do you remember|what do you know about me|you saved|memory)\b/i.test(
       contextText,
     );
+  const needsSystemInfo =
+    /\b(cpu|memory usage|ram|disk space|disk usage|system info|system resources|load average|load avg|how much memory|how much disk|what os|operating system|network interface|my ip|local ip)\b/i.test(
+      contextText,
+    );
+  const needsProcessManager =
+    /\b(port\s+\d+|port already|port in use|what(?:'s| is) (?:on|using) port|kill(?:ing)? (?:the |a |process)|stop(?:ping)? (?:the |a |process|server)|running process|process list|pid\b|port check|lsof|netstat)\b/i.test(
+      contextText,
+    );
+  const needsNetworkTools =
+    /\b(tailscale|mesh vpn|tailnet|tailscale status|tailscale ip|tailscale serve|tailscale funnel|ping\b|dns lookup|dns resolve|network interface|local ip address|my ip)\b/i.test(
+      contextText,
+    );
+  const needsPackageInstall =
+    /\b(brew install|npm install|pip install|cargo install|apt install|apt-get install|install (?:the |a |package|library|tool|cli|module)|pnpm add|npx )\b/i.test(
+      contextText,
+    );
 
   const selected = new Set<string>(["handoff"]);
   if (repoContext) {
@@ -721,6 +743,16 @@ function selectExecutionToolsForRole(
   }
   if (needsParallelTasks) {
     selected.add("launch_parallel_tasks");
+  }
+  if (needsSystemInfo) {
+    selected.add("system_info");
+  }
+  if (needsProcessManager || needsNetworkTools || needsPackageInstall) {
+    selected.add("process_manager");
+    selected.add("run_terminal_command");
+  }
+  if (needsNetworkTools) {
+    selected.add("network_tools");
   }
 
   const compactMcpTools = selectRelevantCompactMcpTools(
@@ -855,6 +887,21 @@ export function getToolSystemPrompt(
   if (toolNames.has("mcp__scaffold__scaffold_project")) {
     workflows.push(
       "For new projects: list_templates → get_template_options → scaffold_project → post_setup, then hand off to director for real implementation.",
+    );
+  }
+  if (toolNames.has("process_manager")) {
+    workflows.push(
+      "For port conflicts: process_manager port_check <port> to see what is using it, then kill by PID if needed. For runaway processes: process_manager list filter=<name> then kill.",
+    );
+  }
+  if (toolNames.has("system_info")) {
+    workflows.push(
+      "For resource checks: system_info action=all for a quick snapshot, or action=cpu/memory/disk/network for a specific section.",
+    );
+  }
+  if (toolNames.has("network_tools")) {
+    workflows.push(
+      "For Tailscale sharing: network_tools tailscale_status first to confirm running, then tailscale serve <port> (private) or tailscale funnel <port> (public internet).",
     );
   }
 

@@ -31,7 +31,11 @@ import { ROLES } from "@ember/core/client";
 import { flattenAttachmentGroups, groupAttachments, isImageAttachment } from "../lib/attachments";
 import { clientApiPath, clientStreamApiPath } from "../lib/api";
 import { announceConversationsChanged } from "../lib/conversations";
-import { getRandomSuggestionPrompts, type SuggestionPrompt } from "../lib/suggestion-prompts";
+import {
+  getDeterministicSuggestionPrompts,
+  getRandomSuggestionPrompts,
+  type SuggestionPrompt,
+} from "../lib/suggestion-prompts";
 import { FunnyLoader, MessageRenderer, StreamingContent, ThinkingPanel, ToolCallsPanel } from "./message-renderer";
 
 const directModes = ROLES.filter((role) => role !== "dispatch" && role !== "coordinator" && role !== "ops");
@@ -188,9 +192,9 @@ export function ChatClient({
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const autoScrollRef = useRef(true);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
-  
-  // Generate random suggestion prompts on mount - based on agent abilities
-  const [suggestionPrompts] = useState<SuggestionPrompt[]>(() => getRandomSuggestionPrompts(4));
+  const [suggestionPrompts, setSuggestionPrompts] = useState<SuggestionPrompt[]>(() =>
+    getDeterministicSuggestionPrompts(4),
+  );
 
   const scrollToLatest = (behavior: ScrollBehavior = "auto", retries = 3) => {
     const scrollEl = messagesScrollRef.current;
@@ -228,6 +232,10 @@ export function ChatClient({
     () => hasImageAttachments(pendingAttachments),
     [pendingAttachments],
   );
+
+  useEffect(() => {
+    setSuggestionPrompts(getRandomSuggestionPrompts(4));
+  }, []);
 
   useEffect(() => {
     let cancelled = false;

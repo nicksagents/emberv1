@@ -314,6 +314,34 @@ export function routeAutoRequestPolicy(request: ChatRequest): PolicyRouteEvaluat
     /\bls\b/,
   ]);
 
+  const systemOpsScore = countPatternMatches(normalized, [
+    /\btailscale\b/,
+    /\bserve\b/,
+    /\bfunnel\b/,
+    /\btailnet\b/,
+    /\bport\s+\d+\b/,
+    /\bport in use\b/,
+    /\bport already\b/,
+    /\bkill\s+(?:the\s+)?(?:process|server|worker)\b/,
+    /\binstall\b/,
+    /\bbrew\b/,
+    /\bpip install\b/,
+    /\bapt install\b/,
+    /\bcpu usage\b/,
+    /\bdisk space\b/,
+    /\bmemory usage\b/,
+    /\bram usage\b/,
+    /\bnetwork interface\b/,
+    /\bmy ip\b/,
+    /\bping\b/,
+    /\bdns\b/,
+    /\bdev server\b/,
+    /\bexpose\b/,
+    /\btunnel\b/,
+    /\bngrok\b/,
+    /\blocaltunnel\b/,
+  ]);
+
   const complexityScore = countPatternMatches(normalized, [
     /\bcomplex\b/,
     /\bsubstantial\b/,
@@ -350,7 +378,7 @@ export function routeAutoRequestPolicy(request: ChatRequest): PolicyRouteEvaluat
   const substantialCoding =
     codingScore >= 2 &&
     (complexityScore >= 1 || taskCount >= 3 || wordCount >= 20 || /(across backend and frontend|multi-file|refactor)/.test(normalized));
-  const routineExecution = browserScore + researchScore + filesystemScore >= 1;
+  const routineExecution = browserScore + researchScore + filesystemScore + systemOpsScore >= 1;
 
   if (wantsProductDelivery) {
     return createPolicyEvaluation(
@@ -432,6 +460,18 @@ export function routeAutoRequestPolicy(request: ChatRequest): PolicyRouteEvaluat
         "policy",
         0.93,
       ),
+    );
+  }
+
+  if (systemOpsScore >= 1 && codingScore === 0) {
+    return createPolicyEvaluation(
+      createDecision(
+        "coordinator",
+        "System operations, networking, package installs, server management, and process control are handled directly by the coordinator.",
+        "policy",
+        0.95,
+      ),
+      { shouldQueryDispatch: false },
     );
   }
 

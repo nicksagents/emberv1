@@ -16,6 +16,8 @@ export interface SuggestionPrompt {
   tags: string[];
 }
 
+const DEFAULT_SUGGESTION_COUNT = 4;
+
 // Pool of prompts organized by capability/role
 const PROMPT_POOL: SuggestionPrompt[] = [
   // === COORDINATOR - Research, browsing, quick tasks ===
@@ -329,6 +331,40 @@ export function getRandomSuggestionPrompts(count: number = 4): SuggestionPrompt[
     }
   }
   
+  return selected;
+}
+
+/**
+ * Get a deterministic starter set for SSR and initial hydration.
+ * This keeps the first render stable, then the client can reshuffle later.
+ */
+export function getDeterministicSuggestionPrompts(
+  count: number = DEFAULT_SUGGESTION_COUNT,
+): SuggestionPrompt[] {
+  const selected: SuggestionPrompt[] = [];
+  const usedRoles = new Set<SuggestionPrompt["role"]>();
+
+  for (const prompt of PROMPT_POOL) {
+    if (selected.length >= count) {
+      break;
+    }
+    if (!usedRoles.has(prompt.role)) {
+      selected.push(prompt);
+      usedRoles.add(prompt.role);
+    }
+  }
+
+  if (selected.length < count) {
+    for (const prompt of PROMPT_POOL) {
+      if (selected.length >= count) {
+        break;
+      }
+      if (!selected.includes(prompt)) {
+        selected.push(prompt);
+      }
+    }
+  }
+
   return selected;
 }
 
