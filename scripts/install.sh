@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
+export EMBER_ROOT="$ROOT_DIR"
+source "$ROOT_DIR/scripts/node-runtime.sh"
 
 # ── Colours ────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -14,18 +16,99 @@ warn() { echo -e "${YELLOW}⚠${NC} $*"; }
 err()  { echo -e "${RED}✗${NC} $*" >&2; }
 die()  { err "$*"; exit 1; }
 
+append_node_option() {
+  local option="$1"
+  case " ${NODE_OPTIONS-} " in
+    *" $option "*) ;;
+    *)
+      export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }$option"
+      ;;
+  esac
+}
+
+resolve_node_gyp_js() {
+  local node_prefix
+  local candidate
+  node_prefix="$(cd "$(dirname "$EMBER_NODE_BIN")/.." && pwd)"
+
+  for candidate in \
+    "$node_prefix/lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js" \
+    "/usr/lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js" \
+    "/usr/local/lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js"
+  do
+    if [ -f "$candidate" ]; then
+      printf "%s" "$candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+ensure_node_pty_native() {
+  log "Verifying node-pty native module..."
+  if (cd "$ROOT_DIR/apps/server" && node -e "require('node-pty')") >/dev/null 2>&1; then
+    ok "node-pty native module ready"
+    return 0
+  fi
+
+  warn "node-pty prebuild missing for this platform; attempting source build..."
+
+  local node_pty_dir
+  local node_gyp_js
+  local node_prefix
+
+  node_pty_dir="$(cd "$ROOT_DIR/apps/server" && node -e "const path=require('node:path');process.stdout.write(path.dirname(require.resolve('node-pty/package.json')));")" || {
+    warn "Unable to locate node-pty package. Continuing without PTY native backend."
+    return 0
+  }
+  node_gyp_js="$(resolve_node_gyp_js)" || {
+    warn "Unable to locate node-gyp. Continuing without PTY native backend."
+    return 0
+  }
+  node_prefix="$(cd "$(dirname "$EMBER_NODE_BIN")/.." && pwd)"
+
+  (
+    cd "$node_pty_dir"
+    node "$node_gyp_js" rebuild --nodedir="$node_prefix"
+  ) || {
+    warn "Failed to compile node-pty native module. Continuing with pipe terminal fallback."
+    return 0
+  }
+
+  if (cd "$ROOT_DIR/apps/server" && node -e "require('node-pty')") >/dev/null 2>&1; then
+    ok "node-pty native module compiled"
+    return 0
+  fi
+
+  warn "node-pty still failed to load after rebuild. Continuing with pipe terminal fallback."
+  return 0
+}
+
+add_to_path() {
+  local rcfile="$1"
+  if [ -f "$rcfile" ] && ! grep -qF '.local/bin' "$rcfile" 2>/dev/null; then
+    printf '\n# Added by Ember installer\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$rcfile"
+    ok "Updated $rcfile with PATH"
+  fi
+}
+
 # ── Header ─────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}  Ember — Setup${NC}"
 echo -e "  Repo: ${ROOT_DIR}"
 echo ""
 
-# ── 1. Node.js ─────────────────────────────────────────────────────────────
-log "Checking Node.js..."
-command -v node &>/dev/null || die "Node.js is required. Install v20+ from https://nodejs.org"
-NODE_MAJOR=$(node -e "process.stdout.write(String(process.versions.node.split('.')[0]))")
-[ "$NODE_MAJOR" -ge 20 ] || die "Node.js v20+ required (found $(node --version)). Update at https://nodejs.org"
-ok "Node.js $(node --version)"
+# ── 1. Node.js runtime ─────────────────────────────────────────────────────
+log "Resolving Node.js runtime..."
+ember_resolve_node_runtime || die "Unable to resolve a Node runtime with node:sqlite support."
+NODE_BIN_DIR="$(cd "$(dirname "$EMBER_NODE_BIN")" && pwd)"
+export PATH="$NODE_BIN_DIR:$PATH"
+append_node_option "--disable-warning=ExperimentalWarning"
+if [ -n "${EMBER_NODE_OPTIONS:-}" ]; then
+  append_node_option "$EMBER_NODE_OPTIONS"
+fi
+ok "Node.js $(node --version) (${EMBER_NODE_SOURCE})"
 
 log "Checking npm..."
 command -v npm &>/dev/null || die "npm is required. Reinstall Node.js from https://nodejs.org"
@@ -33,21 +116,19 @@ ok "npm $(npm --version)"
 
 # ── 2. pnpm ────────────────────────────────────────────────────────────────
 log "Checking pnpm..."
+export PATH="$HOME/.local/bin:$PATH"
 if ! command -v pnpm &>/dev/null; then
-  log "Installing pnpm via corepack..."
-  if command -v corepack &>/dev/null; then
-    corepack enable
-    corepack prepare pnpm@10.9.0 --activate || npm install -g pnpm@10.9.0
-  else
-    npm install -g pnpm@10.9.0
-  fi
+  log "Installing pnpm in ~/.local via npm..."
+  npm install -g pnpm@10.9.0 --prefix "$HOME/.local"
 fi
+command -v pnpm &>/dev/null || die "pnpm is required but was not installed successfully."
 ok "pnpm $(pnpm --version)"
 
 # ── 3. Dependencies ────────────────────────────────────────────────────────
 log "Installing workspace dependencies..."
 pnpm install --frozen-lockfile 2>/dev/null || pnpm install
 ok "Dependencies installed"
+ensure_node_pty_native
 
 # ── 4. .env ────────────────────────────────────────────────────────────────
 if [ ! -f "$ROOT_DIR/.env" ]; then
@@ -97,13 +178,6 @@ chmod +x "$INSTALL_DIR/ember"
 ok "Installed: $INSTALL_DIR/ember"
 
 # Add ~/.local/bin to PATH in shell config files if not already present
-add_to_path() {
-  local rcfile="$1"
-  if [ -f "$rcfile" ] && ! grep -qF '.local/bin' "$rcfile" 2>/dev/null; then
-    printf '\n# Added by Ember installer\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$rcfile"
-    ok "Updated $rcfile with PATH"
-  fi
-}
 add_to_path "$HOME/.zshrc"
 add_to_path "$HOME/.bashrc"
 add_to_path "$HOME/.bash_profile"

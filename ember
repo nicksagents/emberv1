@@ -4,17 +4,33 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export EMBER_ROOT="$ROOT_DIR"
 
-case " ${NODE_OPTIONS-} " in
-  *" --disable-warning=ExperimentalWarning "*) ;;
-  *) export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--disable-warning=ExperimentalWarning" ;;
-esac
+source "$ROOT_DIR/scripts/node-runtime.sh"
+ember_resolve_node_runtime
+
+NODE_BIN_DIR="$(cd "$(dirname "$EMBER_NODE_BIN")" && pwd)"
+export PATH="$NODE_BIN_DIR:$PATH"
+
+append_node_option() {
+  local option="$1"
+  case " ${NODE_OPTIONS-} " in
+    *" $option "*) ;;
+    *)
+      export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }$option"
+      ;;
+  esac
+}
+
+append_node_option "--disable-warning=ExperimentalWarning"
+if [ -n "${EMBER_NODE_OPTIONS:-}" ]; then
+  append_node_option "$EMBER_NODE_OPTIONS"
+fi
 
 CLI_DIST="$ROOT_DIR/packages/cli/dist/index.js"
 CLI_SRC="$ROOT_DIR/packages/cli/src/index.ts"
 TSX_BIN="$ROOT_DIR/node_modules/.bin/tsx"
 
 if [ -f "$CLI_DIST" ]; then
-  exec node "$CLI_DIST" "$@"
+  exec "$EMBER_NODE_BIN" "$CLI_DIST" "$@"
 fi
 
 if [ -x "$TSX_BIN" ]; then

@@ -27,8 +27,10 @@ bash scripts/install.sh
 
 This script will:
 
-- Verify Node.js ≥ 20 and install pnpm if needed
+- Resolve a compatible Node runtime with `node:sqlite` support (auto-installs a local Node runtime if needed)
+- Install pnpm in `~/.local` if needed (no sudo required)
 - Install all workspace dependencies
+- Verify `node-pty` native bindings and attempt source build when prebuilds are unavailable
 - Create a `.env` file from `.env.example`
 - Initialise the `data/` directory with empty JSON files
 - Build all packages (`core`, `ui-schema`, `connectors`, `prompts`)

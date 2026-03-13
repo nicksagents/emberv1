@@ -1,12 +1,32 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { platform } from "node:os";
-
-import { spawn as spawnPty, type IPty } from "node-pty";
 
 import type { EmberTool } from "./types.js";
 
 let _sudoPassword = "";
+const require = createRequire(import.meta.url);
+type NodePtyModule = typeof import("node-pty");
+let nodePtyModule: NodePtyModule | null = null;
+let nodePtyLoadError: unknown = null;
+
+function loadNodePtyModule(): NodePtyModule {
+  if (nodePtyModule) {
+    return nodePtyModule;
+  }
+  if (nodePtyLoadError) {
+    throw nodePtyLoadError;
+  }
+
+  try {
+    nodePtyModule = require("node-pty") as NodePtyModule;
+    return nodePtyModule;
+  } catch (error) {
+    nodePtyLoadError = error;
+    throw error;
+  }
+}
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_TIMEOUT_MS = 600_000;
@@ -189,6 +209,7 @@ function detectShell(): ShellConfig {
 }
 
 function createPtyBackend(shell: ShellConfig, cwd: string | undefined, cols: number, rows: number): TerminalBackend {
+  const { spawn: spawnPty } = loadNodePtyModule();
   const pty = spawnPty(shell.file, shell.args, {
     name: "xterm-256color",
     cols,
