@@ -111,6 +111,7 @@ export interface Settings {
   compression: {
     enabled: boolean;
     contextWindowTokens: number;
+    toolLoopLimit: number;
     responseHeadroomTokens: number;
     safetyMarginTokens: number;
     maxPromptTokens: number;
@@ -198,6 +199,7 @@ export interface ChatMessage {
   routedTo?: Role | null;
   blocks?: UiBlock[];
   historySummary?: ChatHistorySummaryMeta | null;
+  usage?: TokenUsage | null;
 }
 
 export interface ChatRequest {
@@ -250,6 +252,11 @@ export type ChatStreamEvent =
       message: ChatMessage;
       conversationId: string | null;
       conversation?: ConversationSummary;
+    }
+  | {
+      type: "usage";
+      inputTokens: number;
+      outputTokens: number;
     }
   | {
       type: "error";
@@ -312,6 +319,10 @@ export type ToolResult = string | ToolImageResult;
 
 export interface ProviderExecutionRequest {
   modelId: string | null;
+  toolLoopLimit?: number | null;
+  /** Effective context window for this provider, resolved from settings + provider config.
+   *  Used by the driver for tool-loop compaction budget. */
+  contextWindowTokens?: number | null;
   promptStack: PromptStack;
   memoryContext?: MemoryPromptContext | null;
   procedureContext?: MemoryPromptContext | null;
@@ -323,8 +334,14 @@ export interface ProviderExecutionRequest {
   onToolCall?: (name: string, input: Record<string, unknown>) => Promise<ToolResult>;
 }
 
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+}
+
 export interface ProviderExecutionResult {
   content: string;
   modelId: string | null;
   thinking?: string | null;
+  usage?: TokenUsage | null;
 }

@@ -5,6 +5,9 @@ import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
 
 import {
+  compactConversationHistory,
+  deriveCompressionPromptBudget,
+  estimateTextTokens,
   type ChatAttachment,
   type ChatImageAttachment,
   type ChatTextAttachment,
@@ -80,20 +83,219 @@ async function buildProviderHttpError(
   return `${fallback} ${truncateToolText(bodyText, 280)}`;
 }
 
-const DEFAULT_PROVIDER_TOOL_LOOP_LIMIT = 30;
+const DEFAULT_PROVIDER_TOOL_LOOP_LIMIT = 200;
+const MAX_PROVIDER_TOOL_LOOP_LIMIT = 4_000;
+const DEFAULT_LOCAL_PROVIDER_CONTEXT_WINDOW_TOKENS = 16_000;
+const DEFAULT_REMOTE_PROVIDER_CONTEXT_WINDOW_TOKENS = 300_000;
+const TOOL_LOOP_ESTIMATED_TOKENS_PER_TURN = 180;
 
-function getProviderToolLoopLimit(): number {
+// ─── Tool loop repetition detection ──────────────────────────────────────────
+// Instead of hard-capping tool turns, monitor for repetitive patterns and
+// warn the agent before stopping. This lets productive agents keep working
+// while catching stuck loops.
+
+/** How many recent tool signatures to track for cycle detection. */
+const TOOL_LOOP_WINDOW_SIZE = 12;
+/** A cycle must repeat this many times before being flagged. */
+const TOOL_LOOP_CYCLE_THRESHOLD = 3;
+/** After this many warnings, force-stop the loop. */
+const TOOL_LOOP_MAX_WARNINGS = 2;
+
+/**
+ * Tracks tool call patterns during a provider tool loop and detects
+ * when the agent is stuck in a repetitive cycle.
+ *
+ * Detection: maintains a sliding window of tool call signatures.
+ * If any subsequence of length 1-4 repeats >= CYCLE_THRESHOLD times
+ * consecutively, a warning is issued. After MAX_WARNINGS warnings
+ * the monitor signals a hard stop.
+ */
+class ToolLoopMonitor {
+  private signatures: string[] = [];
+  private warningCount = 0;
+
+  /**
+   * Record a tool call. Returns null if no issue, or a feedback string
+   * if the agent appears stuck. Returns "stop" if it should be force-stopped.
+   */
+  record(signature: string): { action: "ok" } | { action: "warn"; message: string } | { action: "stop"; message: string } {
+    this.signatures.push(signature);
+
+    // Check for immediate duplicate (same tool+input back-to-back)
+    if (this.signatures.length >= 2 && this.signatures[this.signatures.length - 1] === this.signatures[this.signatures.length - 2]) {
+      return this.issueWarning(signature.split(":")[0] ?? "tool", "immediate duplicate");
+    }
+
+    // Check for cycles in the recent window
+    const window = this.signatures.slice(-TOOL_LOOP_WINDOW_SIZE);
+    const cycle = this.detectCycle(window);
+    if (cycle) {
+      const toolNames = cycle.map((s) => s.split(":")[0] ?? "tool");
+      return this.issueWarning(toolNames.join(" → "), "repeating cycle");
+    }
+
+    return { action: "ok" };
+  }
+
+  private issueWarning(pattern: string, kind: string): { action: "warn"; message: string } | { action: "stop"; message: string } {
+    this.warningCount++;
+    if (this.warningCount > TOOL_LOOP_MAX_WARNINGS) {
+      return {
+        action: "stop",
+        message: `Stopping: detected ${kind} (${pattern}) after ${this.warningCount} warnings. ` +
+          "Summarize your progress so far and respond with what you have.",
+      };
+    }
+    return {
+      action: "warn",
+      message: `Warning: you appear to be in a ${kind} (${pattern}). ` +
+        "Step back and try a different approach, or respond with what you have so far. " +
+        `(warning ${this.warningCount}/${TOOL_LOOP_MAX_WARNINGS})`,
+    };
+  }
+
+  /**
+   * Detect repeating subsequences of length 1-4 in the window.
+   * Returns the cycle pattern if found, null otherwise.
+   */
+  private detectCycle(window: string[]): string[] | null {
+    const len = window.length;
+    // Try cycle lengths from 1 to 4
+    for (let cycleLen = 1; cycleLen <= Math.min(4, Math.floor(len / TOOL_LOOP_CYCLE_THRESHOLD)); cycleLen++) {
+      const pattern = window.slice(len - cycleLen);
+      let repeats = 1;
+      for (let offset = len - cycleLen * 2; offset >= 0; offset -= cycleLen) {
+        const segment = window.slice(offset, offset + cycleLen);
+        if (segment.every((s, i) => s === pattern[i])) {
+          repeats++;
+        } else {
+          break;
+        }
+      }
+      if (repeats >= TOOL_LOOP_CYCLE_THRESHOLD) {
+        return pattern;
+      }
+    }
+    return null;
+  }
+}
+const LOOP_COMPACTION_SUMMARY_PREFIX = "Tool-loop memory summary (auto-compacted).";
+const LOOP_COMPACTION_SUMMARY_LINE_LIMIT = 20;
+const LOOP_MIN_RECENT_MESSAGES = 4;
+const LOOP_MAX_RECENT_MESSAGES = 20;
+const FINAL_ANSWER_NUDGE = "Based on the information above, please provide your final answer.";
+const FALLBACK_USER_QUERY_PROMPT = "Continue with the latest user request in this conversation.";
+
+function isLikelyLocalBaseUrl(baseUrl: string | undefined): boolean {
+  const trimmed = baseUrl?.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  try {
+    const url = new URL(trimmed);
+    const host = url.hostname.toLowerCase();
+    if (
+      host === "localhost" ||
+      host === "0.0.0.0" ||
+      host === "::1" ||
+      host === "127.0.0.1" ||
+      host === "host.docker.internal" ||
+      host.endsWith(".local")
+    ) {
+      return true;
+    }
+
+    if (/^10\./.test(host) || /^192\.168\./.test(host)) {
+      return true;
+    }
+
+    const private172 = host.match(/^172\.(\d{1,3})\./);
+    if (private172) {
+      const second = Number(private172[1]);
+      return second >= 16 && second <= 31;
+    }
+
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function resolveProviderToolContextWindowTokens(provider: Provider): number {
+  if (provider.typeId === "openai-compatible") {
+    const configured = Number(provider.config.contextWindowTokens ?? "");
+    if (Number.isFinite(configured) && configured > 0) {
+      return Math.floor(configured);
+    }
+
+    if (isLikelyLocalBaseUrl(provider.config.baseUrl)) {
+      return DEFAULT_LOCAL_PROVIDER_CONTEXT_WINDOW_TOKENS;
+    }
+  }
+
+  return DEFAULT_REMOTE_PROVIDER_CONTEXT_WINDOW_TOKENS;
+}
+
+function resolveProviderToolLoopPromptBudget(
+  provider: Provider,
+  requestContextWindow?: number | null,
+) {
+  // Prefer the context window resolved by the server (from settings + provider config),
+  // then fall back to the driver's own resolution.
+  const contextWindowTokens = (requestContextWindow && requestContextWindow > 0)
+    ? Math.floor(requestContextWindow)
+    : resolveProviderToolContextWindowTokens(provider);
+  // Scale headroom/safety with context size — small models can't afford 32% headroom.
+  const isSmallModel = contextWindowTokens < 50_000;
+  const responseHeadroomTokens = Math.max(512, Math.floor(contextWindowTokens * (isSmallModel ? 0.15 : 0.25)));
+  const safetyMarginTokens = Math.max(512, Math.floor(contextWindowTokens * (isSmallModel ? 0.05 : 0.08)));
+  const compressionBudget = deriveCompressionPromptBudget({
+    contextWindowTokens,
+    responseHeadroomTokens,
+    safetyMarginTokens,
+  });
+
+  return {
+    contextWindowTokens,
+    maxPromptTokens: compressionBudget.maxPromptTokens,
+    targetPromptTokens: compressionBudget.targetPromptTokens,
+  };
+}
+
+function getProviderToolLoopLimit(
+  provider: Provider,
+  requestedLimit: number | null | undefined,
+  contextWindowTokens?: number | null,
+): number {
   const raw = Number(process.env.EMBER_PROVIDER_TOOL_LOOP_LIMIT ?? "");
-  if (!Number.isFinite(raw)) {
-    return DEFAULT_PROVIDER_TOOL_LOOP_LIMIT;
+  if (Number.isFinite(raw)) {
+    const normalized = Math.floor(raw);
+    if (normalized === 0) {
+      return MAX_PROVIDER_TOOL_LOOP_LIMIT;
+    }
+    if (normalized > 0) {
+      return Math.max(1, Math.min(normalized, MAX_PROVIDER_TOOL_LOOP_LIMIT));
+    }
   }
 
-  const normalized = Math.floor(raw);
-  if (normalized < 1) {
-    return DEFAULT_PROVIDER_TOOL_LOOP_LIMIT;
+  const requested = Number(requestedLimit ?? "");
+  if (Number.isFinite(requested)) {
+    const normalized = Math.floor(requested);
+    if (normalized > 0) {
+      return Math.max(1, Math.min(normalized, MAX_PROVIDER_TOOL_LOOP_LIMIT));
+    }
   }
 
-  return Math.min(normalized, 100);
+  const promptBudget = resolveProviderToolLoopPromptBudget(provider, contextWindowTokens);
+  const adaptiveLimit = Math.floor(
+    promptBudget.maxPromptTokens / TOOL_LOOP_ESTIMATED_TOKENS_PER_TURN,
+  );
+
+  return Math.max(
+    DEFAULT_PROVIDER_TOOL_LOOP_LIMIT,
+    Math.min(adaptiveLimit, MAX_PROVIDER_TOOL_LOOP_LIMIT),
+  );
 }
 
 interface TextBasedToolCall {
@@ -254,6 +456,7 @@ interface ProviderStreamHandlers {
   onStatus?: (message: string) => void;
   onThinking?: (text: string) => void;
   onContent?: (text: string) => void;
+  onUsage?: (inputTokens: number, outputTokens: number) => void;
 }
 
 function stripAnsi(value: string): string {
@@ -891,6 +1094,563 @@ function formatCodexConversation(request: ProviderExecutionRequest): string {
   );
   const toolProtocol = buildCodexToolProtocol(request.tools ?? []);
   return [basePrompt, toolProtocol].filter(Boolean).join("\n\n");
+}
+
+function summarizeLoopText(value: string, limit = 180): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "";
+  }
+  return normalized.length > limit ? `${normalized.slice(0, limit - 1)}…` : normalized;
+}
+
+function buildLoopCompactionSummary(lines: string[], charBudget: number): string {
+  const seen = new Set<string>();
+  const deduped: string[] = [];
+  for (const line of lines) {
+    const normalized = summarizeLoopText(line, 220);
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    deduped.push(normalized);
+    if (deduped.length >= LOOP_COMPACTION_SUMMARY_LINE_LIMIT) {
+      break;
+    }
+  }
+
+  if (deduped.length === 0) {
+    return LOOP_COMPACTION_SUMMARY_PREFIX;
+  }
+
+  const summary = `${LOOP_COMPACTION_SUMMARY_PREFIX}\n${deduped.map((line) => `- ${line}`).join("\n")}`;
+  if (summary.length <= charBudget) {
+    return summary;
+  }
+  return `${summary.slice(0, Math.max(48, charBudget - 1)).trimEnd()}…`;
+}
+
+function summarizeOpenAiLoopMessage(message: unknown): string {
+  if (!message || typeof message !== "object") {
+    return "";
+  }
+  const record = message as Record<string, unknown>;
+  const role = typeof record.role === "string" ? record.role : "message";
+  const content = summarizeLoopText(extractTextContent(record.content), 160);
+  const toolCalls = Array.isArray(record.tool_calls)
+    ? record.tool_calls
+        .map((item) => {
+          if (!item || typeof item !== "object") {
+            return "";
+          }
+          const fn = (item as { function?: { name?: string } }).function;
+          return typeof fn?.name === "string" ? fn.name : "";
+        })
+        .filter(Boolean)
+    : [];
+  const toolSuffix = toolCalls.length > 0 ? ` tool_calls=${toolCalls.join(",")}` : "";
+  return `${role}${toolSuffix}: ${content || "(no text)"}`;
+}
+
+function summarizeAnthropicContent(content: unknown): string {
+  if (typeof content === "string") {
+    return summarizeLoopText(content, 160);
+  }
+  if (!Array.isArray(content)) {
+    return "";
+  }
+
+  const lines: string[] = [];
+  for (const block of content) {
+    if (!block || typeof block !== "object") {
+      continue;
+    }
+    const entry = block as Record<string, unknown>;
+    const type = typeof entry.type === "string" ? entry.type : "";
+    if (type === "text") {
+      lines.push(summarizeLoopText(typeof entry.text === "string" ? entry.text : "", 120));
+      continue;
+    }
+    if (type === "tool_use") {
+      const name = typeof entry.name === "string" ? entry.name : "tool";
+      lines.push(`tool_use ${name}`);
+      continue;
+    }
+    if (type === "tool_result") {
+      lines.push(`tool_result ${summarizeLoopText(extractTextContent(entry.content), 120) || "(no text)"}`);
+    }
+  }
+
+  return lines.filter(Boolean).join(" | ");
+}
+
+function summarizeAnthropicLoopMessage(message: unknown): string {
+  if (!message || typeof message !== "object") {
+    return "";
+  }
+  const record = message as Record<string, unknown>;
+  const role = typeof record.role === "string" ? record.role : "message";
+  const content = summarizeAnthropicContent(record.content);
+  return `${role}: ${content || "(no text)"}`;
+}
+
+function getMessageRole(message: unknown): string {
+  if (!message || typeof message !== "object") {
+    return "";
+  }
+  const role = (message as { role?: unknown }).role;
+  return typeof role === "string" ? role : "";
+}
+
+function isToolResponseEnvelope(content: string): boolean {
+  return /^<tool_response>\s*[\s\S]*<\/tool_response>$/i.test(content.trim());
+}
+
+function isRealUserQueryText(content: string): boolean {
+  const normalized = content.trim();
+  if (!normalized) {
+    return false;
+  }
+  if (normalized === FINAL_ANSWER_NUDGE) {
+    return false;
+  }
+  if (isToolResponseEnvelope(normalized)) {
+    return false;
+  }
+  return true;
+}
+
+function extractAnthropicTextContent(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (!Array.isArray(value)) {
+    return "";
+  }
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") {
+        return "";
+      }
+      const entry = item as Record<string, unknown>;
+      return entry.type === "text" && typeof entry.text === "string" ? entry.text : "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+function findLastOpenAiUserQueryText(messages: unknown[]): string | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (getMessageRole(message) !== "user") {
+      continue;
+    }
+    const content = extractTextContent((message as { content?: unknown }).content);
+    if (isRealUserQueryText(content)) {
+      return summarizeLoopText(content, 480);
+    }
+  }
+  return null;
+}
+
+function hasOpenAiUserQuery(messages: unknown[]): boolean {
+  return messages.some((message) => {
+    if (getMessageRole(message) !== "user") {
+      return false;
+    }
+    return isRealUserQueryText(extractTextContent((message as { content?: unknown }).content));
+  });
+}
+
+function hasOpenAiPlainTextUserQuery(messages: unknown[]): boolean {
+  return messages.some((message) => {
+    if (getMessageRole(message) !== "user") {
+      return false;
+    }
+    const content = (message as { content?: unknown }).content;
+    return typeof content === "string" && isRealUserQueryText(content);
+  });
+}
+
+function getLastOpenAiUserMessage(messages: unknown[]): { content?: unknown } | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (getMessageRole(message) !== "user" || !message || typeof message !== "object") {
+      continue;
+    }
+    return message as { content?: unknown };
+  }
+  return null;
+}
+
+function normalizeFallbackUserQueryText(fallbackUserQueryText: string | null): string {
+  const normalized = fallbackUserQueryText?.trim() ?? "";
+  return isRealUserQueryText(normalized) ? normalized : FALLBACK_USER_QUERY_PROMPT;
+}
+
+function ensureOpenAiHasUserQuery(messages: unknown[], fallbackUserQueryText: string | null): unknown[] {
+  const fallbackText = normalizeFallbackUserQueryText(fallbackUserQueryText);
+  let ensured = messages;
+
+  // Some OpenAI-compatible Jinja templates require at least one plain-text user query.
+  if (!hasOpenAiUserQuery(ensured) || !hasOpenAiPlainTextUserQuery(ensured)) {
+    const insertIndex = getMessageRole(ensured[0]) === "system" ? 1 : 0;
+    ensured = [...ensured];
+    ensured.splice(insertIndex, 0, {
+      role: "user",
+      content: fallbackText,
+    });
+  }
+
+  const lastUser = getLastOpenAiUserMessage(ensured);
+  const lastUserHasPlainTextQuery =
+    typeof lastUser?.content === "string" && isRealUserQueryText(lastUser.content);
+
+  // Keep the latest user message as a real plain-text query for strict templates
+  // that inspect only the most recent user turn when tools are enabled.
+  if (!lastUserHasPlainTextQuery) {
+    ensured = [...ensured, { role: "user", content: fallbackText }];
+  }
+
+  return ensured;
+}
+
+function findLastAnthropicUserQueryText(messages: unknown[]): string | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (getMessageRole(message) !== "user") {
+      continue;
+    }
+    const content = extractAnthropicTextContent((message as { content?: unknown }).content);
+    if (isRealUserQueryText(content)) {
+      return summarizeLoopText(content, 480);
+    }
+  }
+  return null;
+}
+
+function hasAnthropicUserQuery(messages: unknown[]): boolean {
+  return messages.some((message) => {
+    if (getMessageRole(message) !== "user") {
+      return false;
+    }
+    return isRealUserQueryText(extractAnthropicTextContent((message as { content?: unknown }).content));
+  });
+}
+
+function ensureAnthropicHasUserQuery(messages: unknown[], fallbackUserQueryText: string | null): unknown[] {
+  if (hasAnthropicUserQuery(messages)) {
+    return messages;
+  }
+
+  return [
+    {
+      role: "user",
+      content: fallbackUserQueryText?.trim() || FALLBACK_USER_QUERY_PROMPT,
+    },
+    ...messages,
+  ];
+}
+
+function estimateOpenAiPromptTokensForLoop(
+  messages: unknown[],
+  tools: ToolDefinition[] | undefined,
+): number {
+  const payload: Record<string, unknown> = { messages };
+  if (tools?.length) {
+    payload.tools = tools.map((tool) => ({
+      type: "function",
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.inputSchema,
+      },
+    }));
+  }
+  return estimateTextTokens(JSON.stringify(payload));
+}
+
+function compactOpenAiMessagesForLoop(options: {
+  messages: unknown[];
+  tools: ToolDefinition[] | undefined;
+  promptBudget: { maxPromptTokens: number; targetPromptTokens: number };
+}): { messages: unknown[]; didCompact: boolean; beforeTokens: number; afterTokens: number } {
+  const fallbackUserQueryText = findLastOpenAiUserQueryText(options.messages);
+  const beforeTokens = estimateOpenAiPromptTokensForLoop(options.messages, options.tools);
+  if (beforeTokens <= options.promptBudget.targetPromptTokens) {
+    const ensured = ensureOpenAiHasUserQuery(options.messages, fallbackUserQueryText);
+    const afterTokens = ensured === options.messages
+      ? beforeTokens
+      : estimateOpenAiPromptTokensForLoop(ensured, options.tools);
+    return { messages: ensured, didCompact: ensured !== options.messages, beforeTokens, afterTokens };
+  }
+
+  const source = [...options.messages];
+  const hasSystemLead =
+    source.length > 0 &&
+    typeof (source[0] as { role?: unknown })?.role === "string" &&
+    (source[0] as { role: string }).role === "system";
+  const lead = hasSystemLead ? [source[0]] : [];
+  let working = hasSystemLead ? source.slice(1) : source.slice();
+  let keepRecent = Math.max(
+    LOOP_MIN_RECENT_MESSAGES,
+    Math.min(LOOP_MAX_RECENT_MESSAGES, Math.floor(options.promptBudget.targetPromptTokens / 700)),
+  );
+  let summaryCharBudget = Math.max(900, Math.floor(options.promptBudget.targetPromptTokens * 1.6));
+  let didCompact = false;
+
+  while (working.length > keepRecent + 1) {
+    const splitIndex = Math.max(1, working.length - keepRecent);
+    const older = working.slice(0, splitIndex);
+    const recent = working.slice(splitIndex);
+    const summary = buildLoopCompactionSummary(
+      older.map((message) => summarizeOpenAiLoopMessage(message)).filter(Boolean).reverse(),
+      summaryCharBudget,
+    );
+    working = [{ role: "assistant", content: summary }, ...recent];
+    didCompact = true;
+
+    const candidate = [...lead, ...working];
+    const candidateTokens = estimateOpenAiPromptTokensForLoop(candidate, options.tools);
+    if (candidateTokens <= options.promptBudget.targetPromptTokens) {
+      const ensured = ensureOpenAiHasUserQuery(candidate, fallbackUserQueryText);
+      const afterTokens = ensured === candidate
+        ? candidateTokens
+        : estimateOpenAiPromptTokensForLoop(ensured, options.tools);
+      return {
+        messages: ensured,
+        didCompact: didCompact || ensured !== candidate,
+        beforeTokens,
+        afterTokens,
+      };
+    }
+
+    if (keepRecent > LOOP_MIN_RECENT_MESSAGES) {
+      keepRecent = Math.max(LOOP_MIN_RECENT_MESSAGES, keepRecent - 2);
+      continue;
+    }
+    if (summaryCharBudget > 480) {
+      summaryCharBudget = Math.max(480, summaryCharBudget - 220);
+      continue;
+    }
+    break;
+  }
+
+  const compacted = [...lead, ...working];
+  let afterTokens = estimateOpenAiPromptTokensForLoop(compacted, options.tools);
+  if (afterTokens > options.promptBudget.maxPromptTokens && compacted.length > LOOP_MIN_RECENT_MESSAGES + 1) {
+    const aggressivelyTrimmed = [...compacted];
+    while (aggressivelyTrimmed.length > LOOP_MIN_RECENT_MESSAGES + 1) {
+      aggressivelyTrimmed.splice(1, 1);
+      didCompact = true;
+      afterTokens = estimateOpenAiPromptTokensForLoop(aggressivelyTrimmed, options.tools);
+      if (afterTokens <= options.promptBudget.targetPromptTokens) {
+        break;
+      }
+      if (afterTokens <= options.promptBudget.maxPromptTokens) {
+        break;
+      }
+    }
+    const ensured = ensureOpenAiHasUserQuery(aggressivelyTrimmed, fallbackUserQueryText);
+    const ensuredTokens = ensured === aggressivelyTrimmed
+      ? afterTokens
+      : estimateOpenAiPromptTokensForLoop(ensured, options.tools);
+    return {
+      messages: ensured,
+      didCompact: didCompact || ensured !== aggressivelyTrimmed,
+      beforeTokens,
+      afterTokens: ensuredTokens,
+    };
+  }
+
+  const ensured = ensureOpenAiHasUserQuery(compacted, fallbackUserQueryText);
+  const ensuredTokens = ensured === compacted
+    ? afterTokens
+    : estimateOpenAiPromptTokensForLoop(ensured, options.tools);
+  return {
+    messages: ensured,
+    didCompact: didCompact || ensured !== compacted,
+    beforeTokens,
+    afterTokens: ensuredTokens,
+  };
+}
+
+function estimateAnthropicPromptTokensForLoop(options: {
+  systemPrompt: string;
+  messages: unknown[];
+  tools: ToolDefinition[] | undefined;
+}): number {
+  const payload: Record<string, unknown> = {
+    system: options.systemPrompt,
+    messages: options.messages,
+  };
+  if (options.tools?.length) {
+    payload.tools = options.tools.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      input_schema: tool.inputSchema,
+    }));
+  }
+  return estimateTextTokens(JSON.stringify(payload));
+}
+
+function compactAnthropicMessagesForLoop(options: {
+  systemPrompt: string;
+  messages: unknown[];
+  tools: ToolDefinition[] | undefined;
+  promptBudget: { maxPromptTokens: number; targetPromptTokens: number };
+}): { messages: unknown[]; didCompact: boolean; beforeTokens: number; afterTokens: number } {
+  const fallbackUserQueryText = findLastAnthropicUserQueryText(options.messages);
+  const beforeTokens = estimateAnthropicPromptTokensForLoop({
+    systemPrompt: options.systemPrompt,
+    messages: options.messages,
+    tools: options.tools,
+  });
+  if (beforeTokens <= options.promptBudget.targetPromptTokens) {
+    const ensured = ensureAnthropicHasUserQuery(options.messages, fallbackUserQueryText);
+    const afterTokens = ensured === options.messages
+      ? beforeTokens
+      : estimateAnthropicPromptTokensForLoop({
+          systemPrompt: options.systemPrompt,
+          messages: ensured,
+          tools: options.tools,
+        });
+    return { messages: ensured, didCompact: ensured !== options.messages, beforeTokens, afterTokens };
+  }
+
+  let working = [...options.messages];
+  let keepRecent = Math.max(
+    LOOP_MIN_RECENT_MESSAGES,
+    Math.min(LOOP_MAX_RECENT_MESSAGES, Math.floor(options.promptBudget.targetPromptTokens / 700)),
+  );
+  let summaryCharBudget = Math.max(900, Math.floor(options.promptBudget.targetPromptTokens * 1.6));
+  let didCompact = false;
+
+  while (working.length > keepRecent + 1) {
+    const splitIndex = Math.max(1, working.length - keepRecent);
+    const older = working.slice(0, splitIndex);
+    const recent = working.slice(splitIndex);
+    const summary = buildLoopCompactionSummary(
+      older.map((message) => summarizeAnthropicLoopMessage(message)).filter(Boolean).reverse(),
+      summaryCharBudget,
+    );
+    working = [{ role: "user", content: summary }, ...recent];
+    didCompact = true;
+
+    const candidateTokens = estimateAnthropicPromptTokensForLoop({
+      systemPrompt: options.systemPrompt,
+      messages: working,
+      tools: options.tools,
+    });
+    if (candidateTokens <= options.promptBudget.targetPromptTokens) {
+      const ensured = ensureAnthropicHasUserQuery(working, fallbackUserQueryText);
+      const afterTokens = ensured === working
+        ? candidateTokens
+        : estimateAnthropicPromptTokensForLoop({
+            systemPrompt: options.systemPrompt,
+            messages: ensured,
+            tools: options.tools,
+          });
+      return {
+        messages: ensured,
+        didCompact: didCompact || ensured !== working,
+        beforeTokens,
+        afterTokens,
+      };
+    }
+
+    if (keepRecent > LOOP_MIN_RECENT_MESSAGES) {
+      keepRecent = Math.max(LOOP_MIN_RECENT_MESSAGES, keepRecent - 2);
+      continue;
+    }
+    if (summaryCharBudget > 480) {
+      summaryCharBudget = Math.max(480, summaryCharBudget - 220);
+      continue;
+    }
+    break;
+  }
+
+  let afterTokens = estimateAnthropicPromptTokensForLoop({
+    systemPrompt: options.systemPrompt,
+    messages: working,
+    tools: options.tools,
+  });
+
+  if (afterTokens > options.promptBudget.maxPromptTokens && working.length > LOOP_MIN_RECENT_MESSAGES + 1) {
+    const aggressivelyTrimmed = [...working];
+    while (aggressivelyTrimmed.length > LOOP_MIN_RECENT_MESSAGES + 1) {
+      aggressivelyTrimmed.splice(1, 1);
+      didCompact = true;
+      afterTokens = estimateAnthropicPromptTokensForLoop({
+        systemPrompt: options.systemPrompt,
+        messages: aggressivelyTrimmed,
+        tools: options.tools,
+      });
+      if (afterTokens <= options.promptBudget.targetPromptTokens) {
+        break;
+      }
+      if (afterTokens <= options.promptBudget.maxPromptTokens) {
+        break;
+      }
+    }
+    const ensured = ensureAnthropicHasUserQuery(aggressivelyTrimmed, fallbackUserQueryText);
+    const ensuredTokens = ensured === aggressivelyTrimmed
+      ? afterTokens
+      : estimateAnthropicPromptTokensForLoop({
+          systemPrompt: options.systemPrompt,
+          messages: ensured,
+          tools: options.tools,
+        });
+    return {
+      messages: ensured,
+      didCompact: didCompact || ensured !== aggressivelyTrimmed,
+      beforeTokens,
+      afterTokens: ensuredTokens,
+    };
+  }
+
+  const ensured = ensureAnthropicHasUserQuery(working, fallbackUserQueryText);
+  const ensuredTokens = ensured === working
+    ? afterTokens
+    : estimateAnthropicPromptTokensForLoop({
+        systemPrompt: options.systemPrompt,
+        messages: ensured,
+        tools: options.tools,
+      });
+  return {
+    messages: ensured,
+    didCompact: didCompact || ensured !== working,
+    beforeTokens,
+    afterTokens: ensuredTokens,
+  };
+}
+
+function compactCodexConversationForLoop(options: {
+  conversation: ChatMessage[];
+  content: string;
+  request: ProviderExecutionRequest;
+  promptBudget: { maxPromptTokens: number; targetPromptTokens: number };
+}): ReturnType<typeof compactConversationHistory> {
+  const extraPromptTokens = estimateTextTokens(
+    [
+      options.request.memoryContext?.text ?? "",
+      options.request.procedureContext?.text ?? "",
+      buildCodexToolProtocol(options.request.tools ?? []),
+    ]
+      .filter(Boolean)
+      .join("\n\n"),
+  );
+
+  return compactConversationHistory(options.conversation, {
+    enabled: true,
+    maxPromptTokens: options.promptBudget.maxPromptTokens,
+    targetPromptTokens: options.promptBudget.targetPromptTokens,
+    preserveRecentMessages: 8,
+    minimumRecentMessages: 4,
+    promptStack: options.request.promptStack,
+    currentUserContent: options.content,
+    extraPromptTokens,
+  });
 }
 
 function parseCodexToolCall(content: string): { call: ParsedCliToolCall | null; error: string | null } {
@@ -1546,11 +2306,25 @@ async function executeCodexCli(
   let currentContent = request.content;
   let lastContent = "";
   let modelId = request.modelId?.trim() || provider.config.defaultModelId?.trim() || null;
-  let lastToolSignature: string | null = null;
   let lastToolResultText = "";
-  const maxToolTurns = getProviderToolLoopLimit();
+  const promptBudget = resolveProviderToolLoopPromptBudget(provider, request.contextWindowTokens);
+  const maxToolTurns = getProviderToolLoopLimit(provider, request.toolLoopLimit, request.contextWindowTokens);
+  const monitor = new ToolLoopMonitor();
+  let reportedCompaction = false;
 
   for (let turn = 0; turn < maxToolTurns; turn++) {
+    const compactedConversation = compactCodexConversationForLoop({
+      conversation,
+      content: currentContent,
+      request,
+      promptBudget,
+    });
+    if (compactedConversation.didCompact && !reportedCompaction) {
+      handlers?.onStatus?.("Compacting tool-loop history to stay within context window...");
+      reportedCompaction = true;
+    }
+    conversation = compactedConversation.messages;
+
     const result = await runCodexCliTurn(provider, {
       ...request,
       conversation,
@@ -1581,21 +2355,23 @@ async function executeCodexCli(
 
     handlers?.onStatus?.(`Tool: ${parsed.call!.name}`);
     const toolSignature = buildToolCallSignature(parsed.call!.name, parsed.call!.input);
-    if (toolSignature === lastToolSignature) {
-      currentContent = [
-        `You just called ${parsed.call!.name} with the same input and already received its result.`,
-        "Do not repeat the same tool call immediately.",
-        "Continue using the existing result, or choose a different tool if you need more information.",
-        "",
-        `Previous result for ${parsed.call!.name}:`,
-        truncateToolText(lastToolResultText),
-      ].join("\n");
+    const loopCheck = monitor.record(toolSignature);
+    if (loopCheck.action === "stop") {
+      currentContent = loopCheck.message;
+      conversation.push(buildSyntheticCliMessage("user", currentContent, request));
+      // Give the model one last chance to respond with what it has
+      const finalResult = await runCodexCliTurn(provider, { ...request, conversation, content: currentContent }, handlers);
+      if (finalResult.content.trim()) return finalResult;
+      break;
+    }
+    if (loopCheck.action === "warn") {
+      // Don't execute the duplicate tool — feed back the warning
+      currentContent = loopCheck.message;
       conversation.push(buildSyntheticCliMessage("user", currentContent, request));
       continue;
     }
 
     const toolResult = await request.onToolCall(parsed.call!.name, parsed.call!.input);
-    lastToolSignature = toolSignature;
     lastToolResultText = toolResultToText(toolResult);
     currentContent = `Tool result for ${parsed.call!.name}:\n${lastToolResultText}`;
     conversation.push(buildSyntheticCliMessage("user", currentContent, request));
@@ -1605,7 +2381,10 @@ async function executeCodexCli(
     return { content: lastContent, modelId };
   }
 
-  throw new Error(`Codex tool loop reached the turn limit (${maxToolTurns}) without a final response.`);
+  throw new Error(
+    `Codex tool loop reached the turn limit (${maxToolTurns}) without a final response. ` +
+    "Increase Settings → Context Compression → Tool loop limit, or set EMBER_PROVIDER_TOOL_LOOP_LIMIT (0 = very high cap).",
+  );
 }
 
 async function streamCodexCli(
@@ -1655,11 +2434,18 @@ async function executeOpenAiCompatible(
 
   let lastTextContent = "";
   let nudged = false;
-  let lastToolSignature: string | null = null;
   let lastToolResultText = "";
-  const maxToolTurns = getProviderToolLoopLimit();
+  const promptBudget = resolveProviderToolLoopPromptBudget(provider, request.contextWindowTokens);
+  const maxToolTurns = getProviderToolLoopLimit(provider, request.toolLoopLimit, request.contextWindowTokens);
+  const monitor = new ToolLoopMonitor();
 
   for (let turn = 0; turn < maxToolTurns; turn++) {
+    messages = compactOpenAiMessagesForLoop({
+      messages,
+      tools: request.tools,
+      promptBudget,
+    }).messages;
+
     const body: Record<string, unknown> = { model: modelId, messages };
 
     if (request.tools?.length) {
@@ -1715,18 +2501,15 @@ async function executeOpenAiCompatible(
           const toolMessages: unknown[] = [];
           for (const tc of textCalls) {
             const toolSignature = buildToolCallSignature(tc.name, tc.args);
-            const toolResultText = toolSignature === lastToolSignature
-              ? [
-                  `You just called ${tc.name} with the same input and already received its result.`,
-                  "Do not repeat the same tool call immediately.",
-                  "Continue using the existing result, or provide the final answer.",
-                  "",
-                  `Previous result for ${tc.name}:`,
-                  truncateToolText(lastToolResultText),
-                ].join("\n")
+            const loopCheck = monitor.record(toolSignature);
+            if (loopCheck.action === "stop") {
+              if (lastTextContent.trim()) return { content: lastTextContent, modelId };
+              return { content: loopCheck.message, modelId };
+            }
+            const toolResultText = loopCheck.action === "warn"
+              ? loopCheck.message
               : toolResultToText(await request.onToolCall(tc.name, tc.args));
-            if (toolSignature !== lastToolSignature) {
-              lastToolSignature = toolSignature;
+            if (loopCheck.action === "ok") {
               lastToolResultText = toolResultText;
             }
             toolMessages.push({ role: "user", content: `<tool_response>\n${toolResultText}\n</tool_response>` });
@@ -1743,7 +2526,7 @@ async function executeOpenAiCompatible(
           nudged = true;
           messages = [
             ...messages,
-            { role: "user", content: "Based on the information above, please provide your final answer." },
+            { role: "user", content: FINAL_ANSWER_NUDGE },
           ];
           continue;
         }
@@ -1761,18 +2544,15 @@ async function executeOpenAiCompatible(
       // Leave input empty on parse failure.
     }
     const toolSignature = buildToolCallSignature(toolCall.function.name, toolInput);
-    const toolResultText = toolSignature === lastToolSignature
-      ? [
-          `You just called ${toolCall.function.name} with the same input and already received its result.`,
-          "Do not repeat the same tool call immediately.",
-          "Continue using the existing result, or provide the final answer.",
-          "",
-          `Previous result for ${toolCall.function.name}:`,
-          truncateToolText(lastToolResultText),
-        ].join("\n")
-      : toolResultToText(await request.onToolCall(toolCall.function.name, toolInput));
-    if (toolSignature !== lastToolSignature) {
-      lastToolSignature = toolSignature;
+    const loopCheck = monitor.record(toolSignature);
+    let toolResultText: string;
+    if (loopCheck.action === "stop") {
+      if (lastTextContent.trim()) return { content: lastTextContent, modelId };
+      return { content: loopCheck.message, modelId };
+    } else if (loopCheck.action === "warn") {
+      toolResultText = loopCheck.message;
+    } else {
+      toolResultText = toolResultToText(await request.onToolCall(toolCall.function.name, toolInput));
       lastToolResultText = toolResultText;
     }
     messages = [
@@ -1785,7 +2565,10 @@ async function executeOpenAiCompatible(
 
   // Turn limit reached — return the last text the model produced, if any.
   if (lastTextContent.trim()) return { content: lastTextContent, modelId };
-  throw new Error(`Tool call limit reached without a final response after ${maxToolTurns} tool turns.`);
+  throw new Error(
+    `Tool call limit reached without a final response after ${maxToolTurns} tool turns. ` +
+    "Increase Settings → Context Compression → Tool loop limit, or set EMBER_PROVIDER_TOOL_LOOP_LIMIT (0 = very high cap).",
+  );
 }
 
 async function streamOpenAiCompatible(
@@ -1822,14 +2605,34 @@ async function streamOpenAiCompatible(
   );
   let totalContent = "";
   let totalThinking = "";
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
   let nudged = false;
-  let lastToolSignature: string | null = null;
   let lastToolResultText = "";
-  const maxToolTurns = getProviderToolLoopLimit();
+  const promptBudget = resolveProviderToolLoopPromptBudget(provider, request.contextWindowTokens);
+  const maxToolTurns = getProviderToolLoopLimit(provider, request.toolLoopLimit, request.contextWindowTokens);
+  const monitor = new ToolLoopMonitor();
+  let reportedCompaction = false;
   handlers.onStatus?.("Streaming response...");
 
   for (let turn = 0; turn < maxToolTurns; turn++) {
-    const body: Record<string, unknown> = { model: modelId, stream: true, messages };
+    const compacted = compactOpenAiMessagesForLoop({
+      messages,
+      tools: request.tools,
+      promptBudget,
+    });
+    if (compacted.didCompact && !reportedCompaction) {
+      handlers.onStatus?.("Compacting tool-loop history to stay within context window...");
+      reportedCompaction = true;
+    }
+    messages = compacted.messages;
+
+    const body: Record<string, unknown> = {
+      model: modelId,
+      stream: true,
+      stream_options: { include_usage: true },
+      messages,
+    };
 
     if (request.tools?.length) {
       body.tools = request.tools.map((t) => ({
@@ -1881,7 +2684,17 @@ async function streamOpenAiCompatible(
               delta?: Record<string, unknown>;
               finish_reason?: string | null;
             }>;
+            usage?: {
+              prompt_tokens?: number;
+              completion_tokens?: number;
+            };
           };
+
+          // OpenAI sends usage in a final chunk when stream_options.include_usage is set
+          if (payload.usage) {
+            if (payload.usage.prompt_tokens) totalInputTokens += payload.usage.prompt_tokens;
+            if (payload.usage.completion_tokens) totalOutputTokens += payload.usage.completion_tokens;
+          }
 
           const choice = payload.choices?.[0];
           if (choice?.finish_reason) finishReason = choice.finish_reason;
@@ -1935,6 +2748,11 @@ async function streamOpenAiCompatible(
 
     totalContent += turnContent;
 
+    // Emit usage after each turn
+    if ((totalInputTokens > 0 || totalOutputTokens > 0) && handlers.onUsage) {
+      handlers.onUsage(totalInputTokens, totalOutputTokens);
+    }
+
     const toolCalls = Object.values(toolCallAcc);
     if (finishReason !== "tool_calls" || !toolCalls.length || !request.onToolCall) {
       // Fallback: parse text-based tool calls for models that don't use the OpenAI protocol.
@@ -1948,18 +2766,19 @@ async function streamOpenAiCompatible(
           for (const tc of textCalls) {
             handlers.onStatus?.(`Tool: ${tc.name}`);
             const toolSignature = buildToolCallSignature(tc.name, tc.args);
-            const toolResultText = toolSignature === lastToolSignature
-              ? [
-                  `You just called ${tc.name} with the same input and already received its result.`,
-                  "Do not repeat the same tool call immediately.",
-                  "Continue using the existing result, or provide the final answer.",
-                  "",
-                  `Previous result for ${tc.name}:`,
-                  truncateToolText(lastToolResultText),
-                ].join("\n")
+            const loopCheck = monitor.record(toolSignature);
+            if (loopCheck.action === "stop") {
+              if (totalContent.trim()) {
+                const cleanThinking = stripTextToolCalls(totalThinking).trim();
+                const usage = (totalInputTokens > 0 || totalOutputTokens > 0) ? { inputTokens: totalInputTokens, outputTokens: totalOutputTokens } : null;
+                return { content: totalContent, modelId, thinking: cleanThinking || null, usage };
+              }
+              return { content: loopCheck.message, modelId };
+            }
+            const toolResultText = loopCheck.action === "warn"
+              ? loopCheck.message
               : toolResultToText(await request.onToolCall(tc.name, tc.args));
-            if (toolSignature !== lastToolSignature) {
-              lastToolSignature = toolSignature;
+            if (loopCheck.action === "ok") {
               lastToolResultText = toolResultText;
             }
             toolMessages.push({ role: "user", content: `<tool_response>\n${toolResultText}\n</tool_response>` });
@@ -1975,14 +2794,17 @@ async function streamOpenAiCompatible(
           nudged = true;
           messages = [
             ...messages,
-            { role: "user", content: "Based on the information above, please provide your final answer." },
+            { role: "user", content: FINAL_ANSWER_NUDGE },
           ];
           continue;
         }
         throw new Error("Provider returned an empty completion.");
       }
       const cleanThinking = stripTextToolCalls(totalThinking).trim();
-      return { content: totalContent, modelId, thinking: cleanThinking || null };
+      const usage = (totalInputTokens > 0 || totalOutputTokens > 0)
+        ? { inputTokens: totalInputTokens, outputTokens: totalOutputTokens }
+        : null;
+      return { content: totalContent, modelId, thinking: cleanThinking || null, usage };
     }
 
     // Append assistant message with tool_calls, then execute each tool.
@@ -2002,18 +2824,20 @@ async function streamOpenAiCompatible(
       try { input = JSON.parse(tc.arguments); } catch { /* leave empty on parse failure */ }
       handlers.onStatus?.(`Tool: ${tc.name}`);
       const toolSignature = buildToolCallSignature(tc.name, input);
-      const toolResultText = toolSignature === lastToolSignature
-        ? [
-            `You just called ${tc.name} with the same input and already received its result.`,
-            "Do not repeat the same tool call immediately.",
-            "Continue using the existing result, or provide the final answer.",
-            "",
-            `Previous result for ${tc.name}:`,
-            truncateToolText(lastToolResultText),
-          ].join("\n")
-        : toolResultToText(await request.onToolCall(tc.name, input));
-      if (toolSignature !== lastToolSignature) {
-        lastToolSignature = toolSignature;
+      const loopCheck = monitor.record(toolSignature);
+      if (loopCheck.action === "stop") {
+        if (totalContent.trim()) {
+          const cleanThinking = stripTextToolCalls(totalThinking).trim();
+          const usage = (totalInputTokens > 0 || totalOutputTokens > 0) ? { inputTokens: totalInputTokens, outputTokens: totalOutputTokens } : null;
+          return { content: totalContent, modelId, thinking: cleanThinking || null, usage };
+        }
+        return { content: loopCheck.message, modelId };
+      }
+      let toolResultText: string;
+      if (loopCheck.action === "warn") {
+        toolResultText = loopCheck.message;
+      } else {
+        toolResultText = toolResultToText(await request.onToolCall(tc.name, input));
         lastToolResultText = toolResultText;
       }
       toolMessages.push({ role: "tool", tool_call_id: tc.id, content: toolResultText });
@@ -2026,9 +2850,15 @@ async function streamOpenAiCompatible(
   // Turn limit reached — return whatever the model streamed so far.
   if (totalContent.trim()) {
     const cleanThinking = stripTextToolCalls(totalThinking).trim();
-    return { content: totalContent, modelId, thinking: cleanThinking || null };
+    const usage = (totalInputTokens > 0 || totalOutputTokens > 0)
+      ? { inputTokens: totalInputTokens, outputTokens: totalOutputTokens }
+      : null;
+    return { content: totalContent, modelId, thinking: cleanThinking || null, usage };
   }
-  throw new Error(`Tool call limit reached without a final response after ${maxToolTurns} tool turns.`);
+  throw new Error(
+    `Tool call limit reached without a final response after ${maxToolTurns} tool turns. ` +
+    "Increase Settings → Context Compression → Tool loop limit, or set EMBER_PROVIDER_TOOL_LOOP_LIMIT (0 = very high cap).",
+  );
 }
 
 async function executeAnthropic(
@@ -2055,9 +2885,18 @@ async function executeAnthropic(
   let messages: unknown[] = toAnthropicMessages(request.conversation, request.content);
   let lastTextContent = "";
   let nudged = false;
-  const maxToolTurns = getProviderToolLoopLimit();
+  const promptBudget = resolveProviderToolLoopPromptBudget(provider, request.contextWindowTokens);
+  const maxToolTurns = getProviderToolLoopLimit(provider, request.toolLoopLimit, request.contextWindowTokens);
+  const monitor = new ToolLoopMonitor();
 
   for (let turn = 0; turn < maxToolTurns; turn++) {
+    messages = compactAnthropicMessagesForLoop({
+      systemPrompt,
+      messages,
+      tools: request.tools,
+      promptBudget,
+    }).messages;
+
     const body: Record<string, unknown> = {
       model: modelId,
       system: systemPrompt,
@@ -2105,13 +2944,38 @@ async function executeAnthropic(
           nudged = true;
           messages = [
             ...messages,
-            { role: "user", content: "Based on the information above, please provide your final answer." },
+            { role: "user", content: FINAL_ANSWER_NUDGE },
           ];
           continue;
         }
         throw new Error("Provider returned an empty completion.");
       }
       return { content: lastTextContent, modelId };
+    }
+
+    // Check for repetition before executing the tool.
+    const toolSignature = buildToolCallSignature(toolUseBlock.name!, toolUseBlock.input ?? {});
+    const loopCheck = monitor.record(toolSignature);
+    if (loopCheck.action === "stop") {
+      if (lastTextContent.trim()) return { content: lastTextContent, modelId };
+      return { content: loopCheck.message, modelId };
+    }
+    if (loopCheck.action === "warn") {
+      messages = [
+        ...messages,
+        { role: "assistant", content: payload.content },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: toolUseBlock.id,
+              content: loopCheck.message,
+            },
+          ],
+        },
+      ];
+      continue;
     }
 
     // Execute tool and loop back with result.
@@ -2134,7 +2998,10 @@ async function executeAnthropic(
 
   // Turn limit reached — return the last text the model produced, if any.
   if (lastTextContent.trim()) return { content: lastTextContent, modelId };
-  throw new Error(`Tool call limit reached without a final response after ${maxToolTurns} tool turns.`);
+  throw new Error(
+    `Tool call limit reached without a final response after ${maxToolTurns} tool turns. ` +
+    "Increase Settings → Context Compression → Tool loop limit, or set EMBER_PROVIDER_TOOL_LOOP_LIMIT (0 = very high cap).",
+  );
 }
 
 async function streamAnthropic(
@@ -2162,11 +3029,28 @@ async function streamAnthropic(
   let messages: unknown[] = toAnthropicMessages(request.conversation, request.content);
   let totalContent = "";
   let totalThinking = "";
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
   let nudged = false;
-  const maxToolTurns = getProviderToolLoopLimit();
+  const promptBudget = resolveProviderToolLoopPromptBudget(provider, request.contextWindowTokens);
+  const maxToolTurns = getProviderToolLoopLimit(provider, request.toolLoopLimit, request.contextWindowTokens);
+  const monitor = new ToolLoopMonitor();
+  let reportedCompaction = false;
   handlers.onStatus?.("Streaming response...");
 
   for (let turn = 0; turn < maxToolTurns; turn++) {
+    const compacted = compactAnthropicMessagesForLoop({
+      systemPrompt,
+      messages,
+      tools: request.tools,
+      promptBudget,
+    });
+    if (compacted.didCompact && !reportedCompaction) {
+      handlers.onStatus?.("Compacting tool-loop history to stay within context window...");
+      reportedCompaction = true;
+    }
+    messages = compacted.messages;
+
     const body: Record<string, unknown> = {
       model: modelId,
       stream: true,
@@ -2220,7 +3104,15 @@ async function streamAnthropic(
           const payload = JSON.parse(data) as Record<string, unknown>;
           const type = eventName ?? (payload.type as string) ?? "";
 
-          if (type === "content_block_start") {
+          if (type === "message_start") {
+            // Anthropic sends input token count in message_start
+            const msg = payload.message as Record<string, unknown> | undefined;
+            const msgUsage = msg?.usage as Record<string, unknown> | undefined;
+            if (msgUsage) {
+              const inp = (msgUsage.input_tokens as number) ?? 0;
+              if (inp) totalInputTokens += inp;
+            }
+          } else if (type === "content_block_start") {
             const block = payload.content_block as Record<string, unknown>;
             currentBlockType = (block?.type as string) ?? "";
             if (currentBlockType === "tool_use") {
@@ -2247,6 +3139,12 @@ async function streamAnthropic(
           } else if (type === "message_delta") {
             const delta = payload.delta as Record<string, unknown>;
             if (delta?.stop_reason) stopReason = delta.stop_reason as string;
+            // Anthropic sends output token count in message_delta
+            const deltaUsage = payload.usage as Record<string, unknown> | undefined;
+            if (deltaUsage) {
+              const out = (deltaUsage.output_tokens as number) ?? 0;
+              if (out) totalOutputTokens += out;
+            }
           }
         } catch {
           // Ignore malformed stream chunks.
@@ -2257,19 +3155,27 @@ async function streamAnthropic(
     totalContent += turnContent;
     totalThinking += turnThinking;
 
+    // Emit usage after each turn so the client can show live token counts
+    if ((totalInputTokens > 0 || totalOutputTokens > 0) && handlers.onUsage) {
+      handlers.onUsage(totalInputTokens, totalOutputTokens);
+    }
+
     if (stopReason !== "tool_use" || !toolBlocks.length || !request.onToolCall) {
       if (!totalContent.trim()) {
         if (!nudged) {
           nudged = true;
           messages = [
             ...messages,
-            { role: "user", content: "Based on the information above, please provide your final answer." },
+            { role: "user", content: FINAL_ANSWER_NUDGE },
           ];
           continue;
         }
         throw new Error("Provider returned an empty completion.");
       }
-      return { content: totalContent, modelId, thinking: totalThinking || null };
+      const usage = (totalInputTokens > 0 || totalOutputTokens > 0)
+        ? { inputTokens: totalInputTokens, outputTokens: totalOutputTokens }
+        : null;
+      return { content: totalContent, modelId, thinking: totalThinking || null, usage };
     }
 
     // Build assistant message with any text + tool_use blocks, then execute tools.
@@ -2280,10 +3186,26 @@ async function streamAnthropic(
     for (const tb of toolBlocks) {
       let input: Record<string, unknown> = {};
       try { input = JSON.parse(tb.inputJson); } catch { /* leave empty on parse failure */ }
+
+      const toolSignature = buildToolCallSignature(tb.name, input);
+      const loopCheck = monitor.record(toolSignature);
+      if (loopCheck.action === "stop") {
+        if (totalContent.trim()) {
+          const usage = (totalInputTokens > 0 || totalOutputTokens > 0) ? { inputTokens: totalInputTokens, outputTokens: totalOutputTokens } : null;
+          return { content: totalContent, modelId, thinking: totalThinking || null, usage };
+        }
+        return { content: loopCheck.message, modelId };
+      }
+
       assistantContent.push({ type: "tool_use", id: tb.id, name: tb.name, input });
       handlers.onStatus?.(`Tool: ${tb.name}`);
-      const result = await request.onToolCall(tb.name, input);
-      toolResults.push({ type: "tool_result", tool_use_id: tb.id, content: toolResultToAnthropicContent(result) });
+
+      if (loopCheck.action === "warn") {
+        toolResults.push({ type: "tool_result", tool_use_id: tb.id, content: loopCheck.message });
+      } else {
+        const result = await request.onToolCall(tb.name, input);
+        toolResults.push({ type: "tool_result", tool_use_id: tb.id, content: toolResultToAnthropicContent(result) });
+      }
     }
 
     messages = [
@@ -2298,8 +3220,16 @@ async function streamAnthropic(
   }
 
   // Turn limit reached — return whatever the model streamed so far.
-  if (totalContent.trim()) return { content: totalContent, modelId, thinking: totalThinking || null };
-  throw new Error(`Tool call limit reached without a final response after ${maxToolTurns} tool turns.`);
+  if (totalContent.trim()) {
+    const usage = (totalInputTokens > 0 || totalOutputTokens > 0)
+      ? { inputTokens: totalInputTokens, outputTokens: totalOutputTokens }
+      : null;
+    return { content: totalContent, modelId, thinking: totalThinking || null, usage };
+  }
+  throw new Error(
+    `Tool call limit reached without a final response after ${maxToolTurns} tool turns. ` +
+    "Increase Settings → Context Compression → Tool loop limit, or set EMBER_PROVIDER_TOOL_LOOP_LIMIT (0 = very high cap).",
+  );
 }
 
 export async function recheckProvider(

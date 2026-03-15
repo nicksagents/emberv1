@@ -1217,8 +1217,9 @@ p {
 .message-header {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.4rem;
   padding: 0 0.25rem;
+  flex-wrap: wrap;
 }
 
 .message.user .message-header {
@@ -1227,7 +1228,7 @@ p {
 
 .message-author {
   font-size: 0.78rem;
-  font-weight: 500;
+  font-weight: 600;
   color: var(--text-secondary);
   letter-spacing: -0.01em;
 }
@@ -3078,6 +3079,418 @@ p {
 @keyframes waiting-bounce {
   0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
   40% { transform: scale(1); opacity: 1; }
+}
+
+/* ============================================================================
+   AGENT ACTIVITY PANEL - Combined thinking + tools in one box
+   ============================================================================ */
+
+.activity-panel {
+  max-width: min(100%, var(--chat-max-width));
+  border-radius: 16px;
+  background: linear-gradient(135deg,
+    rgba(255, 200, 100, 0.06) 0%,
+    rgba(48, 209, 88, 0.04) 50%,
+    rgba(100, 150, 255, 0.04) 100%);
+  border: 1px solid rgba(255, 200, 100, 0.18);
+  box-shadow:
+    0 2px 12px rgba(0, 0, 0, 0.25),
+    0 0 0 1px rgba(255, 255, 255, 0.02) inset;
+  overflow: hidden;
+  margin-bottom: 0.5rem;
+  transition: all 250ms ease;
+  position: relative;
+}
+
+.activity-panel::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    rgba(255, 200, 100, 0.3) 30%,
+    rgba(48, 209, 88, 0.3) 70%,
+    transparent 100%);
+}
+
+.activity-panel:hover {
+  border-color: rgba(255, 200, 100, 0.3);
+  box-shadow:
+    0 4px 20px rgba(0, 0, 0, 0.3),
+    0 0 0 1px rgba(255, 255, 255, 0.03) inset;
+}
+
+.activity-panel[open] {
+  border-color: rgba(255, 200, 100, 0.35);
+  box-shadow:
+    0 6px 25px rgba(0, 0, 0, 0.35),
+    0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+}
+
+.activity-panel summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.activity-panel summary::-webkit-details-marker {
+  display: none;
+}
+
+.activity-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.activity-panel-header > svg {
+  color: #ffb84d;
+  filter: drop-shadow(0 0 6px rgba(255, 184, 77, 0.4));
+  flex-shrink: 0;
+}
+
+.activity-panel-header > span:first-of-type {
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  background: linear-gradient(135deg, #ffb84d 0%, #ff8c42 50%, #30d158 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.activity-stats {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.activity-stat {
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 0.15rem 0.45rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--text-tertiary);
+}
+
+.activity-stat.done {
+  background: rgba(48, 209, 88, 0.1);
+  border-color: rgba(48, 209, 88, 0.25);
+  color: #30d158;
+}
+
+.activity-stat.running {
+  background: rgba(255, 159, 10, 0.12);
+  border-color: rgba(255, 159, 10, 0.3);
+  color: #ffb84d;
+  animation: float-badge 2s ease-in-out infinite;
+}
+
+.activity-stat.error {
+  background: rgba(255, 69, 58, 0.12);
+  border-color: rgba(255, 69, 58, 0.3);
+  color: #ff8a82;
+}
+
+.activity-live-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  background: linear-gradient(135deg,
+    rgba(255, 159, 10, 0.2) 0%,
+    rgba(255, 100, 50, 0.15) 100%);
+  border: 1px solid rgba(255, 159, 10, 0.35);
+  color: #ffb84d;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  animation: float-badge 2s ease-in-out infinite;
+}
+
+.activity-live-badge::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #ffb84d;
+  box-shadow: 0 0 8px #ffb84d;
+  animation: pulse-dot 1.5s ease-in-out infinite;
+}
+
+.activity-chevron {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 200, 100, 0.6);
+  transition: all 200ms ease;
+  flex-shrink: 0;
+}
+
+.activity-panel:hover .activity-chevron {
+  background: rgba(255, 200, 100, 0.08);
+  border-color: rgba(255, 200, 100, 0.2);
+}
+
+.activity-panel[open] .activity-chevron {
+  transform: rotate(180deg);
+  background: rgba(255, 200, 100, 0.12);
+  border-color: rgba(255, 200, 100, 0.3);
+  color: #ffb84d;
+}
+
+.activity-panel-body {
+  border-top: 1px solid rgba(255, 200, 100, 0.1);
+  background: rgba(0, 0, 0, 0.2);
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.activity-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.activity-section-label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: rgba(255, 255, 255, 0.4);
+  padding-left: 0.25rem;
+}
+
+.activity-section-label svg {
+  opacity: 0.5;
+}
+
+.activity-thinking {
+  margin: 0;
+  padding: 0.75rem;
+  white-space: pre-wrap;
+  color: rgba(255, 240, 220, 0.75);
+  font-size: 0.78rem;
+  line-height: 1.65;
+  font-family: var(--font-mono);
+  max-height: 300px;
+  overflow-y: auto;
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 10px;
+  border: 1px solid rgba(255, 200, 100, 0.08);
+}
+
+.activity-intermediate {
+  padding: 0.6rem 0.75rem;
+  background: rgba(0, 0, 0, 0.12);
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  font-size: 0.82rem;
+  line-height: 1.55;
+  color: rgba(255, 255, 255, 0.7);
+  max-height: 250px;
+  overflow-y: auto;
+}
+
+.activity-intermediate .message-markdown {
+  gap: 0.4rem;
+}
+
+.activity-intermediate .message-markdown p,
+.activity-intermediate .message-markdown li {
+  font-size: 0.82rem;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.activity-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+/* Live state for activity panel */
+.activity-panel.live {
+  border-color: rgba(255, 159, 10, 0.4);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.03) inset,
+    0 0 30px rgba(255, 159, 10, 0.1),
+    0 4px 20px rgba(0, 0, 0, 0.35);
+  animation: live-glow 3s ease-in-out infinite;
+}
+
+.activity-panel.live .activity-panel-header > svg {
+  animation: thinking-bounce 2s ease-in-out infinite;
+}
+
+/* ============================================================================
+   ELAPSED TIMER
+   ============================================================================ */
+
+.elapsed-timer {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.7rem;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
+}
+
+.elapsed-timer svg {
+  opacity: 0.6;
+}
+
+.elapsed-timer.live {
+  color: #ffb84d;
+}
+
+.elapsed-timer.live svg {
+  opacity: 1;
+  filter: drop-shadow(0 0 4px rgba(255, 184, 77, 0.4));
+}
+
+.elapsed-timer-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #ffb84d;
+  box-shadow: 0 0 6px #ffb84d;
+  animation: pulse-dot 1.5s ease-in-out infinite;
+}
+
+/* ============================================================================
+   MESSAGE DURATION BADGE
+   ============================================================================ */
+
+.message-duration {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.68rem;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
+}
+
+.message-duration svg {
+  opacity: 0.5;
+}
+
+/* ============================================================================
+   TOKEN BADGE
+   ============================================================================ */
+
+.token-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.63rem;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  cursor: default;
+}
+
+.token-badge > svg {
+  opacity: 0.35;
+  flex-shrink: 0;
+}
+
+.token-badge-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.token-badge-in {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.12rem;
+  color: rgba(100, 180, 255, 0.85);
+}
+
+.token-badge-in svg {
+  opacity: 0.6;
+}
+
+.token-badge-out {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.12rem;
+  color: rgba(48, 209, 88, 0.85);
+}
+
+.token-badge-out svg {
+  opacity: 0.6;
+}
+
+.token-badge-total {
+  color: rgba(255, 200, 100, 0.7);
+  font-weight: 600;
+  padding-left: 0.2rem;
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* ============================================================================
+   STREAMING MESSAGE INDICATOR
+   ============================================================================ */
+
+.message.streaming .message-bubble.assistant {
+  border-color: rgba(255, 180, 77, 0.2);
+  box-shadow:
+    0 2px 8px rgba(0, 0, 0, 0.2),
+    0 0 20px rgba(255, 180, 77, 0.05);
+}
+
+/* ============================================================================
+   IMPROVED COPY BUTTON - Always visible
+   ============================================================================ */
+
+.message-meta-right {
+  opacity: 1 !important;
+}
+
+.message-action-btn {
+  opacity: 0.5;
+  transition: opacity 150ms ease, background 150ms ease, transform 100ms ease;
+}
+
+.message:hover .message-action-btn,
+.message-action-btn:focus {
+  opacity: 1;
+}
+
+@media (pointer: coarse) {
+  .message-action-btn {
+    opacity: 0.7;
+  }
 }
 
 /* Responsive layouts */

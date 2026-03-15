@@ -13,7 +13,9 @@ const MIN_PROCEDURE_INJECTION_CHARS = 140;
 const MIN_MEMORY_RESERVE_TOKENS = 96;
 const MIN_PROCEDURE_RESERVE_TOKENS = 48;
 const MIN_PROMPT_TOKENS_AFTER_MEMORY_RESERVE = 1_000;
-const COMPACT_COORDINATOR_CONTEXT_WINDOW_TOKENS = 28_000;
+// Any model under 50k should always use compact prompts — every token counts.
+// Models under 16k get ultra-compact (even fewer tools/workflows).
+const COMPACT_CONTEXT_WINDOW_TOKENS = 50_000;
 const ULTRA_COMPACT_CONTEXT_WINDOW_TOKENS = 16_000;
 
 export interface AdaptiveMemoryRetrievalBudget {
@@ -36,6 +38,8 @@ export interface ExecutionModelProfile {
   compactRolePrompt: boolean;
   compactToolPrompt: boolean;
   compactToolset: boolean;
+  /** Ultra-compact: strip optional properties and descriptions from tool schemas. */
+  ultraCompactToolset: boolean;
 }
 
 export function resolveAdaptiveMemoryRetrievalBudget(
@@ -167,20 +171,30 @@ export function resolveExecutionPromptBudget(
   };
 }
 
+/**
+ * Pressure-based prompt compaction threshold.
+ * When conversation fill ratio exceeds this, compact prompts activate
+ * regardless of context window size — saves 3-5k tokens per turn.
+ */
+const PRESSURE_COMPACT_FILL_RATIO = 0.70;
+
 export function resolveExecutionModelProfile(
   settings: Settings,
   provider: Provider | null,
   role: Role,
+  contextPressure?: number,
 ): ExecutionModelProfile {
   const contextWindowTokens = resolveProviderContextWindowTokens(provider, settings);
-  const compactCoordinatorProfile =
-    role === "coordinator" && contextWindowTokens <= COMPACT_COORDINATOR_CONTEXT_WINDOW_TOKENS;
+  // All models under 50k get compact prompts — a 35k model can't afford 3.7k of prompt overhead
+  const compactProfile = contextWindowTokens <= COMPACT_CONTEXT_WINDOW_TOKENS;
   const ultraCompactProfile = contextWindowTokens <= ULTRA_COMPACT_CONTEXT_WINDOW_TOKENS;
-  const compactRolePrompt = compactCoordinatorProfile || ultraCompactProfile;
+  const pressureCompact = (contextPressure ?? 0) >= PRESSURE_COMPACT_FILL_RATIO;
+  const compactRolePrompt = compactProfile || ultraCompactProfile || pressureCompact;
 
   return {
     compactRolePrompt,
     compactToolPrompt: compactRolePrompt,
     compactToolset: compactRolePrompt,
+    ultraCompactToolset: ultraCompactProfile || (pressureCompact && compactProfile),
   };
 }

@@ -69,8 +69,35 @@ type MemoryEdgeRow = {
 type SqlParam = string | number | bigint | Uint8Array | null;
 
 const require = createRequire(import.meta.url);
-const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
-type DatabaseSyncInstance = InstanceType<typeof DatabaseSync>;
+type SqliteModule = typeof import("node:sqlite");
+type DatabaseSyncCtor = SqliteModule["DatabaseSync"];
+type DatabaseSyncInstance = InstanceType<DatabaseSyncCtor>;
+let cachedDatabaseSync: DatabaseSyncCtor | null = null;
+
+function resolveDatabaseSync(): DatabaseSyncCtor {
+  if (cachedDatabaseSync) {
+    return cachedDatabaseSync;
+  }
+  try {
+    const sqliteModule = require("node:sqlite") as SqliteModule;
+    cachedDatabaseSync = sqliteModule.DatabaseSync;
+    return cachedDatabaseSync;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `SQLite memory backend requires Node.js runtime support for node:sqlite (Node 22+). Original error: ${message}`,
+    );
+  }
+}
+
+export function isNodeSqliteAvailable(): boolean {
+  try {
+    resolveDatabaseSync();
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function createId(prefix: string): string {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -90,6 +117,7 @@ export class SqliteMemoryRepository implements MemoryRepository {
   constructor(private readonly config: MemoryConfig = defaultMemoryConfig()) {
     this.dbPath = getMemorySqlitePath(config);
     mkdirSync(path.dirname(this.dbPath), { recursive: true });
+    const DatabaseSync = resolveDatabaseSync();
     this.db = new DatabaseSync(this.dbPath);
     this.ftsAvailable = this.initializeSchema();
     this.initPromise = this.initializeData();

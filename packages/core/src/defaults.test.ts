@@ -15,6 +15,7 @@ test("normalizeSettings derives compression prompt budgets from context window a
       compression: {
         enabled: true,
         contextWindowTokens: 100_000,
+        toolLoopLimit: 0,
         responseHeadroomTokens: 25_000,
         safetyMarginTokens: 10_000,
         maxPromptTokens: 1,
@@ -26,8 +27,8 @@ test("normalizeSettings derives compression prompt budgets from context window a
     "/tmp/workspace",
   );
 
-  assert.equal(settings.compression.maxPromptTokens, 65_000);
-  assert.equal(settings.compression.targetPromptTokens, 57_200);
+  assert.equal(settings.compression.maxPromptTokens, 67_000);
+  assert.equal(settings.compression.targetPromptTokens, 59_000);
 });
 
 test("normalizeSettings clamps recent-message preservation and token floors", () => {
@@ -36,6 +37,7 @@ test("normalizeSettings clamps recent-message preservation and token floors", ()
       compression: {
         enabled: true,
         contextWindowTokens: 2_000,
+        toolLoopLimit: 0,
         responseHeadroomTokens: 200,
         safetyMarginTokens: 100,
         maxPromptTokens: 999_999,
@@ -52,7 +54,7 @@ test("normalizeSettings clamps recent-message preservation and token floors", ()
   assert.equal(settings.compression.safetyMarginTokens, 512);
   assert.equal(settings.compression.minimumRecentMessages, 3);
   assert.equal(settings.compression.maxPromptTokens, 2_976);
-  assert.equal(settings.compression.targetPromptTokens, 1_000);
+  assert.equal(settings.compression.targetPromptTokens, 1_976);
 });
 
 test("provider context windows use local override only for local openai-compatible endpoints", () => {
@@ -62,6 +64,7 @@ test("provider context windows use local override only for local openai-compatib
       compression: {
         enabled: true,
         contextWindowTokens: 12_000,
+        toolLoopLimit: 0,
         responseHeadroomTokens: 24_000,
         safetyMarginTokens: 12_000,
         maxPromptTokens: 1,
@@ -128,10 +131,10 @@ test("provider context windows use local override only for local openai-compatib
   assert.equal(resolveProviderContextWindowTokens(localProvider, settings), 65_536);
 
   assert.equal(remoteProvider.config.contextWindowTokens, undefined);
-  assert.equal(resolveProviderContextWindowTokens(remoteProvider, settings), 300_000);
+  assert.equal(resolveProviderContextWindowTokens(remoteProvider, settings), 100_000);
 
   assert.equal(anthropicProvider.config.contextWindowTokens, undefined);
-  assert.equal(resolveProviderContextWindowTokens(anthropicProvider, settings), 300_000);
+  assert.equal(resolveProviderContextWindowTokens(anthropicProvider, settings), 100_000);
 
   assert.equal(resolveProviderContextWindowTokens(localProviderWithoutOverride, settings), 16_000);
   assert.equal(resolveProviderContextWindowTokens(localProviderWithoutOverride, lowContextSettings), 12_000);
@@ -144,10 +147,11 @@ test("deriveCompressionPromptBudget caps fixed reserves for low-context models",
     safetyMarginTokens: 12_000,
   });
 
-  assert.equal(budget.responseHeadroomTokens, 8_000);
-  assert.equal(budget.safetyMarginTokens, 3_000);
-  assert.equal(budget.maxPromptTokens, 14_000);
-  assert.equal(budget.targetPromptTokens, 12_000);
+  // Small model (25k < 50k): ratios 0.15 response headroom, 0.05 safety margin
+  assert.equal(budget.responseHeadroomTokens, 3_750);
+  assert.equal(budget.safetyMarginTokens, 1_250);
+  assert.equal(budget.maxPromptTokens, 20_000);
+  assert.equal(budget.targetPromptTokens, 18_400);
 });
 
 test("normalizeSettings preserves memory rollout flags", () => {
@@ -198,4 +202,42 @@ test("normalizeSettings preserves memory rollout flags", () => {
   assert.equal(settings.memory.rollout.inspectionApiEnabled, false);
   assert.equal(settings.memory.rollout.cortexUiEnabled, true);
   assert.equal(settings.memory.rollout.replaySchedulerEnabled, false);
+});
+
+test("normalizeSettings clamps provider tool loop limit to supported bounds", () => {
+  const high = normalizeSettings(
+    {
+      compression: {
+        enabled: true,
+        contextWindowTokens: 12_000,
+        toolLoopLimit: 99_999,
+        responseHeadroomTokens: 2_000,
+        safetyMarginTokens: 1_000,
+        maxPromptTokens: 1,
+        targetPromptTokens: 1,
+        preserveRecentMessages: 6,
+        minimumRecentMessages: 4,
+      },
+    },
+    "/tmp/workspace",
+  );
+  const low = normalizeSettings(
+    {
+      compression: {
+        enabled: true,
+        contextWindowTokens: 12_000,
+        toolLoopLimit: -8,
+        responseHeadroomTokens: 2_000,
+        safetyMarginTokens: 1_000,
+        maxPromptTokens: 1,
+        targetPromptTokens: 1,
+        preserveRecentMessages: 6,
+        minimumRecentMessages: 4,
+      },
+    },
+    "/tmp/workspace",
+  );
+
+  assert.equal(high.compression.toolLoopLimit, 4_000);
+  assert.equal(low.compression.toolLoopLimit, 0);
 });

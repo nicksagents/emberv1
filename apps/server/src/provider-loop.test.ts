@@ -4,6 +4,8 @@ import assert from "node:assert/strict";
 import { streamProviderChat } from "../../../packages/connectors/src/drivers";
 import type { ChatMessage, PromptStack, Provider, ToolDefinition } from "@ember/core";
 
+const FINAL_ANSWER_NUDGE = "Based on the information above, please provide your final answer.";
+
 function makeProvider(): Provider {
   const now = new Date().toISOString();
   return {
@@ -47,6 +49,85 @@ function sseResponse(events: unknown[]): Response {
       },
     },
   );
+}
+
+function extractMessageText(content: unknown): string {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (!Array.isArray(content)) {
+    return "";
+  }
+  return content
+    .map((item) => {
+      if (typeof item === "string") {
+        return item;
+      }
+      if (item && typeof item === "object" && "text" in item) {
+        return typeof item.text === "string" ? item.text : "";
+      }
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
+function hasRealUserQuery(messages: unknown): boolean {
+  if (!Array.isArray(messages)) {
+    return false;
+  }
+
+  return messages.some((message) => {
+    if (!message || typeof message !== "object") {
+      return false;
+    }
+    const record = message as { role?: unknown; content?: unknown };
+    if (record.role !== "user") {
+      return false;
+    }
+    const text = extractMessageText(record.content).trim();
+    if (!text) {
+      return false;
+    }
+    if (text === FINAL_ANSWER_NUDGE) {
+      return false;
+    }
+    if (/^<tool_response>\s*[\s\S]*<\/tool_response>$/i.test(text)) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function lastUserIsRealPlainTextQuery(messages: unknown): boolean {
+  if (!Array.isArray(messages)) {
+    return false;
+  }
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!message || typeof message !== "object") {
+      continue;
+    }
+    const record = message as { role?: unknown; content?: unknown };
+    if (record.role !== "user") {
+      continue;
+    }
+    if (typeof record.content !== "string") {
+      return false;
+    }
+    const text = record.content.trim();
+    if (!text || text === FINAL_ANSWER_NUDGE) {
+      return false;
+    }
+    if (/^<tool_response>\s*[\s\S]*<\/tool_response>$/i.test(text)) {
+      return false;
+    }
+    return true;
+  }
+
+  return false;
 }
 
 test("streamProviderChat executes tool calls emitted in reasoning text", async () => {
@@ -152,7 +233,8 @@ test("streamProviderChat executes tool calls emitted in reasoning text", async (
 
     const secondMessages = fetchBodies[1].messages;
     assert.ok(Array.isArray(secondMessages));
-    assert.match(String((secondMessages as Array<{ content?: unknown }>).at(-1)?.content ?? ""), /screenshot captured/);
+    assert.match(JSON.stringify(secondMessages), /screenshot captured/);
+    assert.equal(lastUserIsRealPlainTextQuery(secondMessages), true);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -492,6 +574,212 @@ test("streamProviderChat surfaces provider error details for rejected requests",
         }, {}),
       /exceeds the available context size \(10240 tokens\)/,
     );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("streamProviderChat supports long tool loops beyond 30 turns", async () => {
+  const originalFetch = globalThis.fetch;
+  const promptStack: PromptStack = { shared: "", role: "", tools: "" };
+  const tools: ToolDefinition[] = [
+    {
+      name: "browser",
+      description: "Interact with the browser.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          step: {
+            type: "number",
+            description: "Current step.",
+          },
+        },
+      },
+    },
+  ];
+  let callIndex = 0;
+  const toolCalls: Array<{ name: string; input: Record<string, unknown> }> = [];
+
+  globalThis.fetch = (async () => {
+    callIndex += 1;
+    if (callIndex <= 35) {
+      return sseResponse([
+        {
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: `call-${callIndex}`,
+                    function: {
+                      name: "browser",
+                      arguments: JSON.stringify({ step: callIndex }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        {
+          choices: [
+            {
+              delta: {},
+              finish_reason: "tool_calls",
+            },
+          ],
+        },
+      ]);
+    }
+
+    return sseResponse([
+      {
+        choices: [
+          {
+            delta: {
+              content: "Long tool loop completed.",
+            },
+          },
+        ],
+      },
+      {
+        choices: [
+          {
+            delta: {},
+            finish_reason: "stop",
+          },
+        ],
+      },
+    ]);
+  }) as typeof fetch;
+
+  try {
+    const result = await streamProviderChat(makeProvider(), {}, {
+      modelId: null,
+      promptStack,
+      conversation: [],
+      content: "Keep using tools until done.",
+      tools,
+      onToolCall: async (name, input) => {
+        toolCalls.push({ name, input });
+        return `tool-result-${String(input.step ?? "")}`;
+      },
+    }, {});
+
+    assert.equal(result.content, "Long tool loop completed.");
+    assert.equal(toolCalls.length, 35);
+    assert.equal(callIndex, 36);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("streamProviderChat compacts tool-loop history for small local context windows", async () => {
+  const originalFetch = globalThis.fetch;
+  const promptStack: PromptStack = { shared: "", role: "", tools: "" };
+  const provider = makeProvider();
+  provider.config.baseUrl = "http://127.0.0.1:11434/v1";
+  provider.config.contextWindowTokens = "6000";
+  const tools: ToolDefinition[] = [
+    {
+      name: "browser",
+      description: "Interact with the browser.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          step: {
+            type: "number",
+            description: "Current step.",
+          },
+        },
+      },
+    },
+  ];
+  const fetchBodies: Array<Record<string, unknown>> = [];
+  let callIndex = 0;
+
+  globalThis.fetch = (async (_input, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    fetchBodies.push(body);
+    callIndex += 1;
+
+    if (callIndex <= 10) {
+      return sseResponse([
+        {
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: `call-${callIndex}`,
+                    function: {
+                      name: "browser",
+                      arguments: JSON.stringify({ step: callIndex }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        {
+          choices: [
+            {
+              delta: {},
+              finish_reason: "tool_calls",
+            },
+          ],
+        },
+      ]);
+    }
+
+    return sseResponse([
+      {
+        choices: [
+          {
+            delta: {
+              content: "Compaction test done.",
+            },
+          },
+        ],
+      },
+      {
+        choices: [
+          {
+            delta: {},
+            finish_reason: "stop",
+          },
+        ],
+      },
+    ]);
+  }) as typeof fetch;
+
+  try {
+    const result = await streamProviderChat(provider, {}, {
+      modelId: null,
+      promptStack,
+      conversation: [],
+      content: "Run many tool calls with large outputs.",
+      tools,
+      onToolCall: async (name, input) => {
+        return `${name}-${String(input.step ?? "")}: ${"x".repeat(1800)}`;
+      },
+    }, {});
+
+    assert.equal(result.content, "Compaction test done.");
+    const sawCompactionSummary = fetchBodies.some((body) =>
+      JSON.stringify(body.messages ?? []).includes("Tool-loop memory summary (auto-compacted)."),
+    );
+    assert.equal(sawCompactionSummary, true);
+    const compactedBodies = fetchBodies.filter((body) =>
+      JSON.stringify(body.messages ?? []).includes("Tool-loop memory summary (auto-compacted)."),
+    );
+    assert.ok(compactedBodies.length > 0);
+    for (const body of compactedBodies) {
+      assert.equal(hasRealUserQuery(body.messages), true);
+    }
   } finally {
     globalThis.fetch = originalFetch;
   }

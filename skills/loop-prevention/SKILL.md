@@ -19,3 +19,7 @@ users — treat them as hard constraints.
 - **Stop when you have enough.** Once you have sufficient information to
   complete the task, stop using tools and give your answer. More tool calls
   after you have the answer add latency without adding value.
+- **Heed repetition warnings.** If you receive a warning about being in a
+  repeating cycle, you must change your approach immediately. After two
+  warnings the system will stop your tool loop. Use the warning as a signal
+  to try a different tool, different input, or respond with partial results.

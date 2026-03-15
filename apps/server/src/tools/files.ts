@@ -141,8 +141,12 @@ function executeDeleteFile(input: Record<string, unknown>): string {
   }
 }
 
-function formatMode(stats: ReturnType<typeof lstatSync>): string {
-  return `0o${(stats.mode & 0o777).toString(8).padStart(3, "0")}`;
+function formatMode(stats: { mode: number | bigint }): string {
+  const maskedMode =
+    typeof stats.mode === "bigint"
+      ? Number(stats.mode & 0o777n)
+      : stats.mode & 0o777;
+  return `0o${maskedMode.toString(8).padStart(3, "0")}`;
 }
 
 function executeStatPath(input: Record<string, unknown>): string {

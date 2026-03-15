@@ -36,7 +36,7 @@ import {
   getRandomSuggestionPrompts,
   type SuggestionPrompt,
 } from "../lib/suggestion-prompts";
-import { FunnyLoader, MessageRenderer, StreamingContent, ThinkingPanel, ToolCallsPanel } from "./message-renderer";
+import { AgentActivityPanel, CopyButton, ElapsedTimer, FunnyLoader, MessageRenderer, StreamingContent, TokenBadge } from "./message-renderer";
 
 const directModes = ROLES.filter((role) => role !== "dispatch" && role !== "coordinator" && role !== "ops");
 const modes = ["auto", "coordinator", ...directModes] as const;
@@ -55,12 +55,17 @@ function normalizeMode(mode: ChatMode): (typeof modes)[number] {
 interface StreamingPreview {
   content: string;
   thinking: string;
+  /** Intermediate content from tool-use turns that should be shown in the activity panel, not the main bubble */
+  intermediateContent: string;
   status: string;
   phase: "routing" | "provider" | "streaming" | "saving";
   providerName: string | null;
   role: string | null;
   modelId: string | null;
   toolCalls: ToolCall[];
+  startedAt: string;
+  inputTokens: number;
+  outputTokens: number;
 }
 
 function titleCase(value: string | null | undefined): string {
@@ -481,6 +486,7 @@ export function ChatClient({
     setStreamingPreview({
       content: "",
       thinking: "",
+      intermediateContent: "",
       status: mode === "auto" ? "Evaluating route..." : "Waiting for provider...",
       phase: mode === "auto" ? "routing" : "provider",
       providerName: mode === "auto" ? null : activeProvider?.name ?? null,
@@ -490,6 +496,9 @@ export function ChatClient({
           ? null
           : activeAssignment?.modelId ?? activeProvider?.config.defaultModelId ?? null,
       toolCalls: [],
+      startedAt: new Date().toISOString(),
+      inputTokens: 0,
+      outputTokens: 0,
     });
 
     try {
@@ -528,18 +537,27 @@ export function ChatClient({
       let completed = false;
       const applyStreamEvent = (event: ChatStreamEvent) => {
         if (event.type === "status") {
-          setStreamingPreview((current) =>
-            current
-              ? {
-                  ...current,
-                  status: event.message,
-                  phase: event.phase,
-                  providerName: event.providerName ?? current.providerName,
-                  role: event.role ?? current.role,
-                  modelId: event.modelId ?? current.modelId,
-                }
-              : current,
-          );
+          setStreamingPreview((current) => {
+            if (!current) return current;
+            // When the server signals a tool call (status starts with "Tool:")
+            // or tool-loop compaction, move any accumulated content into
+            // intermediateContent so it shows inside the activity panel
+            // instead of the main response bubble.
+            const isToolStatus = event.message.startsWith("Tool:") || event.message.startsWith("Compacting tool-loop");
+            const movedContent = isToolStatus && current.content.trim()
+              ? current.intermediateContent + current.content
+              : current.intermediateContent;
+            return {
+              ...current,
+              status: event.message,
+              phase: event.phase,
+              providerName: event.providerName ?? current.providerName,
+              role: event.role ?? current.role,
+              modelId: event.modelId ?? current.modelId,
+              intermediateContent: movedContent,
+              content: isToolStatus && current.content.trim() ? "" : current.content,
+            };
+          });
         } else if (event.type === "thinking") {
           setStreamingPreview((current) =>
             current
@@ -567,6 +585,16 @@ export function ChatClient({
                   ...current,
                   content: `${current.content}${event.text}`,
                   status: current.status || "Streaming response...",
+                }
+              : current,
+          );
+        } else if (event.type === "usage") {
+          setStreamingPreview((current) =>
+            current
+              ? {
+                  ...current,
+                  inputTokens: event.inputTokens,
+                  outputTokens: event.outputTokens,
                 }
               : current,
           );
@@ -888,18 +916,29 @@ export function ChatClient({
             ))}
 
           {sending && streamingPreview ? (
-            <div className="message assistant">
+            <div className="message assistant streaming">
               <div className="message-content">
                 <div className="message-header">
                   <span className="message-author">
                     {streamingPreview.providerName || titleCase(streamingPreview.role)}
                   </span>
+                  {streamingPreview.role && (
+                    <span className="message-badge role">{titleCase(streamingPreview.role)}</span>
+                  )}
+                  {streamingPreview.modelId && (
+                    <span className="message-badge model">{streamingPreview.modelId}</span>
+                  )}
                 </div>
 
-                <ThinkingPanel content={streamingPreview.thinking} live />
-                
-                <ToolCallsPanel tools={streamingPreview.toolCalls} live />
+                {/* Combined activity panel: thinking + intermediate content + tools */}
+                <AgentActivityPanel
+                  thinking={streamingPreview.thinking}
+                  intermediateContent={streamingPreview.intermediateContent}
+                  toolCalls={streamingPreview.toolCalls}
+                  live
+                />
 
+                {/* Only show the final response content in the bubble */}
                 <div className="message-bubble assistant">
                   {streamingPreview.content.trim() ? (
                     <StreamingContent content={streamingPreview.content} />
@@ -909,16 +948,17 @@ export function ChatClient({
                     </div>
                   )}
                 </div>
-                
+
                 <div className="message-footer">
                   <div className="message-meta-left">
-                    {streamingPreview.role && (
-                      <span className="message-badge role">{titleCase(streamingPreview.role)}</span>
-                    )}
-                    {streamingPreview.modelId && (
-                      <span className="message-badge model">{streamingPreview.modelId}</span>
-                    )}
                     <span className="message-time">{streamingPreview.status}</span>
+                    <ElapsedTimer startedAt={streamingPreview.startedAt} />
+                    <TokenBadge inputTokens={streamingPreview.inputTokens} outputTokens={streamingPreview.outputTokens} />
+                  </div>
+                  <div className="message-meta-right">
+                    {streamingPreview.content.trim() && (
+                      <CopyButton content={streamingPreview.content} />
+                    )}
                   </div>
                 </div>
               </div>

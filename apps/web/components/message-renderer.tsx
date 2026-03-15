@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, type ReactNode, useState, useCallback, useEffect, useRef } from "react";
+import { Fragment, type ReactNode, useState, useCallback, useEffect, useRef, useMemo } from "react";
 
 import type { ChatAttachment, ChatImageAttachment, ChatMessage, ToolCall } from "@ember/core/client";
 import { groupAttachments, isImageAttachment, isTextAttachment } from "../lib/attachments";
@@ -727,6 +727,190 @@ export function ToolCallsPanel({
   );
 }
 
+// Live elapsed timer that ticks every second
+export function ElapsedTimer({ startedAt, endedAt }: { startedAt: string; endedAt?: string }) {
+  const [now, setNow] = useState(Date.now());
+  const isLive = !endedAt;
+
+  useEffect(() => {
+    if (!isLive) return;
+    const interval = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(interval);
+  }, [isLive]);
+
+  const start = new Date(startedAt).getTime();
+  const end = endedAt ? new Date(endedAt).getTime() : now;
+  const elapsed = Math.max(0, end - start);
+
+  const seconds = Math.floor(elapsed / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+
+  let display: string;
+  if (hours > 0) {
+    display = `${hours}h ${minutes % 60}m ${seconds % 60}s`;
+  } else if (minutes > 0) {
+    display = `${minutes}m ${seconds % 60}s`;
+  } else {
+    display = `${seconds}s`;
+  }
+
+  return (
+    <span className={`elapsed-timer${isLive ? " live" : ""}`}>
+      {isLive && <span className="elapsed-timer-dot" />}
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="12" r="10" />
+        <polyline points="12 6 12 12 16 14" />
+      </svg>
+      <span>{display}</span>
+    </span>
+  );
+}
+
+// Combined panel for thinking + tool calls + intermediate content - keeps all agent internals in one box
+export function AgentActivityPanel({
+  thinking,
+  intermediateContent,
+  toolCalls,
+  live = false,
+}: {
+  thinking: string;
+  /** Content from intermediate tool-use turns (shown inside the panel instead of the main bubble) */
+  intermediateContent?: string;
+  toolCalls: ToolCall[];
+  live?: boolean;
+}) {
+  const hasThinking = thinking.trim().length > 0;
+  const hasTools = toolCalls.length > 0;
+  const hasIntermediate = (intermediateContent ?? "").trim().length > 0;
+
+  if (!hasThinking && !hasTools && !hasIntermediate) return null;
+
+  const runningCount = toolCalls.filter((t) => t.status === "running" || t.status === "pending").length;
+  const completedCount = toolCalls.filter((t) => t.status === "complete").length;
+  const errorCount = toolCalls.filter((t) => t.status === "error").length;
+  const formattedThinking = hasThinking ? formatThinkingContent(thinking.trim()) : "";
+
+  return (
+    <details className={`activity-panel${live ? " live" : ""}`} open={live}>
+      <summary>
+        <div className="activity-panel-header">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 2a10 10 0 1 0 10 10 4 4 0 0 1-5-5 4 4 0 0 1-5-5" />
+            <path d="M8.5 8.5A9.9 9.9 0 0 0 12 21a9.9 9.9 0 0 0 3.5-12.5" />
+          </svg>
+          <span>Agent Activity</span>
+          {hasTools && (
+            <span className="activity-stats">
+              {completedCount > 0 && <span className="activity-stat done">{completedCount} done</span>}
+              {runningCount > 0 && <span className="activity-stat running">{runningCount} running</span>}
+              {errorCount > 0 && <span className="activity-stat error">{errorCount} failed</span>}
+              {!runningCount && !errorCount && !completedCount && (
+                <span className="activity-stat">{toolCalls.length} {toolCalls.length === 1 ? "tool" : "tools"}</span>
+              )}
+            </span>
+          )}
+          {live && <span className="activity-live-badge">Live</span>}
+        </div>
+        <div className="activity-chevron">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="m6 9 6 6 6-6" />
+          </svg>
+        </div>
+      </summary>
+      <div className="activity-panel-body">
+        {/* Thinking section */}
+        {hasThinking && (
+          <div className="activity-section">
+            <div className="activity-section-label">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 2a10 10 0 1 0 10 10 4 4 0 0 1-5-5 4 4 0 0 1-5-5" />
+              </svg>
+              Reasoning
+            </div>
+            <pre className="activity-thinking">{formattedThinking}</pre>
+          </div>
+        )}
+        {/* Intermediate content from tool-use turns */}
+        {hasIntermediate && (
+          <div className="activity-section">
+            <div className="activity-section-label">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+              </svg>
+              Intermediate Output
+            </div>
+            <div className="activity-intermediate">
+              <MessageContent content={intermediateContent!.trim()} />
+            </div>
+          </div>
+        )}
+        {/* Tool calls section */}
+        {hasTools && (
+          <div className="activity-section">
+            <div className="activity-section-label">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
+              </svg>
+              Tool Calls
+            </div>
+            <div className="activity-tools">
+              {toolCalls.map((tool) => (
+                <ToolCallItem key={tool.id} tool={tool} defaultOpen={live && tool.status === "running"} />
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </details>
+  );
+}
+
+// Format token count for display (e.g. 1234 → "1.2k", 12345 → "12.3k")
+function formatTokenCount(count: number): string {
+  if (count < 1000) return `${count}`;
+  if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
+  return `${Math.round(count / 1000)}k`;
+}
+
+// Token usage display
+export function TokenBadge({ inputTokens, outputTokens }: { inputTokens: number; outputTokens: number }) {
+  if (inputTokens === 0 && outputTokens === 0) return null;
+
+  const total = inputTokens + outputTokens;
+
+  return (
+    <span
+      className="token-badge"
+      title={`Input: ${inputTokens.toLocaleString()} tokens\nOutput: ${outputTokens.toLocaleString()} tokens\nTotal: ${total.toLocaleString()} tokens`}
+    >
+      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M20.2 7.8l-7.7 7.7-4-4-5.7 5.7" />
+        <path d="M15 7h6v6" />
+      </svg>
+      <span className="token-badge-group">
+        <span className="token-badge-in" title="Input tokens">
+          <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 19V5" />
+            <path d="m5 12 7-7 7 7" />
+          </svg>
+          {formatTokenCount(inputTokens)}
+        </span>
+        <span className="token-badge-out" title="Output tokens">
+          <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 5v14" />
+            <path d="m19 12-7 7-7-7" />
+          </svg>
+          {formatTokenCount(outputTokens)}
+        </span>
+      </span>
+      <span className="token-badge-total" title="Total tokens">
+        {formatTokenCount(total)}
+      </span>
+    </span>
+  );
+}
+
 function ImageAttachments({ attachments }: { attachments: ChatImageAttachment[] }) {
   if (attachments.length === 0) {
     return null;
@@ -784,7 +968,7 @@ function TextAttachments({ attachments }: { attachments: ChatAttachment[] }) {
   );
 }
 
-function CopyButton({ content }: { content: string }) {
+export function CopyButton({ content }: { content: string }) {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = useCallback(async () => {
@@ -829,51 +1013,83 @@ export function MessageRenderer({
 }) {
   const isUser = message.role === "user";
   const author = isUser ? humanName?.trim() || "You" : message.providerName || "Ember";
-  
+
   // Get role label (e.g., "Director", "Coordinator")
   const roleLabel = !isUser && message.authorRole !== "user"
     ? `${message.authorRole.slice(0, 1).toUpperCase()}${message.authorRole.slice(1)}`
     : null;
-  
+
   // Get model label
   const modelLabel = !isUser ? message.modelId?.trim() ?? null : null;
-  
+
   const imageAttachments = (message.attachments ?? []).filter(isImageAttachment);
   const textAttachments = (message.attachments ?? []).filter(isTextAttachment);
+
+  // Calculate response duration from tool calls or message timing
+  const responseDuration = useMemo(() => {
+    if (isUser) return null;
+    const tools = message.toolCalls ?? [];
+    if (tools.length === 0) return null;
+    const starts = tools.map(t => new Date(t.startedAt).getTime()).filter(t => !isNaN(t));
+    const ends = tools.filter(t => t.endedAt).map(t => new Date(t.endedAt!).getTime()).filter(t => !isNaN(t));
+    if (starts.length === 0) return null;
+    const earliest = Math.min(...starts);
+    const latest = ends.length > 0 ? Math.max(...ends) : new Date(message.createdAt).getTime();
+    const dur = latest - earliest;
+    if (dur < 1000) return `${dur}ms`;
+    if (dur < 60000) return `${(dur / 1000).toFixed(1)}s`;
+    const mins = Math.floor(dur / 60000);
+    const secs = Math.floor((dur % 60000) / 1000);
+    return `${mins}m ${secs}s`;
+  }, [isUser, message.toolCalls, message.createdAt]);
+
+  const hasActivity = !isUser && ((message.thinking ?? "").trim().length > 0 || (message.toolCalls ?? []).length > 0);
 
   return (
     <div className={`message ${isUser ? "user" : "assistant"}`}>
       <div className="message-content">
-        {/* Header with author name only */}
+        {/* Header with author name and role/model badges */}
         <div className="message-header">
           <span className="message-author">{author}</span>
+          {!isUser && roleLabel && (
+            <span className="message-badge role">{roleLabel}</span>
+          )}
+          {!isUser && modelLabel && (
+            <span className="message-badge model">{modelLabel}</span>
+          )}
         </div>
-        
-        {/* Thinking panel for assistant */}
-        {!isUser && <ThinkingPanel content={message.thinking ?? ""} />}
-        
-        {/* Tool calls panel for assistant */}
-        {!isUser && message.toolCalls && message.toolCalls.length > 0 && (
-          <ToolCallsPanel tools={message.toolCalls} />
+
+        {/* Combined activity panel (thinking + tool calls) */}
+        {hasActivity && (
+          <AgentActivityPanel
+            thinking={message.thinking ?? ""}
+            toolCalls={message.toolCalls ?? []}
+          />
         )}
-        
-        {/* Message bubble */}
+
+        {/* Message bubble - final response only */}
         <div className={`message-bubble ${isUser ? "user" : "assistant"}`}>
           <ImageAttachments attachments={imageAttachments} />
           <TextAttachments attachments={textAttachments} />
           <MessageContent content={message.content} />
         </div>
-        
-        {/* Footer with role, model, time, and copy button */}
+
+        {/* Footer with time, duration, tokens, and copy button */}
         <div className="message-footer">
           <div className="message-meta-left">
-            {!isUser && roleLabel && (
-              <span className="message-badge role">{roleLabel}</span>
-            )}
-            {!isUser && modelLabel && (
-              <span className="message-badge model">{modelLabel}</span>
-            )}
             <span className="message-time">{formatMessageTime(message.createdAt)}</span>
+            {responseDuration && (
+              <span className="message-duration">
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="10" />
+                  <polyline points="12 6 12 12 16 14" />
+                </svg>
+                {responseDuration}
+              </span>
+            )}
+            {!isUser && message.usage && (
+              <TokenBadge inputTokens={message.usage.inputTokens} outputTokens={message.usage.outputTokens} />
+            )}
           </div>
           <div className="message-meta-right">
             <CopyButton content={message.content} />

@@ -10,7 +10,7 @@
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts",
     "dev": "tsx src/index.ts",
-    "test": "node --import tsx --test src/**/*.test.ts",
+    "test": "bash -lc 'shopt -s globstar nullglob; tests=(src/**/*.test.ts); if [ ${#tests[@]} -eq 0 ]; then echo \"No test files found.\"; exit 0; fi; node --import tsx --test \"${tests[@]}\"'",
     "typecheck": "tsc --project tsconfig.json --noEmit"
   },
   "dependencies": {

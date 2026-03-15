@@ -9,7 +9,7 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "typecheck": "tsc --project tsconfig.json --noEmit",
-    "test": "node --import tsx --test src/**/*.test.ts"
+    "test": "bash -lc 'shopt -s globstar nullglob; tests=(src/**/*.test.ts); if [ ${#tests[@]} -eq 0 ]; then echo \"No test files found.\"; exit 0; fi; node --import tsx --test \"${tests[@]}\"'"
   },
   "dependencies": {
     "@ember/connectors": "workspace:*",

@@ -120,10 +120,14 @@ test("resolveExecutionModelProfile enables compact prompts for small coordinator
   assert.equal(compactCoordinator.compactRolePrompt, true);
   assert.equal(compactCoordinator.compactToolPrompt, true);
   assert.equal(compactCoordinator.compactToolset, true);
+  assert.equal(compactCoordinator.ultraCompactToolset, false);
   assert.equal(fullCoordinator.compactRolePrompt, false);
-  assert.equal(directorProfile.compactRolePrompt, false);
+  // 25k model is under 50k threshold — all roles get compact
+  assert.equal(directorProfile.compactRolePrompt, true);
+  assert.equal(directorProfile.ultraCompactToolset, false);
   assert.equal(ultraCompactDirector.compactRolePrompt, true);
   assert.equal(ultraCompactDirector.compactToolset, true);
+  assert.equal(ultraCompactDirector.ultraCompactToolset, true);
 });
 
 test("compact coordinator profile keeps prompt and tool overhead small for local models", () => {

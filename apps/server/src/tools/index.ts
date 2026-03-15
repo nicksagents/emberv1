@@ -1,4 +1,5 @@
 import {
+  capToolResult,
   redactSensitiveText,
   type ChatMessage,
   type MemoryToolObservation,
@@ -25,6 +26,7 @@ import { parallelTasksTool } from "./parallel-tasks.js";
 import { processManagerTool } from "./process-manager.js";
 import { projectOverviewTool } from "./project-overview.js";
 import { searchFilesTool } from "./search-files.js";
+import { sshExecuteTool } from "./ssh-execute.js";
 import { systemInfoTool } from "./system-info.js";
 import { setSudoPassword, terminalTool } from "./terminal.js";
 import type { EmberTool } from "./types.js";
@@ -62,6 +64,7 @@ const BASE_REGISTRY: EmberTool[] = [
   systemInfoTool,
   processManagerTool,
   networkToolsTool,
+  sshExecuteTool,
   // browserTool removed — replaced by @playwright/mcp (mcp__playwright__browser_*)
   handoffTool,
 ];
@@ -82,10 +85,10 @@ const TOOL_MAP = new Map<string, EmberTool>(
 // Roles: coordinator, advisor, director, inspector get mcp__playwright__browser_*
 const BASE_ROLE_TOOLS: Record<Role, EmberTool[]> = {
   dispatch:    [],
-  coordinator: [projectOverviewTool, gitInspectTool, statPathTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, credentialSaveTool, credentialListTool, credentialGetTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, parallelTasksTool, systemInfoTool, processManagerTool, networkToolsTool, handoffTool],
-  advisor:     [projectOverviewTool, gitInspectTool, statPathTool, listDirectoryTool, searchFilesTool, readFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, credentialSaveTool, credentialListTool, credentialGetTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, parallelTasksTool, systemInfoTool, networkToolsTool, handoffTool],
-  director:    [projectOverviewTool, gitInspectTool, statPathTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, credentialSaveTool, credentialListTool, credentialGetTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, parallelTasksTool, systemInfoTool, processManagerTool, networkToolsTool, handoffTool],
-  inspector:   [projectOverviewTool, gitInspectTool, statPathTool, listDirectoryTool, searchFilesTool, readFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, credentialSaveTool, credentialListTool, credentialGetTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, parallelTasksTool, systemInfoTool, processManagerTool, networkToolsTool, handoffTool],
+  coordinator: [projectOverviewTool, gitInspectTool, statPathTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, credentialSaveTool, credentialListTool, credentialGetTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, parallelTasksTool, systemInfoTool, processManagerTool, networkToolsTool, sshExecuteTool, handoffTool],
+  advisor:     [projectOverviewTool, gitInspectTool, statPathTool, listDirectoryTool, searchFilesTool, readFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, credentialSaveTool, credentialListTool, credentialGetTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, parallelTasksTool, systemInfoTool, networkToolsTool, sshExecuteTool, handoffTool],
+  director:    [projectOverviewTool, gitInspectTool, statPathTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, credentialSaveTool, credentialListTool, credentialGetTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, parallelTasksTool, systemInfoTool, processManagerTool, networkToolsTool, sshExecuteTool, handoffTool],
+  inspector:   [projectOverviewTool, gitInspectTool, statPathTool, listDirectoryTool, searchFilesTool, readFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, credentialSaveTool, credentialListTool, credentialGetTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, parallelTasksTool, systemInfoTool, processManagerTool, networkToolsTool, sshExecuteTool, handoffTool],
   ops:         [editFileTool, deleteFileTool],
 };
 
@@ -173,9 +176,38 @@ const COMPACT_TOOL_SELECTION_STOP_WORDS = new Set([
   "with",
   "work",
 ]);
+const OBSERVATION_SENSITIVE_KEY_PATTERN =
+  /(^|_)(password|passcode|passwd|secret|token|api_key|access_token|refresh_token|auth_token|private_key|ssh_password|otp|pin)(_|$)/i;
 
 function toolResultToText(result: ToolResult): string {
   return typeof result === "string" ? result : result.text;
+}
+
+function sanitizeToolObservationInputValue(value: unknown): unknown {
+  if (typeof value === "string") {
+    return redactSensitiveText(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeToolObservationInputValue(item));
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+
+  const source = value as Record<string, unknown>;
+  const output: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(source)) {
+    if (OBSERVATION_SENSITIVE_KEY_PATTERN.test(key)) {
+      output[key] = "[redacted]";
+      continue;
+    }
+    output[key] = sanitizeToolObservationInputValue(item);
+  }
+  return output;
+}
+
+function sanitizeToolObservationInput(input: Record<string, unknown>): Record<string, unknown> {
+  return sanitizeToolObservationInputValue(input) as Record<string, unknown>;
 }
 
 function sanitizeToolObservationResult(
@@ -225,12 +257,13 @@ function resolveToolObservation(
   input: Record<string, unknown>,
   result: ToolResult,
 ): MemoryToolObservation {
+  const sanitizedInput = sanitizeToolObservationInput(input);
   const resultText = toolResultToText(result);
   const sanitizedResultText = sanitizeToolObservationResult(name, input, resultText);
-  const rawSourceRef = typeof input.url === "string"
-    ? input.url.trim()
-    : typeof input.path === "string"
-      ? input.path.trim()
+  const rawSourceRef = typeof sanitizedInput.url === "string"
+    ? sanitizedInput.url.trim()
+    : typeof sanitizedInput.path === "string"
+      ? sanitizedInput.path.trim()
       : null;
   const sourceRef = rawSourceRef && rawSourceRef.length > 0 ? rawSourceRef : null;
   const sourceType =
@@ -238,21 +271,21 @@ function resolveToolObservation(
 
   return {
     toolName: name,
-    input,
+    input: sanitizedInput,
     resultText: sanitizedResultText,
     createdAt: new Date().toISOString(),
     sourceRef,
     sourceType,
-    command: normalizeObservationText(input.command),
-    workingDirectory: normalizeObservationText(input.cwd),
+    command: normalizeObservationText(sanitizedInput.command),
+    workingDirectory: normalizeObservationText(sanitizedInput.cwd),
     targetPath: normalizeObservationText(
-      typeof input.path === "string"
-        ? input.path
-        : typeof input.file === "string"
-          ? input.file
+      typeof sanitizedInput.path === "string"
+        ? sanitizedInput.path
+        : typeof sanitizedInput.file === "string"
+          ? sanitizedInput.file
           : null,
     ),
-    queryText: normalizeObservationText(input.query),
+    queryText: normalizeObservationText(sanitizedInput.query),
     exitCode: name === "run_terminal_command" ? parseTerminalExitCode(sanitizedResultText) : null,
   };
 }
@@ -372,10 +405,18 @@ export function createToolHandler(options?: {
   browserSessionKey?: string;
   toolSnapshot?: ToolSnapshot;
   parallelDepth?: number;
+  contextWindowTokens?: number;
   onParallelTasks?: (input: Record<string, unknown>) => Promise<import("@ember/core").ToolResult>;
   onToolResult?: (observation: MemoryToolObservation) => void;
 }) {
   let pendingHandoff: PendingHandoff | null = null;
+  const ctxWindow = options?.contextWindowTokens ?? 0;
+
+  function capResult(result: import("@ember/core").ToolResult): import("@ember/core").ToolResult {
+    if (ctxWindow <= 0) return result;
+    if (typeof result === "string") return capToolResult(result, ctxWindow);
+    return { ...result, text: capToolResult(result.text, ctxWindow) };
+  }
 
   return {
     async onToolCall(name: string, input: Record<string, unknown>): Promise<import("@ember/core").ToolResult> {
@@ -415,7 +456,7 @@ export function createToolHandler(options?: {
         if ((options.parallelDepth ?? 0) >= 1) {
           return "Parallel task execution is limited to one fan-out layer. Finish this subtask without launching more parallel workers.";
         }
-        const result = await options.onParallelTasks(input);
+        const result = capResult(await options.onParallelTasks(input));
         options.onToolResult?.(resolveToolObservation(name, input, result));
         return result;
       }
@@ -430,15 +471,15 @@ export function createToolHandler(options?: {
       // Only terminal tools use __sessionKey for session persistence.
       // Playwright MCP manages its own sessions internally via the MCP server process.
       if (name === "run_terminal_command" && options?.browserSessionKey) {
-        const result = await tool.execute({
+        const result = capResult(await tool.execute({
           ...input,
           __sessionKey: options.browserSessionKey,
-        });
+        }));
         options.onToolResult?.(resolveToolObservation(name, input, result));
         return result;
       }
 
-      const result = await tool.execute(input);
+      const result = capResult(await tool.execute(input));
       options?.onToolResult?.(resolveToolObservation(name, input, result));
       return result;
     },
@@ -537,6 +578,7 @@ export function getExecutionToolsForRole(
   role: Role,
   options: {
     compact?: boolean;
+    ultraCompact?: boolean;
     content?: string;
     conversation?: ChatMessage[];
   } = {},
@@ -546,7 +588,7 @@ export function getExecutionToolsForRole(
     return tools.map((tool) => tool.definition);
   }
 
-  return tools.map((tool) => compactToolDefinition(tool.definition));
+  return tools.map((tool) => compactToolDefinition(tool.definition, options.ultraCompact));
 }
 
 export function getExecutionToolSnapshotForRole(
@@ -679,6 +721,10 @@ function selectExecutionToolsForRole(
     /\b(tailscale|mesh vpn|tailnet|tailscale status|tailscale ip|tailscale serve|tailscale funnel|ping\b|dns lookup|dns resolve|network interface|local ip address|my ip)\b/i.test(
       contextText,
     );
+  const needsSsh =
+    /\b(ssh|secure shell|remote command|remote shell|remote host|remote machine|remote server|tailscale ssh|connect to .* via ssh)\b/i.test(
+      contextText,
+    );
   const needsPackageInstall =
     /\b(brew install|npm install|pip install|cargo install|apt install|apt-get install|install (?:the |a |package|library|tool|cli|module)|pnpm add|npx )\b/i.test(
       contextText,
@@ -727,6 +773,11 @@ function selectExecutionToolsForRole(
     selected.add("credential_list");
     selected.add("credential_get");
   }
+  if (needsSsh) {
+    selected.add("ssh_execute");
+    selected.add("credential_list");
+    selected.add("credential_get");
+  }
   if (
     /\b(save|store|remember|update|change|replace)\b/i.test(contextText) &&
     needsCredentialVault
@@ -752,6 +803,9 @@ function selectExecutionToolsForRole(
     selected.add("run_terminal_command");
   }
   if (needsNetworkTools) {
+    selected.add("network_tools");
+  }
+  if (needsSsh) {
     selected.add("network_tools");
   }
 
@@ -904,33 +958,31 @@ export function getToolSystemPrompt(
       "For Tailscale sharing: network_tools tailscale_status first to confirm running, then tailscale serve <port> (private) or tailscale funnel <port> (public internet).",
     );
   }
+  if (toolNames.has("ssh_execute")) {
+    workflows.push(
+      "For remote host actions: validate LAN/Tailscale reachability first, then ssh_execute action=test before action=run. Prefer credential vault entries over typing raw SSH passwords in prompts.",
+    );
+  }
 
   if (options.compact) {
     const compactSkills = [...toolSkills, ...roleSkills]
-      .slice(0, 8)
+      .slice(0, 6)
       .map((skill) => `- ${skill.name}: ${skill.description}`);
-    const compactWorkflows = workflows.slice(0, 6);
+    const compactWorkflows = workflows.slice(0, 4);
 
     return [
       "## Tools",
-      "Use tools only when they materially help.",
-      "Choose the smallest tool that fits and prefer one tool call per step.",
-      "Base every claim on tool results. Never say you checked, changed, or verified something without a tool result.",
-      "If the task grows beyond a compact tool loop, use handoff once and stop.",
-      ...(compactWorkflows.length > 0 ? ["", "## Quick Workflows", ...compactWorkflows.map((workflow) => `- ${workflow}`)] : []),
-      ...(compactSkills.length > 0 ? ["", "## Active Skills", ...compactSkills] : []),
+      "Use the smallest tool that fits. One call per step, then reassess.",
+      ...(compactWorkflows.length > 0 ? ["", ...compactWorkflows.map((workflow) => `- ${workflow}`)] : []),
+      ...(compactSkills.length > 0 ? ["", ...compactSkills] : []),
     ].join("\n");
   }
 
   // ── Assemble ──────────────────────────────────────────────────────────────
   const out: string[] = [
     "## Tools",
-    "Use tools when they help you answer correctly or complete the task.",
-    "Base every claim on tool results. Never say you checked, changed, ran, or verified something unless a tool result proves it.",
-    "Choose the smallest tool that fits the job.",
+    "Use the smallest tool that fits. One call per step, then reassess.",
     "Prefer short-output tools and the smallest valid input shape.",
-    "Prefer one tool call per step, then reassess.",
-    "Filesystem, terminal, browser, and desktop tools act on the host machine when active. The workspace root is the default project path, not a hard access boundary.",
   ];
 
   if (workflows.length) {
@@ -956,7 +1008,14 @@ function buildToolSelectionContext(content: string, conversation: ChatMessage[])
   return [content, ...recentMessages].join(" ").toLowerCase();
 }
 
-function compactToolDefinition(tool: ToolDefinition): ToolDefinition {
+function compactToolDefinition(tool: ToolDefinition, ultraCompact = false): ToolDefinition {
+  if (ultraCompact) {
+    return {
+      ...tool,
+      description: truncateInstruction(tool.description, 60),
+      inputSchema: ultraCompactJsonSchema(tool.inputSchema),
+    };
+  }
   return {
     ...tool,
     description: truncateInstruction(tool.description, TOOL_DESCRIPTION_LIMIT),
@@ -1008,6 +1067,64 @@ function compactJsonSchemaNode(value: unknown): unknown {
   for (const key of ["anyOf", "oneOf", "allOf"] as const) {
     if (Array.isArray(record[key])) {
       compact[key] = record[key].map((entry) => compactJsonSchemaNode(entry));
+    }
+  }
+
+  return compact;
+}
+
+/**
+ * Ultra-compact schema: strips all property descriptions, removes optional
+ * properties, keeps only type + required + enum. For small models where
+ * every token counts — property names are self-documenting enough.
+ */
+function ultraCompactJsonSchema(value: unknown): ToolDefinition["inputSchema"] {
+  return ultraCompactJsonSchemaNode(value, null) as ToolDefinition["inputSchema"];
+}
+
+function ultraCompactJsonSchemaNode(value: unknown, requiredKeys: string[] | null): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => ultraCompactJsonSchemaNode(item, null));
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+
+  const record = value as Record<string, unknown>;
+  const compact: Record<string, unknown> = {};
+  const required = Array.isArray(record.required) ? record.required as string[] : [];
+
+  if (typeof record.type === "string") {
+    compact.type = record.type;
+  }
+  if (required.length > 0) {
+    compact.required = required;
+  }
+  if (Array.isArray(record.enum) && record.enum.length > 0) {
+    compact.enum = record.enum;
+  }
+  // Strip optional properties — keep only required ones
+  if (record.properties && typeof record.properties === "object") {
+    const props = record.properties as Record<string, unknown>;
+    const kept = required.length > 0
+      ? Object.fromEntries(
+          Object.entries(props)
+            .filter(([key]) => required.includes(key))
+            .map(([key, property]) => [key, ultraCompactJsonSchemaNode(property, null)]),
+        )
+      : Object.fromEntries(
+          Object.entries(props).map(([key, property]) => [key, ultraCompactJsonSchemaNode(property, null)]),
+        );
+    if (Object.keys(kept).length > 0) {
+      compact.properties = kept;
+    }
+  }
+  if (record.items !== undefined) {
+    compact.items = ultraCompactJsonSchemaNode(record.items, null);
+  }
+  for (const key of ["anyOf", "oneOf", "allOf"] as const) {
+    if (Array.isArray(record[key])) {
+      compact[key] = record[key].map((entry: unknown) => ultraCompactJsonSchemaNode(entry, null));
     }
   }
 

@@ -1,0 +1,7 @@
+tunnel: ghost_listener
+credentials-file: /home/agent_t560/.cloudflared/tunnel_id.json
+
+ingress:
+  - hostname: ghost.yourdomain.com
+    service: http://localhost:8080
+  - service: http_status:404

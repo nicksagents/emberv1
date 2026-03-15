@@ -11,7 +11,12 @@ import type {
   RuntimeState,
   Settings,
 } from "@ember/core/client";
-import { isLocalOpenAiCompatibleBaseUrl, ROLES } from "@ember/core/client";
+import {
+  isLocalOpenAiCompatibleBaseUrl,
+  MAX_PROVIDER_TOOL_LOOP_LIMIT,
+  MIN_CONTEXT_WINDOW_TOKENS,
+  ROLES,
+} from "@ember/core/client";
 import type { McpServerConfig } from "@ember/core/mcp";
 
 import { clientApiPath } from "../lib/api";
@@ -416,6 +421,23 @@ function getProviderContextWindowLabel(provider: Provider): string {
   return "Auto";
 }
 
+function validateContextWindowTokensInput(rawValue: string): string | null {
+  const trimmed = rawValue.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed)) {
+    return "Context window must be a number.";
+  }
+  if (Math.floor(parsed) < MIN_CONTEXT_WINDOW_TOKENS) {
+    return `Context window must be at least ${MIN_CONTEXT_WINDOW_TOKENS.toLocaleString()} tokens.`;
+  }
+
+  return null;
+}
+
 function deriveProviderName(typeId: ConnectorTypeId, baseUrl: string): string {
   if (typeId === "codex-cli") {
     return "Codex CLI";
@@ -624,6 +646,12 @@ export function SettingsClient({
     selectedProviderType && selectedProviderType === "codex-cli"
       ? normalizeModels(modelCatalog[selectedProviderType] ?? [])
       : [];
+  const isCreatingLocalOpenAiEndpoint =
+    selectedProviderType === "openai-compatible" &&
+    isLocalOpenAiCompatibleBaseUrl(baseUrl.trim());
+  const createContextWindowError = isCreatingLocalOpenAiEndpoint
+    ? validateContextWindowTokensInput(contextWindowTokens)
+    : null;
 
   const assignedRoleCount = assignments.filter(
     (assignment) => assignment.providerId && assignment.modelId,
@@ -887,6 +915,13 @@ export function SettingsClient({
       const isLocalEndpoint =
         provider.typeId === "openai-compatible" &&
         isLocalOpenAiCompatibleBaseUrl(providerEditor.baseUrl);
+      const contextWindowError = isLocalEndpoint
+        ? validateContextWindowTokensInput(providerEditor.contextWindowTokens)
+        : null;
+
+      if (contextWindowError) {
+        throw new Error(contextWindowError);
+      }
 
       if (provider.typeId === "openai-compatible") {
         config.baseUrl = providerEditor.baseUrl.trim();
@@ -919,7 +954,8 @@ export function SettingsClient({
       });
 
       if (!updateResponse.ok) {
-        throw new Error(`Update failed with status ${updateResponse.status}.`);
+        const payload = (await updateResponse.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(payload?.error ?? `Update failed with status ${updateResponse.status}.`);
       }
 
       let updatedProvider = ((await updateResponse.json()) as { item: Provider }).item;
@@ -972,6 +1008,13 @@ export function SettingsClient({
       const isLocalEndpoint =
         selectedProviderType === "openai-compatible" &&
         isLocalOpenAiCompatibleBaseUrl(baseUrl.trim());
+      const contextWindowError = isLocalEndpoint
+        ? validateContextWindowTokensInput(contextWindowTokens)
+        : null;
+
+      if (contextWindowError) {
+        throw new Error(contextWindowError);
+      }
 
       if (selectedProviderType === "codex-cli" && defaultModelId.trim()) {
         config.defaultModelId = defaultModelId.trim();
@@ -1017,7 +1060,8 @@ export function SettingsClient({
       });
 
       if (!response.ok) {
-        throw new Error(`Create failed with status ${response.status}.`);
+        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(payload?.error ?? `Create failed with status ${response.status}.`);
       }
 
       const payload = (await response.json()) as { item: Provider };
@@ -1436,6 +1480,28 @@ export function SettingsClient({
                         />
                       </div>
                       <div className="settings-field">
+                        <label>Tool loop limit</label>
+                        <input
+                          type="number"
+                          min={0}
+                          max={MAX_PROVIDER_TOOL_LOOP_LIMIT}
+                          step={10}
+                          value={settings.compression.toolLoopLimit}
+                          onChange={(e) =>
+                            updateCompressionSetting(
+                              "toolLoopLimit",
+                              Math.max(
+                                0,
+                                Math.min(
+                                  MAX_PROVIDER_TOOL_LOOP_LIMIT,
+                                  Math.floor(Number(e.target.value) || 0),
+                                ),
+                              ),
+                            )
+                          }
+                        />
+                      </div>
+                      <div className="settings-field">
                         <label>Response headroom</label>
                         <input
                           type="number"
@@ -1501,6 +1567,13 @@ export function SettingsClient({
                       <p>
                         Max prompt: ~{settings.compression.maxPromptTokens.toLocaleString()} tokens, targeting{" "}
                         {settings.compression.targetPromptTokens.toLocaleString()} after compaction.
+                      </p>
+                      <p style={{ marginTop: "0.35rem" }}>
+                        Tool loop limit:{" "}
+                        {settings.compression.toolLoopLimit === 0
+                          ? "adaptive (context-based)"
+                          : `${settings.compression.toolLoopLimit.toLocaleString()} turns`}
+                        . Set 0 to use adaptive context-window limits.
                       </p>
                     </div>
                   </div>
@@ -1598,12 +1671,17 @@ export function SettingsClient({
                                   <label>Context window</label>
                                   <input
                                     type="number"
-                                    min={4000}
+                                    min={0}
                                     step={1000}
                                     value={contextWindowTokens}
                                     onChange={(e) => setContextWindowTokens(e.target.value)}
                                     placeholder="100000"
                                   />
+                                  {createContextWindowError && (
+                                    <p className="helper-copy" style={{ color: "var(--danger-400)" }}>
+                                      {createContextWindowError}
+                                    </p>
+                                  )}
                                 </div>
                               )}
                             </>
@@ -1663,7 +1741,8 @@ export function SettingsClient({
                                 creatingProvider ||
                                 !providerName.trim() ||
                                 (qp.apiKeyRequired && !apiKey.trim()) ||
-                                (isOpenAI && !baseUrl.trim())
+                                (isOpenAI && !baseUrl.trim()) ||
+                                Boolean(createContextWindowError)
                               }
                             >
                               {creatingProvider ? "Connecting..." : "Connect Provider"}
@@ -1694,6 +1773,13 @@ export function SettingsClient({
                         const featuredModels = models.slice(0, 3);
                         const busy = busyProviderId === provider.id;
                         const isEditing = editingProviderId === provider.id && providerEditor !== null;
+                        const editContextWindowError =
+                          isEditing &&
+                          provider.typeId === "openai-compatible" &&
+                          providerEditor &&
+                          isLocalOpenAiCompatibleBaseUrl(providerEditor.baseUrl.trim())
+                            ? validateContextWindowTokensInput(providerEditor.contextWindowTokens)
+                            : null;
                         const canAssign =
                           provider.status === "connected" &&
                           provider.capabilities.canChat &&
@@ -1780,7 +1866,7 @@ export function SettingsClient({
                                           <label>Context window</label>
                                           <input
                                             type="number"
-                                            min={4000}
+                                            min={0}
                                             step={1000}
                                             value={providerEditor.contextWindowTokens}
                                             onChange={(e) =>
@@ -1790,6 +1876,11 @@ export function SettingsClient({
                                             }
                                             placeholder="100000"
                                           />
+                                          {editContextWindowError && (
+                                            <p className="helper-copy" style={{ color: "var(--danger-400)" }}>
+                                              {editContextWindowError}
+                                            </p>
+                                          )}
                                         </div>
                                       )}
                                     </>
@@ -1837,7 +1928,8 @@ export function SettingsClient({
                                       busy ||
                                       !providerEditor.name.trim() ||
                                       (provider.typeId === "openai-compatible" &&
-                                        !providerEditor.baseUrl.trim())
+                                        !providerEditor.baseUrl.trim()) ||
+                                      Boolean(editContextWindowError)
                                     }
                                   >
                                     {busy ? "Saving..." : "Save Provider"}

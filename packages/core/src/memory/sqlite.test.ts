@@ -6,9 +6,12 @@ import test from "node:test";
 
 import { defaultMemoryConfig } from "./defaults";
 import { getItemInternalMetadata } from "./metadata";
+import { isNodeSqliteAvailable } from "./sqlite";
 import { createMemoryRepository } from "./store";
 
-test("sqlite memory repository persists records across repository instances", async () => {
+const sqliteTest = isNodeSqliteAvailable() ? test : test.skip;
+
+sqliteTest("sqlite memory repository persists records across repository instances", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "ember-memory-sqlite-"));
   const previousRoot = process.env.EMBER_ROOT;
   process.env.EMBER_ROOT = tempRoot;
@@ -58,7 +61,7 @@ test("sqlite memory repository persists records across repository instances", as
   }
 });
 
-test("sqlite search supports active-session exclusion and source-type filtering", async () => {
+sqliteTest("sqlite search supports active-session exclusion and source-type filtering", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "ember-memory-sqlite-"));
   const previousRoot = process.env.EMBER_ROOT;
   process.env.EMBER_ROOT = tempRoot;
@@ -109,7 +112,7 @@ test("sqlite search supports active-session exclusion and source-type filtering"
   }
 });
 
-test("sqlite search supports semantic recall for paraphrased queries", async () => {
+sqliteTest("sqlite search supports semantic recall for paraphrased queries", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "ember-memory-sqlite-"));
   const previousRoot = process.env.EMBER_ROOT;
   process.env.EMBER_ROOT = tempRoot;
@@ -152,7 +155,7 @@ test("sqlite search supports semantic recall for paraphrased queries", async () 
   }
 });
 
-test("sqlite search uses structured cues to disambiguate similar episodic memories", async () => {
+sqliteTest("sqlite search uses structured cues to disambiguate similar episodic memories", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "ember-memory-sqlite-"));
   const previousRoot = process.env.EMBER_ROOT;
   process.env.EMBER_ROOT = tempRoot;
@@ -217,7 +220,7 @@ test("sqlite search uses structured cues to disambiguate similar episodic memori
   }
 });
 
-test("sqlite repository persists reinforcement metadata across reopen", async () => {
+sqliteTest("sqlite repository persists reinforcement metadata across reopen", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "ember-memory-sqlite-"));
   const previousRoot = process.env.EMBER_ROOT;
   process.env.EMBER_ROOT = tempRoot;
@@ -276,7 +279,7 @@ test("sqlite repository persists reinforcement metadata across reopen", async ()
   }
 });
 
-test("sqlite repository persists memory edges across reopen", async () => {
+sqliteTest("sqlite repository persists memory edges across reopen", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "ember-memory-sqlite-"));
   const previousRoot = process.env.EMBER_ROOT;
   process.env.EMBER_ROOT = tempRoot;
@@ -318,7 +321,7 @@ test("sqlite repository persists memory edges across reopen", async () => {
   }
 });
 
-test("sqlite search excludes expired volatile world facts", async () => {
+sqliteTest("sqlite search excludes expired volatile world facts", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "ember-memory-sqlite-"));
   const previousRoot = process.env.EMBER_ROOT;
   process.env.EMBER_ROOT = tempRoot;
@@ -360,7 +363,7 @@ test("sqlite search excludes expired volatile world facts", async () => {
   }
 });
 
-test("sqlite repository imports phase-1 file memory into the database on first open", async () => {
+sqliteTest("sqlite repository imports phase-1 file memory into the database on first open", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "ember-memory-sqlite-"));
   await mkdir(path.join(tempRoot, "data"), { recursive: true });
   await writeFile(

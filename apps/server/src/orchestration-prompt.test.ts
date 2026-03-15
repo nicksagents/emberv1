@@ -7,7 +7,7 @@ import type { Provider, RoleAssignment } from "@ember/core";
 import { buildOrchestrationPrompt, buildRolePromptStack } from "./orchestration-prompt.js";
 import type { EmberTool } from "./tools/index.js";
 import { registerMcpTools } from "./tools/index.js";
-import { buildSharedPrompt } from "../../../packages/prompts/src/shared.ts";
+import { buildSharedPrompt } from "../../../packages/prompts/src/shared";
 
 function makeProvider(
   id: string,
@@ -90,10 +90,10 @@ test("orchestration prompt exposes current model lanes and live MCP surfaces", (
     assignmentMap,
   });
 
-  assert.match(prompt, /Current role: coordinator/i);
+  assert.match(prompt, /Current lane:.*coordinator/i);
   assert.match(prompt, /coordinator: .*qwen3-32b/i);
   assert.match(prompt, /director: .*gpt-5-coder/i);
-  assert.match(prompt, /Global MCP surfaces:/);
+  assert.match(prompt, /MCP:/);
   assert.match(prompt, /Atlas: coordinator, director/);
 });
 
@@ -112,17 +112,13 @@ test("buildRolePromptStack combines shared prompt, orchestration brief, and role
     assignmentMap,
   });
 
-  assert.match(promptStack.shared, /## Team Orchestration/);
-  assert.match(promptStack.shared, /Current role: dispatch/i);
-  assert.match(promptStack.tools, /## Workflow/);
-  assert.match(promptStack.tools, /Team Orchestration/);
+  assert.match(promptStack.shared, /Current lane:.*dispatch/i);
 });
 
-test("shared prompt tells active roles that native tools can access host paths", () => {
+test("shared prompt tells active roles about workspace and host access", () => {
   const settings = normalizeSettings({}, "/tmp/workspace");
   const prompt = buildSharedPrompt(settings, "coordinator");
 
-  assert.match(prompt, /Host Access/);
-  assert.match(prompt, /not a hard sandbox boundary/i);
-  assert.match(prompt, /absolute host paths/i);
+  assert.match(prompt, /Workspace:.*\/tmp\/workspace/);
+  assert.match(prompt, /not a hard boundary/i);
 });

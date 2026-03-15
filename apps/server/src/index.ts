@@ -16,7 +16,10 @@ import {
   consolidateConversationMemory,
   createMemoryRepository,
   deriveCompressionPromptBudget,
+  estimateConversationTokens,
   estimatePromptExtraTokens,
+  estimatePromptInputTokens,
+  progressiveCompactConversation,
   revalidateMemoryItem,
   retireProcedureMemory,
   suppressMemoryItem,
@@ -24,6 +27,9 @@ import {
   ensureDataFiles,
   initializeMemoryInfrastructure,
   getProviderCapabilities,
+  isLocalOpenAiCompatibleBaseUrl,
+  MIN_CONTEXT_WINDOW_TOKENS,
+  resolveProviderContextWindowTokens,
   sanitizeProviderConfig,
   readConnectorTypes,
   readConversations,
@@ -54,6 +60,7 @@ import type {
   Provider,
   Role,
   RoleAssignment,
+  TokenUsage,
   ToolDefinition,
 } from "@ember/core";
 import type { UiBlock } from "@ember/ui-schema";
@@ -183,6 +190,32 @@ function sanitizeRecord(value: Record<string, string> | undefined): Record<strin
       .map(([key, item]) => [key, item.trim()] as const)
       .filter(([, item]) => item.length > 0),
   );
+}
+
+function validateProviderContextWindowConfig(
+  typeId: Provider["typeId"],
+  config: Record<string, string>,
+): string | null {
+  if (typeId !== "openai-compatible") {
+    return null;
+  }
+
+  const baseUrl = config.baseUrl?.trim() ?? "";
+  if (!isLocalOpenAiCompatibleBaseUrl(baseUrl)) {
+    return null;
+  }
+
+  const raw = config.contextWindowTokens?.trim() ?? "";
+  if (!raw) {
+    return null;
+  }
+
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || Math.floor(parsed) < MIN_CONTEXT_WINDOW_TOKENS) {
+    return `Local provider context window must be at least ${MIN_CONTEXT_WINDOW_TOKENS} tokens.`;
+  }
+
+  return null;
 }
 
 function toConversationSummary(conversation: Conversation): ConversationSummary {
@@ -368,15 +401,35 @@ function compactConversationForContext(
     settings.compression,
     promptBudget.contextWindowTokens,
   );
+  const extraTokens =
+    estimatePromptExtraTokens({ tools }) + Math.max(0, Math.floor(extraPromptTokens));
 
-  return compactConversationHistory(conversation, {
+  // Estimate current prompt tokens to determine progressive compaction stage
+  const currentPromptTokens = extraTokens + estimatePromptInputTokens({
+    promptStack,
+    conversation,
+    content,
+  });
+
+  // Apply progressive compaction first (tool result aging, thinking removal)
+  const { messages: progressiveMessages } = progressiveCompactConversation(
+    conversation,
+    {
+      currentPromptTokens,
+      maxPromptTokens: compressionBudget.maxPromptTokens,
+      targetPromptTokens: compressionBudget.targetPromptTokens,
+      contextWindowTokens: promptBudget.contextWindowTokens,
+    },
+  );
+
+  // Then apply full compaction if still needed (on pre-aged messages)
+  return compactConversationHistory(progressiveMessages, {
     enabled: settings.compression.enabled,
     maxPromptTokens: compressionBudget.maxPromptTokens,
     targetPromptTokens: compressionBudget.targetPromptTokens,
     preserveRecentMessages: settings.compression.preserveRecentMessages,
     minimumRecentMessages: settings.compression.minimumRecentMessages,
-    extraPromptTokens:
-      estimatePromptExtraTokens({ tools }) + Math.max(0, Math.floor(extraPromptTokens)),
+    extraPromptTokens: extraTokens,
     promptStack,
     currentUserContent: content,
   });
@@ -464,6 +517,7 @@ function buildReplyMessage(
   responseThinking: string | null,
   responseModelId: string | null,
   executionNote: string,
+  responseUsage?: TokenUsage | null,
 ): ChatMessage {
   return {
     id: createId("msg"),
@@ -477,6 +531,7 @@ function buildReplyMessage(
     providerName: context.provider?.name ?? null,
     modelId: responseModelId,
     routedTo: context.routedTo,
+    usage: responseUsage ?? null,
     blocks: createBlocks(
       context.activeRole,
       context.mode,
@@ -526,11 +581,17 @@ async function buildHandoffContext(
     source.providers.find((candidate) => candidate.id === providerDecision.providerId) ??
     preferredProvider ??
     null;
-  const executionProfile = resolveExecutionModelProfile(source.settings, provider, targetRole);
+  const handoffPressure = (() => {
+    const convTokens = estimateConversationTokens(conversation);
+    const budget = deriveCompressionPromptBudget(source.settings.compression, resolveProviderContextWindowTokens(provider, source.settings));
+    return budget.maxPromptTokens > 0 ? convTokens / budget.maxPromptTokens : 0;
+  })();
+  const executionProfile = resolveExecutionModelProfile(source.settings, provider, targetRole, handoffPressure);
   const tools = provider && !provider.capabilities.canUseTools
     ? []
     : getExecutionToolsForRole(targetRole, {
         compact: executionProfile.compactToolset,
+        ultraCompact: executionProfile.ultraCompactToolset,
         content: handoffMessage,
         conversation,
       });
@@ -926,6 +987,7 @@ async function resolveAutoRouteDecision(
       executeProviderChat(routerProvider, secrets, {
         modelId: routerAssignment?.modelId ?? null,
         promptStack: dispatchPromptStack,
+        toolLoopLimit: settings.compression.toolLoopLimit,
         role: "dispatch",
         conversation: [],
         content: buildDispatchInput(request, policy.decision),
@@ -1025,6 +1087,7 @@ async function resolveExecutionModelDecision(options: {
       executeProviderChat(routerProvider, options.secrets, {
         modelId: routerAssignment?.modelId ?? null,
         promptStack: dispatchPromptStack,
+        toolLoopLimit: options.settings.compression.toolLoopLimit,
         role: "dispatch",
         conversation: [],
         content: buildModelDispatchInput({
@@ -1139,6 +1202,7 @@ async function resolveExecutionProviderDecision(options: {
       executeProviderChat(routerProvider, options.secrets, {
         modelId: routerAssignment?.modelId ?? null,
         promptStack: dispatchPromptStack,
+        toolLoopLimit: options.settings.compression.toolLoopLimit,
         role: "dispatch",
         conversation: [],
         content: buildProviderDispatchInput({
@@ -1246,11 +1310,17 @@ async function prepareExecution(
     providers.find((candidate) => candidate.id === providerDecision.providerId) ??
     preferredProvider ??
     null;
-  const executionProfile = resolveExecutionModelProfile(settings, provider, activeRole);
+  const contextPressure = (() => {
+    const conversationTokens = estimateConversationTokens(request.conversation);
+    const budget = deriveCompressionPromptBudget(settings.compression, resolveProviderContextWindowTokens(provider, settings));
+    return budget.maxPromptTokens > 0 ? conversationTokens / budget.maxPromptTokens : 0;
+  })();
+  const executionProfile = resolveExecutionModelProfile(settings, provider, activeRole, contextPressure);
   const tools = provider && !provider.capabilities.canUseTools
     ? []
     : getExecutionToolsForRole(activeRole, {
         compact: executionProfile.compactToolset,
+        ultraCompact: executionProfile.ultraCompactToolset,
         content: request.content,
         conversation: request.conversation,
       });
@@ -1519,6 +1589,7 @@ async function buildExecution(
         browserSessionKey: currentCtx.browserSessionKey,
         toolSnapshot: currentCtx.toolSnapshot,
         parallelDepth: currentCtx.parallelDepth,
+        contextWindowTokens: resolveProviderContextWindowTokens(iterProvider, currentCtx.settings),
         onParallelTasks: (input) =>
           runParallelTasks({
             parentRequest: request,
@@ -1545,11 +1616,14 @@ async function buildExecution(
       let iterContent: string;
       let iterThinking: string | null;
       let iterModelId: string | null;
+      let iterUsage: TokenUsage | null = null;
 
       try {
         const iterExecution = await executeProviderChat(iterProvider, currentCtx.secrets, {
           modelId: currentCtx.responseModelId,
           promptStack: currentCtx.promptStack,
+          toolLoopLimit: currentCtx.settings.compression.toolLoopLimit,
+          contextWindowTokens: resolveProviderContextWindowTokens(iterProvider, currentCtx.settings),
           memoryContext,
           procedureContext,
           role: currentCtx.activeRole,
@@ -1561,6 +1635,7 @@ async function buildExecution(
         iterContent = iterExecution.content;
         iterThinking = iterExecution.thinking ?? null;
         iterModelId = iterExecution.modelId;
+        iterUsage = iterExecution.usage ?? null;
         await recordMemoryRetrievalSuccesses(
           currentCtx.memoryRepository,
           memoryContext,
@@ -1593,7 +1668,7 @@ async function buildExecution(
       ]
         .filter(Boolean)
         .join(" ");
-      const iterMsg = buildReplyMessage(currentCtx, request, iterContent, iterThinking, iterModelId, iterNote);
+      const iterMsg = buildReplyMessage(currentCtx, request, iterContent, iterThinking, iterModelId, iterNote, iterUsage);
       messages.push(iterMsg);
 
       const handoff = handler.getPendingHandoff();
@@ -2423,13 +2498,22 @@ app.post("/api/providers", async (request, reply) => {
     readProviders(),
     readProviderSecrets(),
   ]);
+  const sanitizedConfigInput = sanitizeRecord(body.config);
+  const contextWindowError = validateProviderContextWindowConfig(
+    body.typeId,
+    sanitizedConfigInput,
+  );
+  if (contextWindowError) {
+    reply.code(400);
+    return { error: contextWindowError };
+  }
 
   const provider: Provider = {
     id: createId("provider"),
     name: body.name.trim(),
     typeId: body.typeId,
     status: "idle",
-    config: sanitizeProviderConfig(body.typeId, sanitizeRecord(body.config)),
+    config: sanitizeProviderConfig(body.typeId, sanitizedConfigInput),
     availableModels: [],
     capabilities: getProviderCapabilities(body.typeId),
     lastError: null,
@@ -2475,18 +2559,26 @@ app.put("/api/providers/:id", async (request, reply) => {
     return { error: "Provider name cannot be empty." };
   }
 
-  const nextConfig = sanitizeProviderConfig(provider.typeId, {
+  const nextConfigInput = {
     ...provider.config,
     ...sanitizeRecord(body?.config),
-  });
+  };
 
   if (body?.config) {
     for (const [key, value] of Object.entries(body.config)) {
       if (typeof value === "string" && value.trim().length === 0) {
-        delete nextConfig[key];
+        delete nextConfigInput[key];
       }
     }
   }
+
+  const contextWindowError = validateProviderContextWindowConfig(provider.typeId, nextConfigInput);
+  if (contextWindowError) {
+    reply.code(400);
+    return { error: contextWindowError };
+  }
+
+  const nextConfig = sanitizeProviderConfig(provider.typeId, nextConfigInput);
 
   const currentSecrets = { ...(secrets[id] ?? {}) };
   if (body?.clearSecrets?.length) {
@@ -2694,7 +2786,7 @@ app.put("/api/settings", async (request, reply) => {
   }
 
   await writeSettings(body.item);
-  return { item: body.item };
+  return { item: await readSettings() };
 });
 
 app.get("/api/prompts/:role", async (request, reply) => {
@@ -2719,6 +2811,7 @@ app.get("/api/prompts/:role", async (request, reply) => {
     ? []
     : getExecutionToolsForRole(role, {
         compact: executionProfile.compactToolset,
+        ultraCompact: executionProfile.ultraCompactToolset,
       });
 
   return {
@@ -2898,6 +2991,7 @@ app.post("/api/chat/stream", async (request, reply) => {
         browserSessionKey: streamCtx.browserSessionKey,
         toolSnapshot: streamCtx.toolSnapshot,
         parallelDepth: streamCtx.parallelDepth,
+        contextWindowTokens: resolveProviderContextWindowTokens(iterProvider, streamCtx.settings),
         onParallelTasks: (input) =>
           runParallelTasks({
             parentRequest: body,
@@ -2931,6 +3025,8 @@ app.post("/api/chat/stream", async (request, reply) => {
           {
             modelId: streamCtx.responseModelId,
             promptStack: streamCtx.promptStack,
+            toolLoopLimit: streamCtx.settings.compression.toolLoopLimit,
+            contextWindowTokens: resolveProviderContextWindowTokens(iterProvider, streamCtx.settings),
             memoryContext,
             procedureContext,
             role: streamCtx.activeRole,
@@ -2958,6 +3054,9 @@ app.post("/api/chat/stream", async (request, reply) => {
               iterContent += text;
               sendStreamEvent(send, { type: "content", text });
             },
+            onUsage(inputTokens, outputTokens) {
+              sendStreamEvent(send, { type: "usage", inputTokens, outputTokens });
+            },
           },
         );
         await recordMemoryRetrievalSuccesses(
@@ -2981,6 +3080,7 @@ app.post("/api/chat/stream", async (request, reply) => {
           .join(" ");
         const iterMsg = buildReplyMessage(
           streamCtx, body, iterExecution.content, iterExecution.thinking ?? null, iterExecution.modelId, iterNote,
+          iterExecution.usage ?? null,
         );
         resultMessages.push(iterMsg);
 

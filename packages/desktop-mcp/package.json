@@ -11,7 +11,7 @@
     "build": "tsup src/index.ts --format esm --dts",
     "dev": "tsx watch src/index.ts",
     "typecheck": "tsc --project tsconfig.json --noEmit",
-    "test": "node --import tsx --test src/**/*.test.ts"
+    "test": "bash -lc 'shopt -s globstar nullglob; tests=(src/**/*.test.ts); if [ ${#tests[@]} -eq 0 ]; then echo \"No test files found.\"; exit 0; fi; node --import tsx --test \"${tests[@]}\"'"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",

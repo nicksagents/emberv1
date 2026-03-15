@@ -12,6 +12,15 @@ import {
   runUpdate,
 } from "./update.js";
 
+function canRunGitFixtures(): boolean {
+  const result = spawnSync("git", ["--version"], {
+    encoding: "utf8",
+  });
+  return !result.error && result.status === 0;
+}
+
+const gitFixtureTest = canRunGitFixtures() ? test : test.skip;
+
 function run(command: string, args: string[], cwd: string): string {
   const result = spawnSync(command, args, {
     cwd,
@@ -91,7 +100,7 @@ test("listPreservedWorkspacePaths includes local state and excludes logs", () =>
   ]);
 });
 
-test("resolveGitUpstream and tracked state discovery use the active branch config", () => {
+gitFixtureTest("resolveGitUpstream and tracked state discovery use the active branch config", () => {
   const { work } = createRemoteFixture();
 
   writeFile(path.join(work, "data", "provider-secrets.json"), "{\"token\":\"secret\"}\n");
@@ -108,7 +117,7 @@ test("resolveGitUpstream and tracked state discovery use the active branch confi
   ]);
 });
 
-test("runUpdate preserves Ember state while pulling remote changes and reapplying local code changes", () => {
+gitFixtureTest("runUpdate preserves Ember state while pulling remote changes and reapplying local code changes", () => {
   const { updater, work } = createRemoteFixture();
 
   writeFile(path.join(work, ".env"), "EMBER_WEB_PORT=4010\n");
@@ -145,7 +154,7 @@ test("runUpdate preserves Ember state while pulling remote changes and reapplyin
   assert.equal(readFileSync(path.join(work, "remote.txt"), "utf8"), "from remote\n");
 });
 
-test("runUpdate restores preserved Ember state even when install steps fail", () => {
+gitFixtureTest("runUpdate restores preserved Ember state even when install steps fail", () => {
   const { updater, work } = createRemoteFixture();
 
   writeFile(path.join(work, ".env"), "EMBER_RUNTIME_PORT=4444\n");

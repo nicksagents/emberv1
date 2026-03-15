@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { defaultMemoryConfig, createMemoryRepository } from "@ember/core";
+import { defaultMemoryConfig, createMemoryRepository, isNodeSqliteAvailable } from "@ember/core";
 
 import {
   getMemoryReplayState,
@@ -39,7 +39,9 @@ async function withRepository(
   }
 }
 
-test("maybeRunMemoryReplayWithRepository skips when there are no archived sessions", async () => {
+const sqliteTest = isNodeSqliteAvailable() ? test : test.skip;
+
+sqliteTest("maybeRunMemoryReplayWithRepository skips when there are no archived sessions", async () => {
   await withRepository(async (repository) => {
     const result = await maybeRunMemoryReplayWithRepository(repository, {
       reason: "scheduled-interval",
@@ -52,7 +54,7 @@ test("maybeRunMemoryReplayWithRepository skips when there are no archived sessio
   });
 });
 
-test("maybeRunMemoryReplayWithRepository runs once for new archived sessions and then skips until there is new archive input", async () => {
+sqliteTest("maybeRunMemoryReplayWithRepository runs once for new archived sessions and then skips until there is new archive input", async () => {
   await withRepository(async (repository) => {
     await repository.upsertSession({
       id: "sess_archive",
@@ -111,7 +113,7 @@ test("maybeRunMemoryReplayWithRepository runs once for new archived sessions and
   });
 });
 
-test("maybeRunMemoryReplayWithRepository force-runs even when archive state has not changed", async () => {
+sqliteTest("maybeRunMemoryReplayWithRepository force-runs even when archive state has not changed", async () => {
   await withRepository(async (repository) => {
     await repository.upsertSession({
       id: "sess_archive",

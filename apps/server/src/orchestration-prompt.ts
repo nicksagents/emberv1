@@ -102,12 +102,9 @@ export function buildOrchestrationPrompt(options: {
       .join("; ");
 
     return [
-      "## Team",
       `Current lane: ${currentLane}.`,
-      specialistSummary ? `Other lanes: ${specialistSummary}.` : "",
+      specialistSummary ? `Lanes: ${specialistSummary}.` : "",
       compactMcp ? `MCP: ${compactMcp}.` : "",
-      "Handoff switches to the target lane. Inside that lane, the provider router may choose a better connected provider and the model router may choose a better model. Use handoff only when another lane has the clearer task fit or tool surface.",
-      "If launch_parallel_tasks is available, use it only for independent subtasks that can run concurrently without overlapping file edits.",
     ]
       .filter(Boolean)
       .join("\n");
@@ -123,16 +120,9 @@ export function buildOrchestrationPrompt(options: {
   const mcpLines = mcpRoster.map((entry) => `- ${toTitleCase(entry.serverName)}: ${entry.roles.join(", ")}`);
 
   return [
-    "## Team Orchestration",
-    `Current role: ${options.role}. Current lane: ${currentLane}.`,
-    "Role lanes:",
+    `Current lane: ${currentLane}.`,
     ...roleLines,
-    ...(mcpLines.length > 0 ? ["", "Global MCP surfaces:", ...mcpLines] : []),
-    "",
-    "Stay in your lane if you can complete the work in one focused pass.",
-    "Use handoff only when another role has the better lane or tool surface.",
-    "A handoff automatically continues the task on the receiving role, and the provider/model routers may switch to a better connected provider and model inside that lane.",
-    "If launch_parallel_tasks is available, use it only for independent subtasks that can run concurrently without overlapping file edits.",
+    ...(mcpLines.length > 0 ? ["MCP:", ...mcpLines] : []),
   ].join("\n");
 }
 
