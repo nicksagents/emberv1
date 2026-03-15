@@ -898,7 +898,7 @@ export function getToolSystemPrompt(
     workflows.push("For APIs and health checks: prefer http_request over browser automation.");
   }
   if (toolNames.has("web_search") && toolNames.has("fetch_page")) {
-    workflows.push("For external research: web_search first, then fetch_page on the best source.");
+    workflows.push("For external research: web_search auto-fetches the top 3 pages. Only use fetch_page if you need more content from a specific result or a URL you already have.");
   }
   if (toolNames.has("memory_search") && toolNames.has("memory_get")) {
     workflows.push("For cross-session recall: memory_search first, then memory_get on the best id before asking the user to repeat themselves.");

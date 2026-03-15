@@ -6,6 +6,14 @@ interface SearchResult {
   title: string;
   snippet: string;
   url: string;
+  extraSnippets?: string[];
+}
+
+interface FetchedPage {
+  url: string;
+  title: string;
+  extract: string;
+  fetchError?: string;
 }
 
 // ── Brave Search API ────────────────────────────────────────────────────────
@@ -15,6 +23,8 @@ interface BraveWebResult {
   url: string;
   description?: string;
   extra_snippets?: string[];
+  page_age?: string;
+  language?: string;
 }
 
 interface BraveSearchResponse {
@@ -23,6 +33,10 @@ interface BraveSearchResponse {
   };
   query?: {
     original?: string;
+    altered?: string;
+  };
+  mixed?: {
+    main?: Array<{ type: string; index: number }>;
   };
 }
 
@@ -30,11 +44,16 @@ async function fetchBraveResults(
   query: string,
   maxResults: number,
   apiKey: string,
+  freshness?: string,
 ): Promise<SearchResult[]> {
   const url = new URL("https://api.search.brave.com/res/v1/web/search");
   url.searchParams.set("q", query);
   url.searchParams.set("count", String(Math.min(maxResults, 20)));
   url.searchParams.set("result_filter", "web");
+  url.searchParams.set("text_decorations", "false");
+  if (freshness) {
+    url.searchParams.set("freshness", freshness);
+  }
 
   const res = await fetch(url.toString(), {
     headers: {
@@ -56,12 +75,13 @@ async function fetchBraveResults(
     title: r.title,
     url: r.url,
     snippet: r.description ?? r.extra_snippets?.[0] ?? "",
+    extraSnippets: r.extra_snippets,
   }));
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-function truncateSnippet(text: string, max = 180): string {
+function truncateSnippet(text: string, max = 350): string {
   if (text.length <= max) return text;
   return text.slice(0, max).replace(/\s+\S*$/, "") + "…";
 }
@@ -195,14 +215,215 @@ async function fetchDdgResults(
     .slice(0, maxResults);
 }
 
+// ── Auto-fetch: extract focused content from top results ─────────────────
+
+/** Lightweight HTML-to-text for auto-fetched pages (mirrors fetch-page logic). */
+function htmlToText(html: string): string {
+  return html
+    // Drop script/style/svg/noscript/nav/header/footer blocks
+    .replace(/<script\b[\s\S]*?<\/script>/gi, "")
+    .replace(/<style\b[\s\S]*?<\/style>/gi, "")
+    .replace(/<svg\b[\s\S]*?<\/svg>/gi, "")
+    .replace(/<noscript\b[\s\S]*?<\/noscript>/gi, "")
+    .replace(/<nav\b[\s\S]*?<\/nav>/gi, "")
+    .replace(/<footer\b[\s\S]*?<\/footer>/gi, "")
+    // Headings → newline + text
+    .replace(/<h([1-6])[^>]*>([\s\S]*?)<\/h\1>/gi, (_m, _lvl, inner) =>
+      "\n\n" + inner.replace(/<[^>]+>/g, "").trim() + "\n",
+    )
+    // Block elements → newlines
+    .replace(
+      /<\/?(p|div|li|tr|blockquote|pre|article|section|main|aside|figure|figcaption|table|thead|tbody|tfoot|dd|dt)[^>]*>/gi,
+      "\n",
+    )
+    .replace(/<br\s*\/?>/gi, "\n")
+    // Links: keep visible text
+    .replace(/<a[^>]*>([\s\S]*?)<\/a>/gi, "$1")
+    // Strip remaining tags
+    .replace(/<[^>]+>/g, "")
+    // Decode common entities
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&mdash;/g, "—")
+    .replace(/&ndash;/g, "–")
+    .replace(/&hellip;/g, "…")
+    .replace(/&#x([0-9a-fA-F]+);/g, (_m, hex) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_m, dec) => String.fromCodePoint(Number(dec)))
+    // Collapse whitespace
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n[ \t]+/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function extractTitle(html: string): string {
+  const m = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  return m ? m[1].replace(/<[^>]+>/g, "").trim() : "";
+}
+
+/** Chars budget per page — enough context to answer most questions. */
+const AUTO_FETCH_CHARS_PER_PAGE = 6_000;
+
+async function autoFetchPage(url: string): Promise<FetchedPage> {
+  try {
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.7",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+      signal: AbortSignal.timeout(8_000),
+    });
+
+    if (!res.ok) {
+      return { url, title: "", extract: "", fetchError: `HTTP ${res.status}` };
+    }
+
+    const contentType = res.headers.get("content-type") ?? "";
+    if (
+      !contentType.includes("html") &&
+      !contentType.includes("text") &&
+      !contentType.includes("json")
+    ) {
+      return { url, title: "", extract: "", fetchError: `Unreadable content-type: ${contentType}` };
+    }
+
+    const body = await res.text();
+    let title = "";
+    let text: string;
+
+    if (contentType.includes("html")) {
+      title = extractTitle(body);
+      text = htmlToText(body);
+    } else if (contentType.includes("json")) {
+      try {
+        text = JSON.stringify(JSON.parse(body), null, 2);
+      } catch {
+        text = body;
+      }
+    } else {
+      text = body;
+    }
+
+    // Take focused extract — skip leading whitespace-only lines
+    const trimmed = text.replace(/^\s*\n/, "");
+    const extract = trimmed.slice(0, AUTO_FETCH_CHARS_PER_PAGE).replace(/\s+\S*$/, "");
+
+    return { url, title, extract };
+  } catch (err) {
+    return {
+      url,
+      title: "",
+      extract: "",
+      fetchError: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+// ── Format output ───────────────────────────────────────────────────────────
+
+function formatResultsOnly(results: SearchResult[], site: string): string {
+  const items = results
+    .map((r, i) => {
+      const snippetLines: string[] = [];
+      if (r.snippet) snippetLines.push(truncateSnippet(r.snippet));
+      // Include extra snippets from Brave for more context
+      if (r.extraSnippets) {
+        for (const extra of r.extraSnippets.slice(0, 2)) {
+          const trimmed = truncateSnippet(extra, 250);
+          if (trimmed && trimmed !== r.snippet) snippetLines.push(trimmed);
+        }
+      }
+      const snippetBlock = snippetLines.length
+        ? "\n" + snippetLines.map((s) => `   ${s}`).join("\n")
+        : "";
+      return `${i + 1}. ${r.title}${snippetBlock}\n   ${r.url}`;
+    })
+    .join("\n\n");
+  return `Web results${site ? ` (site:${site})` : ""}:\n\n${items}`;
+}
+
+function formatResultsWithContent(
+  results: SearchResult[],
+  pages: FetchedPage[],
+  site: string,
+): string {
+  const pageMap = new Map<string, FetchedPage>();
+  for (const p of pages) pageMap.set(p.url, p);
+
+  const sections: string[] = [];
+
+  // Summary list of all results
+  const summary = results
+    .map((r, i) => {
+      const fetched = pageMap.has(r.url);
+      const marker = fetched ? " [content below]" : "";
+      return `${i + 1}. ${r.title}${marker}\n   ${r.url}`;
+    })
+    .join("\n");
+  sections.push(`Search results${site ? ` (site:${site})` : ""}:\n\n${summary}`);
+
+  // Full content for auto-fetched pages
+  for (let i = 0; i < results.length; i++) {
+    const result = results[i];
+    const page = pageMap.get(result.url);
+    if (!page) continue;
+
+    if (page.fetchError) {
+      sections.push(
+        `── Result ${i + 1}: ${result.title} ──\nURL: ${result.url}\nFetch error: ${page.fetchError}\nSnippet: ${result.snippet}`,
+      );
+      continue;
+    }
+
+    if (!page.extract) continue;
+
+    const header = page.title && page.title !== result.title
+      ? `── Result ${i + 1}: ${result.title} ──\nPage title: ${page.title}\nURL: ${result.url}`
+      : `── Result ${i + 1}: ${result.title} ──\nURL: ${result.url}`;
+
+    sections.push(`${header}\n\n${page.extract}`);
+  }
+
+  // List remaining results that weren't fetched (with snippets)
+  const unfetched = results.filter((r) => !pageMap.has(r.url));
+  if (unfetched.length > 0) {
+    const list = unfetched
+      .map((r) => {
+        const snippet = r.snippet ? `\n   ${truncateSnippet(r.snippet)}` : "";
+        return `• ${r.title}${snippet}\n  ${r.url}`;
+      })
+      .join("\n\n");
+    sections.push(`── Other results (not fetched) ──\n\n${list}`);
+  }
+
+  return sections.join("\n\n");
+}
+
 // ── Main execute ────────────────────────────────────────────────────────────
 
 async function execute(input: Record<string, unknown>): Promise<string> {
   const query = typeof input.query === "string" ? input.query.trim() : "";
-  const maxResults = typeof input.max_results === "number" ? Math.min(input.max_results, 10) : 6;
+  const maxResults = typeof input.max_results === "number" ? Math.min(input.max_results, 10) : 5;
   const site = typeof input.site === "string" ? normalizeDomain(input.site) : "";
   const region =
     typeof input.region === "string" && input.region.trim() ? input.region.trim() : "us-en";
+  const freshness =
+    typeof input.freshness === "string" && input.freshness.trim() ? input.freshness.trim() : undefined;
+
+  // auto_fetch defaults to true — fetch page content for the top results automatically
+  const autoFetchCount = (() => {
+    if (input.auto_fetch === false) return 0;
+    if (typeof input.auto_fetch === "number") return Math.min(Math.max(0, Math.floor(input.auto_fetch)), 5);
+    // Default: fetch top 3 results
+    return 3;
+  })();
 
   if (!query) return "Error: no query provided.";
 
@@ -212,55 +433,66 @@ async function execute(input: Record<string, unknown>): Promise<string> {
   const settings = await readSettings();
   const braveApiKey = settings.braveApiKey?.trim() ?? "";
 
+  let results: SearchResult[] = [];
+  let instantAnswer: string | null = null;
+
   if (braveApiKey) {
     // ── Brave Search ──────────────────────────────────────────────────────
-    console.log(`[tool:web_search] Brave "${effectiveQuery}" (max ${maxResults})`);
+    console.log(`[tool:web_search] Brave "${effectiveQuery}" (max ${maxResults}, fetch ${autoFetchCount})`);
     try {
-      const results = await fetchBraveResults(effectiveQuery, maxResults, braveApiKey);
-      if (results.length === 0) {
-        return `No results found for "${query}". Try rephrasing or breaking the query into simpler terms.`;
-      }
-      const items = results
-        .map((r, i) => {
-          const snippet = r.snippet ? `\n   ${truncateSnippet(r.snippet)}` : "";
-          return `${i + 1}. ${r.title}${snippet}\n   ${r.url}`;
-        })
-        .join("\n\n");
-      return `Web results${site ? ` (site:${site})` : ""}:\n\n${items}`;
+      results = await fetchBraveResults(effectiveQuery, maxResults, braveApiKey, freshness);
     } catch (err) {
       console.warn(`[tool:web_search] Brave API failed, falling back to DDG: ${err}`);
-      // fall through to DDG below
     }
   }
 
-  // ── DuckDuckGo fallback ─────────────────────────────────────────────────
-  console.log(`[tool:web_search] DDG "${effectiveQuery}" (max ${maxResults}, region ${region})`);
+  if (results.length === 0) {
+    // ── DuckDuckGo fallback ─────────────────────────────────────────────
+    console.log(`[tool:web_search] DDG "${effectiveQuery}" (max ${maxResults}, region ${region})`);
 
-  const [instant, webResults] = await Promise.allSettled([
-    fetchDdgInstantAnswer(effectiveQuery),
-    fetchDdgResults(effectiveQuery, maxResults, region),
-  ]);
+    const [instant, webResults] = await Promise.allSettled([
+      fetchDdgInstantAnswer(effectiveQuery),
+      fetchDdgResults(effectiveQuery, maxResults, region),
+    ]);
 
+    if (instant.status === "fulfilled" && instant.value) {
+      instantAnswer = instant.value;
+    }
+
+    if (webResults.status === "fulfilled") {
+      results = webResults.value;
+    } else {
+      console.warn(`[tool:web_search] DDG HTML fetch failed: ${webResults.reason}`);
+    }
+  }
+
+  if (results.length === 0 && !instantAnswer) {
+    return `No results found for "${query}". Try rephrasing or breaking the query into simpler terms.`;
+  }
+
+  // ── Auto-fetch top results in parallel ──────────────────────────────────
+  const fetchCount = Math.min(autoFetchCount, results.length);
+  let fetchedPages: FetchedPage[] = [];
+
+  if (fetchCount > 0) {
+    const urlsToFetch = results.slice(0, fetchCount).map((r) => r.url);
+    console.log(`[tool:web_search] Auto-fetching ${urlsToFetch.length} pages...`);
+    fetchedPages = await Promise.all(urlsToFetch.map(autoFetchPage));
+    // Filter out pages that completely failed (no content at all)
+    fetchedPages = fetchedPages.filter((p) => p.extract || p.fetchError);
+  }
+
+  // ── Build output ────────────────────────────────────────────────────────
   const sections: string[] = [];
 
-  if (instant.status === "fulfilled" && instant.value) {
-    sections.push(instant.value);
+  if (instantAnswer) {
+    sections.push(instantAnswer);
   }
 
-  if (webResults.status === "fulfilled" && webResults.value.length > 0) {
-    const items = webResults.value
-      .map((r, i) => {
-        const snippet = r.snippet ? `\n   ${truncateSnippet(r.snippet)}` : "";
-        return `${i + 1}. ${r.title}${snippet}\n   ${r.url}`;
-      })
-      .join("\n\n");
-    sections.push(`Web results${site ? ` (site:${site})` : ""}:\n\n${items}`);
-  } else if (webResults.status === "rejected") {
-    console.warn(`[tool:web_search] DDG HTML fetch failed: ${webResults.reason}`);
-  }
-
-  if (!sections.length) {
-    return `No results found for "${query}". Try rephrasing or breaking the query into simpler terms.`;
+  if (fetchedPages.length > 0) {
+    sections.push(formatResultsWithContent(results, fetchedPages, site));
+  } else {
+    sections.push(formatResultsOnly(results, site));
   }
 
   return sections.join("\n\n---\n\n");
@@ -270,22 +502,38 @@ export const webSearchTool: EmberTool = {
   definition: {
     name: "web_search",
     description:
-      "Search the web for current information, documentation, news, or packages. " +
-      "Returns titles, snippets, and URLs. Always follow up with fetch_page to read the full content.",
+      "Search the web and automatically fetch page content from top results. " +
+      "Returns search results with full extracted text from the top 3 pages by default, " +
+      "so you usually don't need to call fetch_page separately. " +
+      "Use auto_fetch=false if you only need a quick list of links, or auto_fetch=5 to read more pages. " +
+      "Use freshness for time-sensitive queries (e.g. 'pd' for past day, 'pw' for past week).",
     inputSchema: {
       type: "object",
       properties: {
         query: {
           type: "string",
-          description: "Search keywords. Specific terms work better than full sentences.",
+          description:
+            "Search keywords. Use specific terms, not full sentences. " +
+            "Add context terms to narrow results (e.g. 'react useEffect cleanup memory leak' not 'how to fix memory leaks').",
         },
         max_results: {
           type: "number",
-          description: "Number of results to return. Default 6, max 10.",
+          description: "Number of search results to return. Default 5, max 10.",
+        },
+        auto_fetch: {
+          description:
+            "How many top results to auto-fetch full page content for. " +
+            "Default 3. Set to 0 or false to skip fetching (returns only titles/snippets). " +
+            "Set to 5 for thorough research. Each page adds ~6k chars to the response.",
         },
         site: {
           type: "string",
-          description: "Limit results to this domain, e.g. 'github.com'.",
+          description: "Limit results to this domain, e.g. 'github.com' or 'stackoverflow.com'.",
+        },
+        freshness: {
+          type: "string",
+          description:
+            "Time filter (Brave API only). Values: 'pd' (past day), 'pw' (past week), 'pm' (past month), 'py' (past year), or a date range 'YYYY-MM-DDtoYYYY-MM-DD'.",
         },
         region: {
           type: "string",

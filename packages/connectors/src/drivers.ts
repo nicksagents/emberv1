@@ -186,6 +186,34 @@ const LOOP_MAX_RECENT_MESSAGES = 20;
 const FINAL_ANSWER_NUDGE = "Based on the information above, please provide your final answer.";
 const FALLBACK_USER_QUERY_PROMPT = "Continue with the latest user request in this conversation.";
 
+// ── Lean tool-loop prompts ────────────────────────────────────────────────
+// After the first API call in a tool loop, the model has already seen the
+// full system prompt.  Subsequent calls in the same loop only need core
+// safety rules — the full role/workflow/skill text is dead weight that eats
+// context on every round-trip.  Anthropic prompt caching handles this
+// automatically (same prefix = cache hit), so we only lean for
+// OpenAI-compatible / local models where there is no prefix cache.
+const LEAN_TOOL_LOOP_SYSTEM = [
+  "Continue the current task using the available tools.",
+  "Rules: back claims with tool evidence; read before editing; do not repeat identical tool calls.",
+].join("\n");
+
+/** Trim tool descriptions to first sentence (≤100 chars) for lean turns. */
+function leanToolDescription(desc: string): string {
+  const dot = desc.indexOf(". ");
+  const first = dot > 0 ? desc.slice(0, dot + 1) : desc;
+  if (first.length <= 100) return first;
+  return first.slice(0, 97) + "...";
+}
+
+/** Build tool definitions with minimal descriptions for lean tool-loop turns. */
+function buildLeanToolDefinitions(tools: ToolDefinition[]): ToolDefinition[] {
+  return tools.map((t) => ({
+    ...t,
+    description: leanToolDescription(t.description),
+  }));
+}
+
 function isLikelyLocalBaseUrl(baseUrl: string | undefined): boolean {
   const trimmed = baseUrl?.trim();
   if (!trimmed) {
@@ -2439,17 +2467,31 @@ async function executeOpenAiCompatible(
   const maxToolTurns = getProviderToolLoopLimit(provider, request.toolLoopLimit, request.contextWindowTokens);
   const monitor = new ToolLoopMonitor();
 
+  // Pre-build lean tool definitions for turns > 0.
+  const leanTools = request.tools?.length ? buildLeanToolDefinitions(request.tools) : undefined;
+
   for (let turn = 0; turn < maxToolTurns; turn++) {
+    const isFirstTurn = turn === 0;
+    const activeTools = isFirstTurn ? request.tools : (leanTools ?? request.tools);
+
+    // After the first turn, swap the system message for a lean version.
+    if (!isFirstTurn && messages.length > 0) {
+      const first = messages[0] as { role?: string } | undefined;
+      if (first?.role === "system") {
+        messages = [{ role: "system", content: LEAN_TOOL_LOOP_SYSTEM }, ...messages.slice(1)];
+      }
+    }
+
     messages = compactOpenAiMessagesForLoop({
       messages,
-      tools: request.tools,
+      tools: activeTools,
       promptBudget,
     }).messages;
 
     const body: Record<string, unknown> = { model: modelId, messages };
 
-    if (request.tools?.length) {
-      body.tools = request.tools.map((t) => ({
+    if (activeTools?.length) {
+      body.tools = activeTools.map((t) => ({
         type: "function",
         function: {
           name: t.name,
@@ -2615,10 +2657,27 @@ async function streamOpenAiCompatible(
   let reportedCompaction = false;
   handlers.onStatus?.("Streaming response...");
 
+  // Pre-build lean tool definitions for turns > 0 (saves re-sending verbose
+  // descriptions that the model already saw on turn 0).
+  const leanTools = request.tools?.length ? buildLeanToolDefinitions(request.tools) : undefined;
+
   for (let turn = 0; turn < maxToolTurns; turn++) {
+    const isFirstTurn = turn === 0;
+    const activeTools = isFirstTurn ? request.tools : (leanTools ?? request.tools);
+
+    // After the first turn, swap the system message for a lean version.
+    // The model already received the full role/workflow/skill prompt on
+    // turn 0 — subsequent turns only need core safety rules.
+    if (!isFirstTurn && messages.length > 0) {
+      const first = messages[0] as { role?: string } | undefined;
+      if (first?.role === "system") {
+        messages = [{ role: "system", content: LEAN_TOOL_LOOP_SYSTEM }, ...messages.slice(1)];
+      }
+    }
+
     const compacted = compactOpenAiMessagesForLoop({
       messages,
-      tools: request.tools,
+      tools: activeTools,
       promptBudget,
     });
     if (compacted.didCompact && !reportedCompaction) {
@@ -2634,8 +2693,8 @@ async function streamOpenAiCompatible(
       messages,
     };
 
-    if (request.tools?.length) {
-      body.tools = request.tools.map((t) => ({
+    if (activeTools?.length) {
+      body.tools = activeTools.map((t) => ({
         type: "function",
         function: {
           name: t.name,
@@ -2889,6 +2948,11 @@ async function executeAnthropic(
   const maxToolTurns = getProviderToolLoopLimit(provider, request.toolLoopLimit, request.contextWindowTokens);
   const monitor = new ToolLoopMonitor();
 
+  // Prompt caching: structured system with cache_control breakpoint
+  const systemBlock = [
+    { type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } },
+  ];
+
   for (let turn = 0; turn < maxToolTurns; turn++) {
     messages = compactAnthropicMessagesForLoop({
       systemPrompt,
@@ -2899,17 +2963,21 @@ async function executeAnthropic(
 
     const body: Record<string, unknown> = {
       model: modelId,
-      system: systemPrompt,
+      system: systemBlock,
       max_tokens: maxTokens,
       messages,
     };
 
     if (request.tools?.length) {
-      body.tools = request.tools.map((t) => ({
+      const toolsList = request.tools.map((t) => ({
         name: t.name,
         description: t.description,
         input_schema: t.inputSchema,
       }));
+      if (toolsList.length > 0) {
+        (toolsList[toolsList.length - 1] as Record<string, unknown>).cache_control = { type: "ephemeral" };
+      }
+      body.tools = toolsList;
     }
 
     const response = await fetch("https://api.anthropic.com/v1/messages", {
@@ -2918,6 +2986,7 @@ async function executeAnthropic(
         "content-type": "application/json",
         "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
+        "anthropic-beta": "prompt-caching-2024-07-31",
       },
       body: JSON.stringify(body),
     });
@@ -3038,6 +3107,14 @@ async function streamAnthropic(
   let reportedCompaction = false;
   handlers.onStatus?.("Streaming response...");
 
+  // Anthropic prompt caching: the system prompt and tool definitions stay
+  // identical across tool-loop turns, so the prefix is automatically cached.
+  // We use the structured system format with cache_control to guarantee the
+  // cache breakpoint and extend TTL to 5 minutes.
+  const systemBlock = [
+    { type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } },
+  ];
+
   for (let turn = 0; turn < maxToolTurns; turn++) {
     const compacted = compactAnthropicMessagesForLoop({
       systemPrompt,
@@ -3054,17 +3131,23 @@ async function streamAnthropic(
     const body: Record<string, unknown> = {
       model: modelId,
       stream: true,
-      system: systemPrompt,
+      system: systemBlock,
       max_tokens: maxTokens,
       messages,
     };
 
     if (request.tools?.length) {
-      body.tools = request.tools.map((t) => ({
+      const toolsList = request.tools.map((t) => ({
         name: t.name,
         description: t.description,
         input_schema: t.inputSchema,
       }));
+      // Mark the last tool with cache_control so the entire tool list
+      // is included in the cached prefix.
+      if (toolsList.length > 0) {
+        (toolsList[toolsList.length - 1] as Record<string, unknown>).cache_control = { type: "ephemeral" };
+      }
+      body.tools = toolsList;
     }
 
     const response = await fetch("https://api.anthropic.com/v1/messages", {
@@ -3073,6 +3156,7 @@ async function streamAnthropic(
         "content-type": "application/json",
         "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
+        "anthropic-beta": "prompt-caching-2024-07-31",
         accept: "text/event-stream",
       },
       body: JSON.stringify(body),
