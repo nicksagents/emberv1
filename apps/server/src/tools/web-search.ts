@@ -521,9 +521,10 @@ export const webSearchTool: EmberTool = {
           description: "Number of search results to return. Default 5, max 10.",
         },
         auto_fetch: {
+          type: "number",
           description:
             "How many top results to auto-fetch full page content for. " +
-            "Default 3. Set to 0 or false to skip fetching (returns only titles/snippets). " +
+            "Default 3. Set to 0 to skip fetching (returns only titles/snippets). " +
             "Set to 5 for thorough research. Each page adds ~6k chars to the response.",
         },
         site: {
