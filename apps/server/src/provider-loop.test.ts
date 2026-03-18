@@ -240,6 +240,107 @@ test("streamProviderChat executes tool calls emitted in reasoning text", async (
   }
 });
 
+test("streamProviderChat executes command-style text tool calls", async () => {
+  const originalFetch = globalThis.fetch;
+  const fetchBodies: Array<Record<string, unknown>> = [];
+  const toolCalls: Array<{ name: string; input: Record<string, unknown> }> = [];
+  const promptStack: PromptStack = { shared: "", role: "", tools: "" };
+  const tools: ToolDefinition[] = [
+    {
+      name: "swarm_simulate",
+      description: "Run a simulation.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          action: { type: "string" },
+          scenario: { type: "string" },
+          domain: { type: "string" },
+          persona_count: { type: "number" },
+          round_count: { type: "number" },
+        },
+      },
+    },
+  ];
+
+  globalThis.fetch = (async (_input, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    fetchBodies.push(body);
+
+    if (fetchBodies.length === 1) {
+      return sseResponse([
+        {
+          choices: [
+            {
+              delta: {
+                reasoning_content:
+                  'I should run a swarm simulation first.\n' +
+                  'swarm_simulate action=create scenario="Will Bitcoin hit $100k by the end of this year?" domain=finance persona_count=8 round_count=3',
+              },
+            },
+          ],
+        },
+        {
+          choices: [
+            {
+              delta: {},
+              finish_reason: "stop",
+            },
+          ],
+        },
+      ]);
+    }
+
+    return sseResponse([
+      {
+        choices: [
+          {
+            delta: {
+              content: "Simulation launched and analyzed.",
+            },
+          },
+        ],
+      },
+      {
+        choices: [
+          {
+            delta: {},
+            finish_reason: "stop",
+          },
+        ],
+      },
+    ]);
+  }) as typeof fetch;
+
+  try {
+    const result = await streamProviderChat(makeProvider(), {}, {
+      modelId: null,
+      promptStack,
+      conversation: [],
+      content: "What are the chances Bitcoin reaches 100k this year?",
+      tools,
+      onToolCall: async (name, input) => {
+        toolCalls.push({ name, input });
+        return "Simulation started: sim_test1234";
+      },
+    }, {});
+
+    assert.equal(fetchBodies.length, 2);
+    assert.equal(result.content, "Simulation launched and analyzed.");
+    assert.deepEqual(toolCalls, [{
+      name: "swarm_simulate",
+      input: {
+        action: "create",
+        scenario: "Will Bitcoin hit $100k by the end of this year?",
+        domain: "finance",
+        persona_count: 8,
+        round_count: 3,
+      },
+    }]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("streamProviderChat does not re-execute an identical structured tool call immediately", async () => {
   const originalFetch = globalThis.fetch;
   const fetchBodies: Array<Record<string, unknown>> = [];
@@ -348,7 +449,7 @@ test("streamProviderChat does not re-execute an identical structured tool call i
     assert.ok(Array.isArray(secondMessages));
     assert.match(
       JSON.stringify((secondMessages as Array<unknown>).at(-1)),
-      /Do not repeat the same tool call immediately\./,
+      /immediate duplicate/i,
     );
   } finally {
     globalThis.fetch = originalFetch;

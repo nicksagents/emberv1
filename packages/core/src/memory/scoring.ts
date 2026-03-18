@@ -1,5 +1,6 @@
 import type {
   MemoryConfig,
+  MemoryEdge,
   MemoryItem,
   MemoryPromptContext,
   MemorySearchQuery,
@@ -669,4 +670,81 @@ function deriveAge(dateOfBirth: string, nowMs: number): number | null {
     age -= 1;
   }
   return Math.max(age, 0);
+}
+
+// ─── Graph-Aware Scoring ──────────────────────────────────────────────────
+
+const GRAPH_NEIGHBOR_BOOST_FACTOR = 0.25;
+
+/**
+ * Boost memory search results using graph edges.
+ * Items connected to high-scoring items receive a score uplift based on
+ * the average neighbor score, weighted by GRAPH_NEIGHBOR_BOOST_FACTOR.
+ */
+export function applyGraphBoost(
+  results: MemorySearchResult[],
+  edges: MemoryEdge[],
+): MemorySearchResult[] {
+  if (edges.length === 0 || results.length === 0) {
+    return results;
+  }
+
+  const adjacency = new Map<string, Set<string>>();
+  for (const edge of edges) {
+    if (!adjacency.has(edge.fromId)) {
+      adjacency.set(edge.fromId, new Set());
+    }
+    if (!adjacency.has(edge.toId)) {
+      adjacency.set(edge.toId, new Set());
+    }
+    adjacency.get(edge.fromId)!.add(edge.toId);
+    adjacency.get(edge.toId)!.add(edge.fromId);
+  }
+
+  const scoreById = new Map<string, number>();
+  for (const result of results) {
+    scoreById.set(result.item.id, result.score);
+  }
+
+  const boosted = results.map((result) => {
+    const neighbors = adjacency.get(result.item.id);
+    if (!neighbors || neighbors.size === 0) {
+      return result;
+    }
+    const neighborScores: number[] = [];
+    for (const neighborId of neighbors) {
+      const neighborScore = scoreById.get(neighborId);
+      if (neighborScore !== undefined) {
+        neighborScores.push(neighborScore);
+      }
+    }
+    if (neighborScores.length === 0) {
+      return result;
+    }
+    const avgNeighborScore =
+      neighborScores.reduce((sum, score) => sum + score, 0) / neighborScores.length;
+    return {
+      ...result,
+      score: result.score + avgNeighborScore * GRAPH_NEIGHBOR_BOOST_FACTOR,
+    };
+  });
+
+  return boosted.sort((a, b) => b.score - a.score);
+}
+
+/**
+ * Score memory items with optional graph edge awareness.
+ * Combines base scoring with graph boost when edges are provided.
+ */
+export function scoreMemoryItemsWithGraph(
+  items: MemoryItem[],
+  edges: MemoryEdge[],
+  query: MemorySearchQuery,
+  config: MemoryConfig,
+  options: {
+    semanticSimilarityById?: ReadonlyMap<string, number>;
+  } = {},
+): MemorySearchResult[] {
+  const baseResults = scoreMemoryItems(items, query, config, options);
+  return applyGraphBoost(baseResults, edges);
 }

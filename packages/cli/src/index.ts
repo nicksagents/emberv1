@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
-import { closeSync, createWriteStream, existsSync, openSync } from "node:fs";
+import { closeSync, createWriteStream, existsSync, openSync, readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import type { Readable } from "node:stream";
@@ -21,13 +21,40 @@ import {
   type DashboardServiceStatus,
   stripAnsi,
 } from "./dashboard.js";
-import { buildRuntimeEnv, ensureLocalEnvFile, hasManagedRuntime, resolveEmberRoot } from "./runtime.js";
+import {
+  buildRuntimeEnv,
+  ensureLocalEnvFile,
+  evaluateNodeRuntimeContract,
+  hasManagedRuntime,
+  resolveEmberRoot,
+} from "./runtime.js";
 import { runUpdate } from "./update.js";
 
-const runtimePort = "3005";
-const webPort = "3000";
-const runtimeHost = process.env.EMBER_RUNTIME_HOST ?? process.env.EMBER_BIND_HOST ?? "0.0.0.0";
-const webHost = process.env.EMBER_WEB_HOST ?? process.env.EMBER_BIND_HOST ?? "0.0.0.0";
+// Load .env early so host/port overrides are available before config vars below.
+(function loadDotEnv() {
+  const root = resolveEmberRoot(process.cwd(), process.env.EMBER_ROOT);
+  const envPath = path.join(root, ".env");
+  if (!existsSync(envPath)) return;
+  try {
+    for (const line of readFileSync(envPath, "utf8").split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const eqIdx = trimmed.indexOf("=");
+      if (eqIdx < 1) continue;
+      const key = trimmed.slice(0, eqIdx).trim();
+      const value = trimmed.slice(eqIdx + 1).trim();
+      // Don't override existing env vars (shell takes precedence)
+      if (!(key in process.env)) {
+        process.env[key] = value;
+      }
+    }
+  } catch { /* ignore parse errors */ }
+})();
+
+const runtimePort = process.env.EMBER_RUNTIME_PORT ?? "3005";
+const webPort = process.env.EMBER_WEB_PORT ?? "3000";
+const runtimeHost = process.env.EMBER_RUNTIME_HOST ?? process.env.EMBER_BIND_HOST ?? "127.0.0.1";
+const webHost = process.env.EMBER_WEB_HOST ?? process.env.EMBER_BIND_HOST ?? "127.0.0.1";
 const localWebUrl = `http://127.0.0.1:${webPort}`;
 const localApiUrl = `http://127.0.0.1:${runtimePort}`;
 const managedPorts = [webPort, runtimePort];
@@ -290,6 +317,20 @@ Commands:
 
 function commandExists(command: string): boolean {
   return spawnSync("which", [command], { stdio: "ignore" }).status === 0;
+}
+
+function assertNodeRuntimeForStart(): void {
+  const contract = evaluateNodeRuntimeContract();
+  if (!contract.meetsMinimum) {
+    throw new Error(
+      `Node.js ${contract.minimumMajor}+ is required to run Ember. Current runtime is ${contract.version}.`,
+    );
+  }
+  if (!contract.supportsSqlite) {
+    console.warn(
+      `Warning: ${contract.version} does not provide full node:sqlite support. Use Node.js ${contract.sqliteMajor}+ for complete memory features.`,
+    );
+  }
 }
 
 function listListeningPids(port: string): number[] {
@@ -737,6 +778,8 @@ async function runForeground(
 }
 
 async function start(mode: StartMode) {
+  assertNodeRuntimeForStart();
+
   const repoRoot = resolveEmberRoot(process.cwd(), process.env.EMBER_ROOT);
   process.env.EMBER_ROOT = repoRoot;
   ensureLocalEnvFile(repoRoot);
@@ -918,10 +961,20 @@ async function doctor() {
   for (const [label, ok] of checks) {
     console.log(`${label}: ${ok ? "ok" : "missing"}`);
   }
+
+  const nodeContract = evaluateNodeRuntimeContract();
+  console.log(`node version: ${nodeContract.version}`);
+  console.log(
+    `node minimum (${nodeContract.minimumMajor}+): ${nodeContract.meetsMinimum ? "ok" : "unsupported"}`,
+  );
+  console.log(
+    `node sqlite support (${nodeContract.sqliteMajor}+): ${nodeContract.supportsSqlite ? "ok" : "limited"}`,
+  );
 }
 
 function tailscaleEnable() {
-  console.log("EMBER now binds to all interfaces by default.");
+  console.log("EMBER defaults to localhost-only binding.");
+  console.log("Set EMBER_RUNTIME_HOST and EMBER_WEB_HOST if you explicitly want remote exposure.");
   console.log(`Connect to the web UI using this machine's Tailscale IP on port ${webPort}.`);
 }
 

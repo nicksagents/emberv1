@@ -1,10 +1,11 @@
 import type { EmberTool } from "./types.js";
+import { getParallelTaskPolicy, parseParallelTaskRequest } from "../parallel-tasks.js";
 
 export const parallelTasksTool: EmberTool = {
   definition: {
     name: "launch_parallel_tasks",
     description:
-      "Run up to 4 independent EMBER subtasks concurrently. Each subtask can stay in the current role lane, target a specific role, or use auto routing. Use this only when the tasks are independent and will not fight over the same file edits.",
+      "Run independent EMBER subtasks concurrently with bounded depth/concurrency and child execution profiles. Use this only when tasks are independent and will not fight over the same file edits.",
     inputSchema: {
       type: "object",
       properties: {
@@ -27,15 +28,44 @@ export const parallelTasksTool: EmberTool = {
                 type: "string",
                 description: "Optional role lane: auto, coordinator, advisor, director, inspector, or ops.",
               },
+              profile: {
+                type: "string",
+                enum: ["standard", "read-only", "investigation"],
+                description:
+                  "Optional child tool profile. standard allows normal tools, read-only blocks mutations/shell writes, investigation limits to analysis/research tools.",
+              },
             },
             required: ["title", "task"],
             additionalProperties: false,
           },
+        },
+        max_concurrency: {
+          type: "number",
+          description: "Optional per-call concurrency cap (bounded by server policy).",
+        },
+        timeout_ms: {
+          type: "number",
+          description: "Optional per-child timeout budget in milliseconds (bounded by server policy).",
         },
       },
       required: ["tasks"],
       additionalProperties: false,
     },
   },
-  execute: async () => "Parallel tasks acknowledged.",
+  execute: async (input) => {
+    const policy = getParallelTaskPolicy();
+    const parsed = parseParallelTaskRequest(input, "coordinator", {
+      maxTasks: policy.maxTasks,
+    });
+    if (parsed.error) {
+      return parsed.error;
+    }
+
+    return [
+      "launch_parallel_tasks request parsed successfully.",
+      `Tasks: ${parsed.tasks.length}`,
+      `Policy max tasks: ${policy.maxTasks}`,
+      "Execution is performed by the server tool-runtime coordinator.",
+    ].join("\n");
+  },
 };

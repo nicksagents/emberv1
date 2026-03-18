@@ -48,6 +48,149 @@
       "roles": ["coordinator", "advisor", "director", "inspector", "ops"],
       "timeout": 30000,
       "_comment": "Uses the workspace root as the allowed filesystem root. Terminal access remains available via Ember's native terminal tool."
+    },
+    "memory": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-memory"
+      ],
+      "description": "Persistent knowledge graph for structured entity/relation storage. Complements Ember's flat memory with graph queries.",
+      "roles": ["coordinator", "advisor", "director", "inspector"],
+      "timeout": 30000,
+      "_comment": "Stores entities and relations in a local knowledge graph. Good for tracking complex project relationships, architecture maps, and cross-session context that benefits from graph structure."
+    },
+    "github": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-github"
+      ],
+      "description": "GitHub API access — repos, issues, PRs, branches, file contents, and code search.",
+      "roles": ["coordinator", "advisor", "director", "inspector"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": ""
+      },
+      "timeout": 30000,
+      "_comment": "Set GITHUB_PERSONAL_ACCESS_TOKEN in env or ~/.ember/mcp.json to enable. Without a token the server will start but most operations will fail."
+    },
+    "sequential-thinking": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-sequential-thinking"
+      ],
+      "description": "Structured multi-step reasoning tool for complex problem decomposition, planning, and analysis.",
+      "roles": ["coordinator", "advisor", "director", "inspector"],
+      "timeout": 30000,
+      "_comment": "Provides a sequential thinking tool that helps break down complex problems step by step. Useful for architecture decisions, debugging strategies, and multi-part analysis."
+    },
+    "brave-search": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-brave-search"
+      ],
+      "description": "Web and local search via the Brave Search API.",
+      "roles": ["coordinator", "advisor", "director", "inspector"],
+      "env": {
+        "BRAVE_API_KEY": ""
+      },
+      "timeout": 15000,
+      "enabled": false,
+      "_comment": "Requires BRAVE_API_KEY. Disabled by default — enable in ~/.ember/mcp.json or .ember/mcp.json with your key. Complements Ember's native web_search with Brave's index."
+    },
+    "postgres": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-postgres",
+        ""
+      ],
+      "description": "Read-only PostgreSQL access — schema inspection and SELECT queries.",
+      "roles": ["coordinator", "advisor", "director", "inspector"],
+      "timeout": 30000,
+      "enabled": false,
+      "_comment": "Requires a postgres:// connection string as the last arg. Disabled by default — enable in ~/.ember/mcp.json with your connection string. Read-only by default for safety."
+    },
+    "gitlab": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-gitlab"
+      ],
+      "description": "GitLab API access — projects, issues, merge requests, and repository operations.",
+      "roles": ["coordinator", "advisor", "director", "inspector"],
+      "env": {
+        "GITLAB_PERSONAL_ACCESS_TOKEN": "",
+        "GITLAB_API_URL": "https://gitlab.com/api/v4"
+      },
+      "timeout": 30000,
+      "enabled": false,
+      "_comment": "Requires GITLAB_PERSONAL_ACCESS_TOKEN. Disabled by default — enable in ~/.ember/mcp.json with your token. Set GITLAB_API_URL for self-hosted instances."
+    },
+    "slack": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-slack"
+      ],
+      "description": "Slack workspace access — read channels, post messages, search conversations, and manage threads.",
+      "roles": ["coordinator", "advisor"],
+      "env": {
+        "SLACK_BOT_TOKEN": "",
+        "SLACK_TEAM_ID": ""
+      },
+      "timeout": 15000,
+      "enabled": false,
+      "_comment": "Requires SLACK_BOT_TOKEN and SLACK_TEAM_ID. Disabled by default — enable in ~/.ember/mcp.json with your workspace credentials."
+    },
+    "google-maps": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-google-maps"
+      ],
+      "description": "Google Maps API — geocoding, directions, place search, and distance calculations.",
+      "roles": ["coordinator", "advisor"],
+      "env": {
+        "GOOGLE_MAPS_API_KEY": ""
+      },
+      "timeout": 15000,
+      "enabled": false,
+      "_comment": "Requires GOOGLE_MAPS_API_KEY. Disabled by default — enable when location/mapping features are needed."
+    },
+    "gmail": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "gmail-mcp-imap"
+      ],
+      "description": "Gmail email management — read inbox, search, send, reply, manage labels and categories via IMAP/SMTP.",
+      "roles": ["coordinator", "advisor"],
+      "env": {
+        "GMAIL_EMAIL": "",
+        "GMAIL_APP_PASSWORD": ""
+      },
+      "timeout": 30000,
+      "enabled": false,
+      "_comment": "Requires Gmail address and App Password (not regular password). Create an App Password at https://myaccount.google.com/apppasswords. Enable 2FA first."
+    },
+    "outlook-mail": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-outlook-mail"
+      ],
+      "description": "Outlook/Microsoft 365 email — read, send, search, and manage emails via Microsoft Graph API with Device Flow auth.",
+      "roles": ["coordinator", "advisor"],
+      "env": {
+        "MICROSOFT_CLIENT_ID": "",
+        "MICROSOFT_TENANT_ID": ""
+      },
+      "timeout": 30000,
+      "enabled": false,
+      "_comment": "Requires Azure AD app registration. Create one at https://portal.azure.com. Set MICROSOFT_CLIENT_ID and MICROSOFT_TENANT_ID."
     }
   }
 }

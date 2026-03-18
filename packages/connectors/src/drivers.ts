@@ -391,11 +391,82 @@ function parseTextToolCalls(content: string): TextBasedToolCall[] {
       calls.push({ name, args });
     }
   }
+
+  // Command-style fallback:
+  //   swarm_simulate action=create scenario="..."
+  //   mcp__playwright__browser_navigate url=https://example.com
+  for (const line of content.split("\n")) {
+    const parsed = parseCommandStyleToolCall(line);
+    if (parsed) calls.push(parsed);
+  }
+
   return calls;
 }
 
 function stripTextToolCalls(content: string): string {
-  return content.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, "").trim();
+  const stripped = content.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, "");
+  const kept = stripped
+    .split("\n")
+    .filter((line) => !parseCommandStyleToolCall(line));
+  return kept.join("\n").trim();
+}
+
+function parseCommandStyleToolCall(line: string): TextBasedToolCall | null {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+
+  const normalized = trimmed
+    .replace(/^[-*]\s+/, "")
+    .replace(/^\d+[.)]\s+/, "")
+    .trim();
+
+  const commandMatch = normalized.match(/^`?([a-zA-Z][a-zA-Z0-9_:.-]{2,})`?\s+(.+)$/);
+  if (!commandMatch) return null;
+
+  const name = commandMatch[1].trim();
+  const payload = commandMatch[2].trim();
+  if (!name.includes("_") && !name.startsWith("mcp__")) return null;
+  if (!payload) return null;
+
+  // JSON payload after tool name
+  if (payload.startsWith("{") && payload.endsWith("}")) {
+    try {
+      const parsed = JSON.parse(payload) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return { name, args: parsed as Record<string, unknown> };
+      }
+    } catch {
+      // fall through to key=value parser
+    }
+  }
+
+  const args = parseCommandStyleArgs(payload);
+  if (Object.keys(args).length === 0) return null;
+  return { name, args };
+}
+
+function parseCommandStyleArgs(payload: string): Record<string, unknown> {
+  const args: Record<string, unknown> = {};
+  const argRegex = /([a-zA-Z_][a-zA-Z0-9_-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|`([^`]*)`|([^\s]+))/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = argRegex.exec(payload)) !== null) {
+    const key = match[1];
+    const raw = (match[2] ?? match[3] ?? match[4] ?? match[5] ?? "").trim();
+    if (!raw) continue;
+    const cleaned = raw.replace(/[;,]+$/, "");
+    if (/^(?:true|false)$/i.test(cleaned)) {
+      args[key] = cleaned.toLowerCase() === "true";
+      continue;
+    }
+    if (/^-?\d+(?:\.\d+)?$/.test(cleaned)) {
+      args[key] = Number(cleaned);
+      continue;
+    }
+    args[key] = cleaned;
+  }
+
+  return args;
 }
 
 /**
@@ -3378,13 +3449,25 @@ export async function executeProviderChat(
     throw new Error("This provider can connect but is not chat-capable yet.");
   }
 
-  switch (provider.typeId) {
-    case "anthropic-api":
-      return executeAnthropic(provider, secrets, request);
-    case "openai-compatible":
-      return executeOpenAiCompatible(provider, secrets, request);
-    case "codex-cli":
-      return executeCodexCli(provider, request);
+  try {
+    const result = await (async () => {
+      switch (provider.typeId) {
+        case "anthropic-api":
+          return executeAnthropic(provider, secrets, request);
+        case "openai-compatible":
+          return executeOpenAiCompatible(provider, secrets, request);
+        case "codex-cli":
+          return executeCodexCli(provider, request);
+      }
+    })();
+    request.onProviderSuccess?.(provider.id);
+    return result;
+  } catch (error) {
+    request.onProviderFailure?.(
+      provider.id,
+      error instanceof Error ? error.message : String(error),
+    );
+    throw error;
   }
 }
 
@@ -3398,12 +3481,24 @@ export async function streamProviderChat(
     throw new Error("This provider can connect but is not chat-capable yet.");
   }
 
-  switch (provider.typeId) {
-    case "anthropic-api":
-      return streamAnthropic(provider, secrets, request, handlers);
-    case "openai-compatible":
-      return streamOpenAiCompatible(provider, secrets, request, handlers);
-    case "codex-cli":
-      return streamCodexCli(provider, request, handlers);
+  try {
+    const result = await (async () => {
+      switch (provider.typeId) {
+        case "anthropic-api":
+          return streamAnthropic(provider, secrets, request, handlers);
+        case "openai-compatible":
+          return streamOpenAiCompatible(provider, secrets, request, handlers);
+        case "codex-cli":
+          return streamCodexCli(provider, request, handlers);
+      }
+    })();
+    request.onProviderSuccess?.(provider.id);
+    return result;
+  } catch (error) {
+    request.onProviderFailure?.(
+      provider.id,
+      error instanceof Error ? error.message : String(error),
+    );
+    throw error;
   }
 }

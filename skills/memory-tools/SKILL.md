@@ -1,8 +1,8 @@
 ---
 name: memory-tools
-description: Cross-session memory workflow for save, search, inspect, and forget operations.
+description: Cross-session memory workflow for unified recall, save, inspect, session search, and forget operations.
 roles: [coordinator, advisor, director, inspector]
-tools: [save_memory, memory_search, memory_get, forget_memory]
+tools: [memory_recall, save_memory, memory_search, memory_get, session_recall, forget_memory]
 ---
 
 ## Memory Tools
@@ -10,8 +10,12 @@ tools: [save_memory, memory_search, memory_get, forget_memory]
 Use Ember's explicit memory tools when the task depends on durable cross-session
 recall or when the user directly asks you to remember or forget something.
 
+- Use `memory_recall` first as the default recall path. It searches long-term
+  memory, graph relations, app memory, and prior sessions in one call.
 - Use `memory_search` before asking the user to repeat profile facts, project
   constraints, or earlier cross-session context.
+- Use `session_recall` when you need broad prior chat history retrieval with
+  filters (project/date/role/source) and compact snippet summaries.
 - Use `memory_get` after `memory_search` when you need the full record,
   provenance, or current status of a memory.
 - Use `save_memory` only for durable facts that should survive across chats:

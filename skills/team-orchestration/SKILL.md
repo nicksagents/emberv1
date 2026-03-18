@@ -1,46 +1,56 @@
 ---
 name: team-orchestration
-description: Route work across roles, tools, MCP servers, and assigned models. Stay in lane; hand off once when another role has a clear advantage.
+description: Route work across roles — each role has a strict lane and should hand off proactively when the task belongs elsewhere.
 roles: [dispatch, coordinator, advisor, director, inspector, ops]
 ---
 
 ## Team Orchestration
 
-Before acting, answer three questions:
+Before acting, answer two questions:
 
-1. Can my current role finish this cleanly in one focused pass?
-2. If not, which role has the better lane or tool surface?
-3. Does the task need a different role, or will the provider/model routers handle the lane choice inside my current role?
+1. **Is this task in my lane?** If not, hand off immediately after brief orientation.
+2. **Can I finish the in-lane portion in one focused pass?** If yes, do it. If not, do what you can and hand off.
 
-### Role lanes
+### Role lanes (strict)
 
-- `coordinator`: default lane for research, browsing, repo orientation, routine execution, and small-to-medium fixes
-- `advisor`: planning, architecture, sequencing, and scoping before implementation starts
-- `director`: deep implementation, debugging, and sustained build/test/fix loops
-- `inspector`: review, testing, validation, regression hunting, and audit write-ups
-- `ops`: safe cleanup and narrow polish only
+- `coordinator`: triage, research, investigation, repo orientation, and lightweight single-file edits. **Not an implementation role.** Routes work to specialists.
+- `advisor`: planning, architecture, sequencing, and scoping. **Never implements.** Produces plans for director to execute.
+- `director`: **primary implementation role** — writing code, building features, fixing bugs, refactoring, sustained build/test/fix loops. This is where development happens.
+- `inspector`: review, testing, validation, regression hunting, and audit write-ups. **Never implements fixes** — sends issues back to director.
+- `ops`: safe cosmetic cleanup only — dead code, naming, formatting. **Never changes behavior.**
+
+### Common routing patterns
+
+| User request pattern | Correct role |
+|---|---|
+| "build", "implement", "create", "code", "fix", "refactor", "add feature" | → **director** |
+| "plan", "design", "architect", "what approach" | → **advisor** |
+| "review", "check", "verify", "QA", "test" | → **inspector** |
+| "clean up", "format", "remove dead code" | → **ops** |
+| "research", "investigate", "what is", "show me", "find" | → **coordinator** |
+| "simulate", "what would happen if", "predict", "what are the odds", "model outcomes" | → **coordinator** or current role (all 4 main roles have `swarm_simulate`) |
 
 ### Tool and MCP routing
 
 - Prefer the lightest tool that solves the current step.
 - Prefer native file, search, HTTP, and fetch tools before browser or heavier MCP loops when either would work.
-- Treat installed MCP servers as global specialist surfaces: use them when the server has the missing capability or a more deterministic workflow than the native toolset.
-- Use MCP tools when they provide the missing capability or a more deterministic workflow.
+- Use MCP tools when they provide a missing capability or a more deterministic workflow.
 - Use `launch_parallel_tasks` only for independent subtasks that can run concurrently without overlapping file edits.
 - Use memory tools for durable cross-session facts and project constraints, not for routine turn-local context.
 - Treat browser automation as interaction tooling, not a default page-reading tool.
+- **Swarm simulation** (`swarm_simulate`, `swarm_interview`, `swarm_report`): Use for uncertain outcomes, risk analysis, predictions, or multi-perspective decision-making. Any main role (coordinator, advisor, director, inspector) can run simulations directly — no handoff needed. Workflow: `swarm_simulate action=create scenario="..."` (auto-runs) → `swarm_report` → optionally `swarm_interview`.
 
 ### Handoff rules
 
-- Stay in your current role for small fixes, short research loops, and anything you can finish without a specialist.
-- The provider/model routers can switch provider and model inside your current role lane. Hand off only when the next role has the better task lane or tool surface.
+- **Hand off proactively** when the task belongs to another role's lane. Don't attempt out-of-lane work.
+- Stay in your current role only for work that clearly fits your lane.
 - Call `handoff` once, at the end of your pass, after your own tool work is complete.
 - Make the handoff message actionable enough that the receiving role can continue immediately.
 
 ### Long-task rhythm
 
-- `coordinator` or `advisor` can orient and narrow the task
-- When the work cleanly splits, `coordinator`, `advisor`, `director`, or `inspector` can fan out independent subtasks and then synthesize the results
-- `director` executes the heavy implementation pass
-- `inspector` verifies or audits the result
-- `coordinator` handles direct user-facing follow-ups unless the task still clearly belongs with a specialist
+- `coordinator` orients and triages — hands off to the right specialist
+- `advisor` plans complex work — hands off to director for implementation
+- `director` executes the implementation pass — hands off to inspector for review
+- `inspector` verifies — hands back to director if issues, or declares done
+- `coordinator` handles direct user-facing follow-ups after work is complete

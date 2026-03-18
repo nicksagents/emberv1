@@ -1,5 +1,5 @@
 /**
- * McpClientManager — lifecycle and tool-discovery manager for MCP servers.
+ * McpClientManager — lifecycle and discovery manager for MCP servers.
  *
  * Reads config from (ascending priority):
  *   1. defaultConfig  — passed in at construction (apps/server/mcp.default.json)
@@ -9,7 +9,10 @@
  * For each configured MCP server the manager:
  *   - Connects over stdio, SSE, or Streamable HTTP
  *   - Calls listTools() to discover available tools
+ *   - Calls listResources() / listResourceTemplates() if the server supports resources
+ *   - Calls listPrompts() if the server supports prompts
  *   - Wraps each tool as an EmberTool with the mcp__server__tool naming scheme
+ *   - Creates synthetic mcp_resources / mcp_prompts tools for resource/prompt access
  *   - Handles server crashes without crashing the main process
  */
 
@@ -18,10 +21,12 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { McpConfig, McpServerConfig } from "@ember/core/mcp";
-import { formatMcpResult, extractImageResult, normalizeToolSchema } from "@ember/core/mcp";
+import type { McpConfig, McpServerConfig, McpResourceInfo, McpResourceTemplateInfo, McpPromptInfo } from "@ember/core/mcp";
+import { formatMcpResult, extractImageResult, normalizeToolSchema, formatResourceContents, formatPromptMessages } from "@ember/core/mcp";
+import type { McpResourceContents, McpPromptMessage } from "@ember/core/mcp";
 import type { EmberTool } from "../tools/types.js";
-import type { Role } from "@ember/core";
+import type { Role, ToolResult } from "@ember/core";
+import { CONFIG } from "../config.js";
 import {
   describeMcpServerTransport,
   readResolvedMcpConfigState,
@@ -33,11 +38,21 @@ import {
 
 // ─── Internal state ────────────────────────────────────────────────────────
 
+interface ServerCapabilities {
+  tools: boolean;
+  resources: boolean;
+  prompts: boolean;
+}
+
 interface ActiveServer {
   name: string;
   client: Client;
   config: McpServerConfig;
   tools: EmberToolEntry[];
+  resources: McpResourceInfo[];
+  resourceTemplates: McpResourceTemplateInfo[];
+  prompts: McpPromptInfo[];
+  capabilities: ServerCapabilities;
   activeCalls: number;
   draining: boolean;
   closePromise: Promise<void> | null;
@@ -64,10 +79,22 @@ function qualifiedName(serverName: string, toolName: string): string {
 // ─── Valid Ember roles ──────────────────────────────────────────────────────
 
 const EMBER_ROLES: Role[] = ["coordinator", "advisor", "director", "inspector", "ops", "dispatch"];
+const ALL_ACTIVE_ROLES: Role[] = ["coordinator", "advisor", "director", "inspector", "ops"];
 
 function parseRoles(raw: string[] | undefined): Role[] {
   if (!raw || raw.length === 0) return [];
   return raw.filter((r): r is Role => EMBER_ROLES.includes(r as Role));
+}
+
+/** Collect the union of roles across all running servers. */
+function collectAllServerRoles(servers: Map<string, ActiveServer>): Role[] {
+  const roles = new Set<Role>();
+  for (const srv of servers.values()) {
+    for (const role of parseRoles(srv.config.roles)) {
+      roles.add(role);
+    }
+  }
+  return roles.size > 0 ? [...roles] : ALL_ACTIVE_ROLES;
 }
 
 // ─── McpClientManager ──────────────────────────────────────────────────────
@@ -106,8 +133,8 @@ export class McpClientManager {
 
   /**
    * Read all config layers, spawn each MCP server subprocess, and discover
-   * tools. Servers that fail to start are logged and skipped — they do not
-   * prevent other servers from loading.
+   * tools, resources, and prompts. Servers that fail to start are logged and
+   * skipped — they do not prevent other servers from loading.
    */
   async start(): Promise<void> {
     await this.stop();
@@ -127,8 +154,13 @@ export class McpClientManager {
     this.servers = await this.connectConfiguredServers(configuredEntries);
 
     const total = this.toolCount;
+    const totalResources = this.resourceCount;
+    const totalPrompts = this.promptCount;
+    const capabilities: string[] = [`${total} tool(s)`];
+    if (totalResources > 0) capabilities.push(`${totalResources} resource(s)`);
+    if (totalPrompts > 0) capabilities.push(`${totalPrompts} prompt(s)`);
     console.log(
-      `[mcp] Ready — ${this.servers.size} server(s), ${total} tool(s) discovered.`,
+      `[mcp] Ready — ${this.servers.size} server(s), ${capabilities.join(", ")} discovered.`,
     );
   }
 
@@ -180,15 +212,15 @@ export class McpClientManager {
   // ── Tool access ───────────────────────────────────────────────────────────
 
   /**
-   * Return all discovered MCP tools as EmberTool entries with role assignments.
-   * Caller (tools/index.ts registerMcpTools) uses this to merge into REGISTRY
-   * and ROLE_TOOLS.
+   * Return all discovered MCP tools (including synthetic resource/prompt
+   * interaction tools) as EmberTool entries with role assignments.
    */
   getTools(): EmberToolEntry[] {
     const all: EmberToolEntry[] = [];
     for (const srv of this.servers.values()) {
       all.push(...srv.tools);
     }
+    all.push(...this.buildInteractionTools());
     return all;
   }
 
@@ -198,16 +230,42 @@ export class McpClientManager {
     return n;
   }
 
+  get resourceCount(): number {
+    let n = 0;
+    for (const srv of this.servers.values()) n += srv.resources.length + srv.resourceTemplates.length;
+    return n;
+  }
+
+  get promptCount(): number {
+    let n = 0;
+    for (const srv of this.servers.values()) n += srv.prompts.length;
+    return n;
+  }
+
   getRuntimeStats(): {
     runningServers: number;
     drainingServers: number;
     activeCalls: number;
+    totalResources: number;
+    totalResourceTemplates: number;
+    totalPrompts: number;
   } {
     const allServers = [...this.servers.values(), ...this.drainingServers.values()];
+    let totalResources = 0;
+    let totalResourceTemplates = 0;
+    let totalPrompts = 0;
+    for (const srv of this.servers.values()) {
+      totalResources += srv.resources.length;
+      totalResourceTemplates += srv.resourceTemplates.length;
+      totalPrompts += srv.prompts.length;
+    }
     return {
       runningServers: this.servers.size,
       drainingServers: this.drainingServers.size,
       activeCalls: allServers.reduce((total, server) => total + server.activeCalls, 0),
+      totalResources,
+      totalResourceTemplates,
+      totalPrompts,
     };
   }
 
@@ -225,6 +283,9 @@ export class McpClientManager {
     config: McpServerConfig;
     roles: Role[];
     toolNames: string[];
+    resourceCount: number;
+    promptCount: number;
+    capabilities: ServerCapabilities;
     status: "running" | "error" | "disabled" | "configured";
     lastError: string | null;
     activeCalls: number;
@@ -238,6 +299,9 @@ export class McpClientManager {
         config: entry.config,
         roles: parseRoles(entry.config.roles),
         toolNames: active?.tools.map((tool) => tool.tool.definition.name) ?? [],
+        resourceCount: active?.resources.length ?? 0,
+        promptCount: active?.prompts.length ?? 0,
+        capabilities: active?.capabilities ?? { tools: false, resources: false, prompts: false },
         status: entry.config.enabled === false
           ? "disabled"
           : active
@@ -265,13 +329,37 @@ export class McpClientManager {
     const servers = new Map<string, ActiveServer>();
     await Promise.all(
       configuredEntries.map(async ([name, config]) => {
-        const server = await this.startServer(name, config);
+        const server = await this.startServerWithRetry(name, config);
         if (server) {
           servers.set(name, server);
         }
       }),
     );
     return servers;
+  }
+
+  private async startServerWithRetry(
+    name: string,
+    config: McpServerConfig,
+    maxRetries = 3,
+    baseDelayMs = 2_000,
+  ): Promise<ActiveServer | null> {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      const server = await this.startServer(name, config);
+      if (server) {
+        if (attempt > 0) {
+          console.log(`[mcp] Server "${name}" connected after ${attempt + 1} attempts.`);
+        }
+        return server;
+      }
+      if (attempt < maxRetries) {
+        const delay = baseDelayMs * Math.pow(2, attempt);
+        console.warn(`[mcp] Server "${name}": attempt ${attempt + 1} failed, retrying in ${delay}ms...`);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+    console.error(`[mcp] Server "${name}": failed after ${maxRetries + 1} attempts — disabling.`);
+    return null;
   }
 
   private async startServer(name: string, config: McpServerConfig): Promise<ActiveServer | null> {
@@ -282,6 +370,10 @@ export class McpClientManager {
       client,
       config,
       tools: [],
+      resources: [],
+      resourceTemplates: [],
+      prompts: [],
+      capabilities: { tools: false, resources: false, prompts: false },
       activeCalls: 0,
       draining: false,
       closePromise: null,
@@ -308,7 +400,15 @@ export class McpClientManager {
       return null;
     }
 
-    // Discover tools
+    // ── Read server capabilities ──────────────────────────────────────────
+    const caps = client.getServerCapabilities?.() ?? {};
+    server.capabilities = {
+      tools: !!caps.tools,
+      resources: !!caps.resources,
+      prompts: !!caps.prompts,
+    };
+
+    // ── Discover tools ────────────────────────────────────────────────────
     let rawTools: Array<{ name: string; description?: string; inputSchema?: unknown }> = [];
     try {
       const result = await client.listTools();
@@ -329,10 +429,9 @@ export class McpClientManager {
       const qName = qualifiedName(name, mcpTool.name);
       const schema = normalizeToolSchema(mcpTool.inputSchema);
 
-      // Capture closure variables for execute()
       const serverName = name;
       const originalToolName = mcpTool.name;
-      const toolTimeout = config.timeout ?? 30_000;
+      const toolTimeout = config.timeout ?? CONFIG.mcp.defaultTimeoutMs;
 
       const emberTool: EmberTool = {
         definition: {
@@ -340,8 +439,6 @@ export class McpClientManager {
           description: mcpTool.description ?? `${originalToolName} (${serverName} MCP server)`,
           inputSchema: schema,
         },
-        // No systemPrompt — MCP tools are documented by the server's own descriptions.
-        // A SKILL.md can be added to skills/<qualified-name>/SKILL.md for richer guidance.
         execute: async (input) => {
           return this.callMcpTool(server, serverName, originalToolName, input, toolTimeout);
         },
@@ -351,13 +448,81 @@ export class McpClientManager {
     });
 
     server.tools = toolEntries;
+
+    // ── Discover resources ────────────────────────────────────────────────
+    if (server.capabilities.resources) {
+      await this.discoverResources(server);
+    }
+
+    // ── Discover prompts ──────────────────────────────────────────────────
+    if (server.capabilities.prompts) {
+      await this.discoverPrompts(server);
+    }
+
     this.serverErrors.delete(name);
 
+    const summaryParts = [`${toolEntries.length} tool(s)`];
+    if (server.resources.length > 0) summaryParts.push(`${server.resources.length} resource(s)`);
+    if (server.resourceTemplates.length > 0) summaryParts.push(`${server.resourceTemplates.length} template(s)`);
+    if (server.prompts.length > 0) summaryParts.push(`${server.prompts.length} prompt(s)`);
+
     console.log(
-      `[mcp] Server "${name}" ready — ${toolEntries.length} tool(s):`,
+      `[mcp] Server "${name}" ready — ${summaryParts.join(", ")}:`,
       toolEntries.map((e) => e.tool.definition.name).join(", "),
     );
     return server;
+  }
+
+  private async discoverResources(server: ActiveServer): Promise<void> {
+    try {
+      const result = await server.client.listResources();
+      server.resources = (result.resources ?? []).map((r) => ({
+        uri: r.uri,
+        name: r.name,
+        description: r.description,
+        mimeType: r.mimeType,
+      }));
+    } catch (err) {
+      console.warn(
+        `[mcp] listResources() failed for server "${server.name}":`,
+        (err as Error).message,
+      );
+    }
+
+    try {
+      const result = await server.client.listResourceTemplates();
+      server.resourceTemplates = (result.resourceTemplates ?? []).map((t) => ({
+        uriTemplate: t.uriTemplate,
+        name: t.name,
+        description: t.description,
+        mimeType: t.mimeType,
+      }));
+    } catch (err) {
+      console.warn(
+        `[mcp] listResourceTemplates() failed for server "${server.name}":`,
+        (err as Error).message,
+      );
+    }
+  }
+
+  private async discoverPrompts(server: ActiveServer): Promise<void> {
+    try {
+      const result = await server.client.listPrompts();
+      server.prompts = (result.prompts ?? []).map((p) => ({
+        name: p.name,
+        description: p.description,
+        arguments: p.arguments?.map((a) => ({
+          name: a.name,
+          description: a.description,
+          required: a.required,
+        })),
+      }));
+    } catch (err) {
+      console.warn(
+        `[mcp] listPrompts() failed for server "${server.name}":`,
+        (err as Error).message,
+      );
+    }
   }
 
   private createTransport(
@@ -378,6 +543,8 @@ export class McpClientManager {
         env: {
           ...process.env,
           PATH: resolvedPath,
+          // Suppress dotenv v17+ stdout logging which corrupts MCP stdio.
+          DOTENV_CONFIG_QUIET: "true",
           ...(config.env ?? {}),
         } as Record<string, string>,
       });
@@ -433,7 +600,7 @@ export class McpClientManager {
     toolName: string,
     input: Record<string, unknown>,
     timeoutMs: number,
-  ): Promise<import("@ember/core").ToolResult> {
+  ): Promise<ToolResult> {
     server.activeCalls += 1;
     let timeoutHandle: NodeJS.Timeout | null = null;
 
@@ -472,6 +639,292 @@ export class McpClientManager {
       server.activeCalls = Math.max(0, server.activeCalls - 1);
       await this.closeServerIfIdle(server);
     }
+  }
+
+  // ── Resource / Prompt interaction ─────────────────────────────────────────
+
+  private async handleListResources(serverName?: string): Promise<string> {
+    const results: string[] = [];
+
+    for (const srv of this.servers.values()) {
+      if (serverName && srv.name !== serverName) continue;
+      if (!srv.capabilities.resources) continue;
+
+      // Re-fetch to get current state
+      try {
+        const res = await srv.client.listResources();
+        srv.resources = (res.resources ?? []).map((r) => ({
+          uri: r.uri,
+          name: r.name,
+          description: r.description,
+          mimeType: r.mimeType,
+        }));
+      } catch { /* use cached */ }
+
+      if (srv.resources.length > 0) {
+        results.push(`## ${srv.name} — Resources`);
+        for (const r of srv.resources) {
+          const desc = r.description ? ` — ${r.description}` : "";
+          const mime = r.mimeType ? ` (${r.mimeType})` : "";
+          results.push(`- ${r.name}: ${r.uri}${mime}${desc}`);
+        }
+      }
+
+      if (srv.resourceTemplates.length > 0) {
+        results.push(`## ${srv.name} — Resource Templates`);
+        for (const t of srv.resourceTemplates) {
+          const desc = t.description ? ` — ${t.description}` : "";
+          results.push(`- ${t.name}: ${t.uriTemplate}${desc}`);
+        }
+      }
+    }
+
+    if (results.length === 0) {
+      return serverName
+        ? `No resources found on server "${serverName}".`
+        : "No MCP servers expose resources.";
+    }
+
+    return results.join("\n");
+  }
+
+  private async handleReadResource(serverName: string, uri: string): Promise<ToolResult> {
+    const srv = this.servers.get(serverName);
+    if (!srv) return `Error: MCP server "${serverName}" is not running.`;
+    if (!srv.capabilities.resources) return `Error: Server "${serverName}" does not support resources.`;
+
+    srv.activeCalls += 1;
+    const timeoutMs = srv.config.timeout ?? CONFIG.mcp.defaultTimeoutMs;
+    let timeoutHandle: NodeJS.Timeout | null = null;
+
+    try {
+      const timer = new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(
+          () => reject(new Error(`readResource("${uri}") timed out after ${timeoutMs}ms`)),
+          timeoutMs,
+        );
+        timeoutHandle.unref?.();
+      });
+      const call = srv.client.readResource({ uri });
+
+      let result: { contents?: McpResourceContents[] };
+      try {
+        result = (await Promise.race([call, timer])) as typeof result;
+      } catch (err) {
+        return `[mcp:${serverName}/readResource] ${(err as Error).message}`;
+      }
+
+      return formatResourceContents(result.contents ?? [], uri);
+    } finally {
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+      srv.activeCalls = Math.max(0, srv.activeCalls - 1);
+      await this.closeServerIfIdle(srv);
+    }
+  }
+
+  private async handleListPrompts(serverName?: string): Promise<string> {
+    const results: string[] = [];
+
+    for (const srv of this.servers.values()) {
+      if (serverName && srv.name !== serverName) continue;
+      if (!srv.capabilities.prompts) continue;
+
+      // Re-fetch to get current state
+      try {
+        const res = await srv.client.listPrompts();
+        srv.prompts = (res.prompts ?? []).map((p) => ({
+          name: p.name,
+          description: p.description,
+          arguments: p.arguments?.map((a) => ({
+            name: a.name,
+            description: a.description,
+            required: a.required,
+          })),
+        }));
+      } catch { /* use cached */ }
+
+      if (srv.prompts.length > 0) {
+        results.push(`## ${srv.name} — Prompts`);
+        for (const p of srv.prompts) {
+          const desc = p.description ? ` — ${p.description}` : "";
+          const args = p.arguments?.length
+            ? ` (${p.arguments.map((a) => `${a.name}${a.required ? "*" : ""}`).join(", ")})`
+            : "";
+          results.push(`- ${p.name}${args}${desc}`);
+        }
+      }
+    }
+
+    if (results.length === 0) {
+      return serverName
+        ? `No prompts found on server "${serverName}".`
+        : "No MCP servers expose prompts.";
+    }
+
+    return results.join("\n");
+  }
+
+  private async handleGetPrompt(
+    serverName: string,
+    promptName: string,
+    args?: Record<string, string>,
+  ): Promise<string> {
+    const srv = this.servers.get(serverName);
+    if (!srv) return `Error: MCP server "${serverName}" is not running.`;
+    if (!srv.capabilities.prompts) return `Error: Server "${serverName}" does not support prompts.`;
+
+    srv.activeCalls += 1;
+    const timeoutMs = srv.config.timeout ?? CONFIG.mcp.defaultTimeoutMs;
+    let timeoutHandle: NodeJS.Timeout | null = null;
+
+    try {
+      const timer = new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(
+          () => reject(new Error(`getPrompt("${promptName}") timed out after ${timeoutMs}ms`)),
+          timeoutMs,
+        );
+        timeoutHandle.unref?.();
+      });
+      const call = srv.client.getPrompt({ name: promptName, arguments: args });
+
+      let result: { description?: string; messages?: McpPromptMessage[] };
+      try {
+        result = (await Promise.race([call, timer])) as typeof result;
+      } catch (err) {
+        return `[mcp:${serverName}/getPrompt] ${(err as Error).message}`;
+      }
+
+      return formatPromptMessages(
+        result.messages ?? [],
+        promptName,
+        result.description,
+      );
+    } finally {
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+      srv.activeCalls = Math.max(0, srv.activeCalls - 1);
+      await this.closeServerIfIdle(srv);
+    }
+  }
+
+  // ── Synthetic interaction tools ───────────────────────────────────────────
+
+  /**
+   * Build EmberTools that let the agent interact with MCP resources and prompts
+   * across all connected servers. Only created if at least one server supports
+   * the relevant capability.
+   */
+  private buildInteractionTools(): EmberToolEntry[] {
+    const entries: EmberToolEntry[] = [];
+    const hasResources = [...this.servers.values()].some(
+      (s) => s.capabilities.resources && (s.resources.length > 0 || s.resourceTemplates.length > 0),
+    );
+    const hasPrompts = [...this.servers.values()].some(
+      (s) => s.capabilities.prompts && s.prompts.length > 0,
+    );
+    const roles = collectAllServerRoles(this.servers);
+
+    if (hasResources) {
+      entries.push({
+        tool: {
+          definition: {
+            name: "mcp_resources",
+            description:
+              "Access MCP server resources. List available resources across servers, or read a specific resource by URI. Resources provide contextual data like files, configs, database records, or live state from connected MCP servers.",
+            inputSchema: {
+              type: "object",
+              properties: {
+                action: {
+                  type: "string",
+                  enum: ["list", "read"],
+                  description: "list = show available resources; read = fetch a resource by URI.",
+                },
+                server: {
+                  type: "string",
+                  description:
+                    "MCP server name to target. Required for 'read'. Optional for 'list' (omit to list all servers).",
+                },
+                uri: {
+                  type: "string",
+                  description: "Resource URI to read. Required when action is 'read'.",
+                },
+              },
+              required: ["action"],
+            },
+          },
+          execute: async (input) => {
+            const action = input.action as string;
+            if (action === "list") {
+              return this.handleListResources(input.server as string | undefined);
+            }
+            if (action === "read") {
+              if (!input.server || !input.uri) {
+                return "Error: both 'server' and 'uri' are required for action='read'.";
+              }
+              return this.handleReadResource(input.server as string, input.uri as string);
+            }
+            return "Unknown action. Use 'list' or 'read'.";
+          },
+        },
+        roles,
+      });
+    }
+
+    if (hasPrompts) {
+      entries.push({
+        tool: {
+          definition: {
+            name: "mcp_prompts",
+            description:
+              "Access MCP server prompt templates. List available prompts or retrieve a specific prompt with arguments. Prompts provide pre-built instructions, workflows, or context from MCP servers.",
+            inputSchema: {
+              type: "object",
+              properties: {
+                action: {
+                  type: "string",
+                  enum: ["list", "get"],
+                  description: "list = show available prompts; get = retrieve a prompt template.",
+                },
+                server: {
+                  type: "string",
+                  description:
+                    "MCP server name to target. Required for 'get'. Optional for 'list' (omit to list all servers).",
+                },
+                name: {
+                  type: "string",
+                  description: "Prompt name. Required when action is 'get'.",
+                },
+                arguments: {
+                  type: "object",
+                  description: "Arguments to fill the prompt template (key-value pairs).",
+                  additionalProperties: { type: "string" },
+                },
+              },
+              required: ["action"],
+            },
+          },
+          execute: async (input) => {
+            const action = input.action as string;
+            if (action === "list") {
+              return this.handleListPrompts(input.server as string | undefined);
+            }
+            if (action === "get") {
+              if (!input.server || !input.name) {
+                return "Error: both 'server' and 'name' are required for action='get'.";
+              }
+              return this.handleGetPrompt(
+                input.server as string,
+                input.name as string,
+                input.arguments as Record<string, string> | undefined,
+              );
+            }
+            return "Unknown action. Use 'list' or 'get'.";
+          },
+        },
+        roles,
+      });
+    }
+
+    return entries;
   }
 }
 

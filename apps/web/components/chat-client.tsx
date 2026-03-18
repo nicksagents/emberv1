@@ -24,6 +24,7 @@ import type {
   Provider,
   RoleAssignment,
   Settings,
+  SimulationStreamEvent,
   ToolCall,
 } from "@ember/core/client";
 import { ROLES } from "@ember/core/client";
@@ -37,6 +38,8 @@ import {
   type SuggestionPrompt,
 } from "../lib/suggestion-prompts";
 import { AgentActivityPanel, CopyButton, ElapsedTimer, FunnyLoader, MessageRenderer, StreamingContent, TokenBadge } from "./message-renderer";
+import { LiveSimulation } from "./live-simulation";
+import { ChatSimulationDock } from "./chat-simulation-dock";
 
 const directModes = ROLES.filter((role) => role !== "dispatch" && role !== "coordinator" && role !== "ops");
 const modes = ["auto", "coordinator", ...directModes] as const;
@@ -63,6 +66,7 @@ interface StreamingPreview {
   role: string | null;
   modelId: string | null;
   toolCalls: ToolCall[];
+  simulationEvents: SimulationStreamEvent[];
   startedAt: string;
   inputTokens: number;
   outputTokens: number;
@@ -106,7 +110,7 @@ function hasImageAttachments(attachments: ChatAttachment[]): boolean {
   return attachments.some((attachment) => isImageAttachment(attachment));
 }
 
-function decodeStreamBuffer(buffer: string): { events: ChatStreamEvent[]; rest: string } {
+export function decodeStreamBuffer(buffer: string): { events: ChatStreamEvent[]; rest: string } {
   const usesSse =
     buffer.startsWith("data:") ||
     buffer.startsWith(":") ||
@@ -147,6 +151,42 @@ function decodeStreamBuffer(buffer: string): { events: ChatStreamEvent[]; rest: 
     .map((line) => JSON.parse(line) as ChatStreamEvent);
 
   return { events, rest };
+}
+
+export function validateAttachmentSelection(
+  files: Array<{ name: string; size: number }>,
+  existingAttachmentCount: number,
+  limits: {
+    maxFiles?: number;
+    maxBytes?: number;
+  } = {},
+): {
+  acceptedCount: number;
+  error: string | null;
+} {
+  const maxFiles = limits.maxFiles ?? MAX_ATTACHMENT_FILES;
+  const maxBytes = limits.maxBytes ?? MAX_ATTACHMENT_FILE_BYTES;
+  const remainingSlots = maxFiles - existingAttachmentCount;
+  if (remainingSlots <= 0) {
+    return {
+      acceptedCount: 0,
+      error: `You can attach up to ${maxFiles} files per message.`,
+    };
+  }
+
+  const acceptedCount = Math.max(0, Math.min(files.length, remainingSlots));
+  const oversizedFile = files.slice(0, acceptedCount).find((file) => file.size > maxBytes);
+  if (oversizedFile) {
+    return {
+      acceptedCount: 0,
+      error: `${oversizedFile.name} is too large. Keep each file under 8 MB.`,
+    };
+  }
+
+  return {
+    acceptedCount,
+    error: null,
+  };
 }
 
 async function fetchConversationSnapshot(id: string): Promise<Conversation | null> {
@@ -496,6 +536,7 @@ export function ChatClient({
           ? null
           : activeAssignment?.modelId ?? activeProvider?.config.defaultModelId ?? null,
       toolCalls: [],
+      simulationEvents: [],
       startedAt: new Date().toISOString(),
       inputTokens: 0,
       outputTokens: 0,
@@ -585,6 +626,15 @@ export function ChatClient({
                   ...current,
                   content: `${current.content}${event.text}`,
                   status: current.status || "Streaming response...",
+                }
+              : current,
+          );
+        } else if (event.type === "simulation") {
+          setStreamingPreview((current) =>
+            current
+              ? {
+                  ...current,
+                  simulationEvents: [...current.simulationEvents, event.event],
                 }
               : current,
           );
@@ -714,16 +764,14 @@ export function ChatClient({
     }
 
     setErrorMessage(null);
-    const remainingSlots = MAX_ATTACHMENT_FILES - pendingAttachmentGroups.length;
-    if (remainingSlots <= 0) {
-      setErrorMessage(`You can attach up to ${MAX_ATTACHMENT_FILES} files per message.`);
+    const validation = validateAttachmentSelection(files, pendingAttachmentGroups.length);
+    if (validation.error) {
+      setErrorMessage(validation.error);
       return;
     }
 
-    const acceptedFiles = files.slice(0, remainingSlots);
-    const oversizedFile = acceptedFiles.find((file) => file.size > MAX_ATTACHMENT_FILE_BYTES);
-    if (oversizedFile) {
-      setErrorMessage(`${oversizedFile.name} is too large. Keep each file under 8 MB.`);
+    const acceptedFiles = files.slice(0, validation.acceptedCount);
+    if (acceptedFiles.length === 0) {
       return;
     }
 
@@ -938,6 +986,11 @@ export function ChatClient({
                   live
                 />
 
+                {/* Live simulation visualization */}
+                {streamingPreview.simulationEvents.length > 0 && (
+                  <LiveSimulation events={streamingPreview.simulationEvents} />
+                )}
+
                 {/* Only show the final response content in the bubble */}
                 <div className="message-bubble assistant">
                   {streamingPreview.content.trim() ? (
@@ -968,6 +1021,8 @@ export function ChatClient({
           <div ref={messagesEndRef} />
         </div>
       </div>
+
+      <ChatSimulationDock />
 
       <form className="composer-wrap" onSubmit={send}>
         {showScrollToBottom && messages.length > 0 && (

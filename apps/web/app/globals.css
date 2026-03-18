@@ -114,6 +114,31 @@ textarea {
   display: none;
 }
 
+/* Accessibility: keyboard focus indicator */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Accessibility: respect reduced motion preferences */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* SSE reconnection indicator */
+.swarm-reconnecting {
+  padding: 0.4rem 0.8rem;
+  font-size: 0.8rem;
+  color: var(--warning);
+  text-align: center;
+  opacity: 0.8;
+}
+
 /* Apple-style subtle buttons */
 button,
 .button {
@@ -3996,6 +4021,69 @@ p {
   color: var(--text-secondary);
 }
 
+/* Service Keys Grid - MCP API key management */
+.settings-service-keys-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1rem;
+  padding: 0 1.5rem 1.25rem;
+}
+
+@media (max-width: 900px) {
+  .settings-service-keys-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.settings-service-key-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 1rem 1.25rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  transition: border-color 0.15s ease;
+}
+
+.settings-service-key-card:hover {
+  border-color: var(--border-hover, rgba(245, 240, 230, 0.12));
+}
+
+.settings-service-key-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.75rem;
+}
+
+.settings-service-key-head h4 {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.settings-service-key-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+}
+
+.settings-service-key-fields .settings-field {
+  margin: 0;
+}
+
+.settings-service-key-fields .settings-field label {
+  font-size: 0.78rem;
+  margin-bottom: 0.3rem;
+}
+
+.settings-service-key-fields .settings-field input {
+  padding: 0.45rem 0.65rem;
+  font-size: 0.85rem;
+}
+
 /* Provider grid - Visual presets */
 .provider-quick-grid {
   display: grid;
@@ -6137,4 +6225,1786 @@ p {
 
 .memory-menu-item:hover:not(:disabled) svg {
   color: var(--accent);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   Swarm Simulation Visualizer
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+.swarm-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-secondary);
+  overflow: hidden;
+}
+
+.swarm-card.swarm-live {
+  border-color: rgba(255, 159, 10, 0.3);
+  box-shadow: 0 0 24px rgba(255, 159, 10, 0.06);
+}
+
+.swarm-card.swarm-loading {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 1.25rem;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+}
+
+.swarm-loading-pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--warning);
+  animation: swarm-pulse-anim 1.2s ease-in-out infinite;
+}
+
+.swarm-card.swarm-error-card {
+  padding: 1.25rem;
+  color: var(--danger);
+  font-size: 0.82rem;
+}
+
+/* ── Header ── */
+.swarm-header {
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.swarm-header-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.swarm-header-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.swarm-header-title h3 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.swarm-domain-icon {
+  font-size: 1.1rem;
+}
+
+.swarm-scenario {
+  margin: 0 0 0.5rem;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.swarm-header-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.72rem;
+  color: var(--text-tertiary);
+}
+
+.swarm-meta-sep {
+  opacity: 0.4;
+}
+
+.swarm-controls {
+  margin-top: 0.65rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.swarm-control-btn {
+  border: 1px solid rgba(10, 132, 255, 0.35);
+  background: rgba(10, 132, 255, 0.09);
+  color: #7fc5ff;
+  border-radius: 999px;
+  padding: 0.2rem 0.6rem;
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  transition: all 120ms ease;
+  font-family: inherit;
+}
+
+.swarm-control-btn:hover:not(:disabled) {
+  border-color: rgba(10, 132, 255, 0.55);
+  background: rgba(10, 132, 255, 0.15);
+}
+
+.swarm-control-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.swarm-control-btn.ghost {
+  border-color: var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.swarm-control-btn.ghost:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--surface);
+}
+
+.swarm-control-btn.danger {
+  border-color: rgba(255, 69, 58, 0.35);
+  background: rgba(255, 69, 58, 0.1);
+  color: #ff8d86;
+}
+
+.swarm-control-btn.danger:hover:not(:disabled) {
+  border-color: rgba(255, 69, 58, 0.55);
+  background: rgba(255, 69, 58, 0.15);
+}
+
+.swarm-run-detail {
+  margin-top: 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+  overflow: hidden;
+}
+
+.swarm-run-detail.compact {
+  margin-top: 0.55rem;
+}
+
+.swarm-run-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+  padding: 0.45rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.64rem;
+  color: var(--text-tertiary);
+}
+
+.swarm-run-action-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.45rem 0.6rem;
+  border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+}
+
+.swarm-run-action-row:first-of-type {
+  border-top: none;
+}
+
+.swarm-run-action-head {
+  font-size: 0.64rem;
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.swarm-run-action-text {
+  font-size: 0.68rem;
+  color: var(--text-tertiary);
+  line-height: 1.35;
+}
+
+.swarm-run-empty {
+  padding: 0.6rem;
+  font-size: 0.68rem;
+  color: var(--text-tertiary);
+}
+
+/* ── Status Badge ── */
+.swarm-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.2rem 0.55rem;
+  border: 1px solid;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 500;
+  white-space: nowrap;
+  letter-spacing: 0.02em;
+}
+
+.swarm-pulse {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  animation: swarm-pulse-anim 1.2s ease-in-out infinite;
+}
+
+@keyframes swarm-pulse-anim {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.85); }
+}
+
+/* ── Sections ── */
+.swarm-section {
+  padding: 0.75rem 1.25rem;
+  border-top: 1px solid var(--border);
+}
+
+.swarm-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.swarm-section-head h4 {
+  margin: 0;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.swarm-section-meta {
+  font-size: 0.7rem;
+  color: var(--text-tertiary);
+}
+
+/* ── Persona Grid ── */
+.swarm-persona-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 0.5rem;
+}
+
+/* ── Persona Node ── */
+.swarm-persona-node {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: transparent;
+  cursor: pointer;
+  transition: all 150ms ease;
+  text-align: left;
+  width: 100%;
+  font-family: inherit;
+}
+
+.swarm-persona-node:hover {
+  border-color: var(--border-strong);
+  background: var(--surface);
+}
+
+.swarm-persona-node.active {
+  box-shadow: 0 0 16px rgba(255, 255, 255, 0.04);
+}
+
+.swarm-persona-node.no-response {
+  opacity: 0.45;
+}
+
+.swarm-persona-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.swarm-persona-name {
+  font-size: 0.78rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.swarm-persona-role {
+  font-size: 0.68rem;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.swarm-persona-model {
+  font-size: 0.6rem;
+  color: var(--text-tertiary);
+  opacity: 0.7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+}
+
+.swarm-persona-conf {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  flex-shrink: 0;
+}
+
+.swarm-conf-value {
+  font-size: 0.75rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.swarm-conf-delta {
+  font-size: 0.62rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.swarm-conf-delta.up {
+  color: var(--success);
+}
+
+.swarm-conf-delta.down {
+  color: var(--danger);
+}
+
+/* ── Persona Avatar ── */
+.swarm-persona-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1.5px solid;
+  font-weight: 700;
+  font-family: var(--font-sans);
+  letter-spacing: 0.02em;
+  flex-shrink: 0;
+}
+
+/* ── Confidence Bar ── */
+.swarm-confidence-track {
+  width: 100%;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+}
+
+.swarm-confidence-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 400ms ease;
+}
+
+.swarm-confidence-fill.animate {
+  animation: swarm-fill-grow 600ms ease-out;
+}
+
+@keyframes swarm-fill-grow {
+  from { width: 0; }
+}
+
+/* ── Consensus Gauge ── */
+.swarm-consensus {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  min-width: 140px;
+}
+
+.swarm-consensus-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.68rem;
+  color: var(--text-tertiary);
+}
+
+/* ── Heatmap ── */
+.swarm-heatmap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 0.75rem;
+}
+
+.swarm-heat-cell {
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  border: 2px solid transparent;
+  font-size: 0.72rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: all 150ms ease;
+}
+
+.swarm-heat-cell:hover {
+  transform: scale(1.1);
+}
+
+/* ── Timeline ── */
+.swarm-timeline {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.swarm-timeline-node {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.35rem 0.75rem;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  cursor: pointer;
+  transition: all 150ms ease;
+  font-family: inherit;
+}
+
+.swarm-timeline-node:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+.swarm-timeline-node:not(:disabled):hover {
+  background: var(--surface);
+}
+
+.swarm-timeline-node.active {
+  background: var(--surface-active);
+}
+
+.swarm-timeline-dot {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1.5px solid var(--border-strong);
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: var(--text-tertiary);
+}
+
+.swarm-timeline-node.completed .swarm-timeline-dot {
+  background: rgba(48, 209, 88, 0.15);
+  border-color: rgba(48, 209, 88, 0.4);
+  color: var(--success);
+}
+
+.swarm-timeline-node.running .swarm-timeline-dot {
+  background: rgba(255, 159, 10, 0.15);
+  border-color: rgba(255, 159, 10, 0.4);
+  color: var(--warning);
+  animation: swarm-pulse-anim 1.2s ease-in-out infinite;
+}
+
+.swarm-timeline-node.active .swarm-timeline-dot {
+  border-width: 2px;
+}
+
+.swarm-timeline-label {
+  font-size: 0.6rem;
+  color: var(--text-tertiary);
+  font-weight: 500;
+}
+
+/* ── Probability Chart ── */
+.swarm-prob-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.swarm-prob-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.swarm-prob-label {
+  width: 120px;
+  flex-shrink: 0;
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.swarm-prob-bar-track {
+  flex: 1;
+  height: 8px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.04);
+  overflow: hidden;
+}
+
+.swarm-prob-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 500ms ease;
+}
+
+.swarm-prob-pct {
+  width: 48px;
+  flex-shrink: 0;
+  font-size: 0.72rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  text-align: right;
+}
+
+/* ── Detail Panel ── */
+.swarm-detail-panel {
+  border: 1px solid;
+  border-radius: var(--radius-md);
+  padding: 0.85rem;
+  background: var(--surface);
+}
+
+.swarm-detail-header {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  margin-bottom: 0.65rem;
+}
+
+.swarm-detail-header h4 {
+  margin: 0;
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.swarm-detail-role {
+  font-size: 0.72rem;
+  color: var(--text-tertiary);
+}
+
+.swarm-detail-perspective {
+  margin: 0 0 0.5rem;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  font-style: italic;
+}
+
+.swarm-detail-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-bottom: 0.65rem;
+}
+
+.swarm-tag {
+  display: inline-block;
+  padding: 0.15rem 0.45rem;
+  border: 1px solid;
+  border-radius: 999px;
+  font-size: 0.62rem;
+  font-weight: 500;
+}
+
+.swarm-detail-history {
+  border-top: 1px solid var(--border);
+  padding-top: 0.65rem;
+}
+
+.swarm-detail-history h5 {
+  margin: 0 0 0.5rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* ── Sparkline Row ── */
+.swarm-spark-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 36px;
+  margin-bottom: 0.65rem;
+  padding: 2px 0;
+}
+
+.swarm-spark-point {
+  flex: 1;
+  min-width: 6px;
+  max-width: 18px;
+  border-radius: 2px 2px 0 0;
+  transition: height 300ms ease;
+}
+
+/* ── Detail Round Entries ── */
+.swarm-detail-round-entry {
+  padding: 0.45rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.swarm-detail-round-entry:last-child {
+  border-bottom: none;
+}
+
+.swarm-detail-round-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.3rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.swarm-detail-round-entry p {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+/* ── Synthesis Panel ── */
+.swarm-synthesis-panel {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.swarm-synthesis-head {
+  padding: 0.5rem 0.75rem;
+  background: var(--surface);
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid var(--border);
+}
+
+.swarm-synthesis-body {
+  padding: 0.75rem;
+}
+
+.swarm-synthesis-body p {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.swarm-expand-btn {
+  display: inline-block;
+  margin-top: 0.4rem;
+  padding: 0;
+  border: none;
+  background: none;
+  font-size: 0.72rem;
+  color: var(--accent-muted);
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.swarm-expand-btn:hover {
+  color: var(--accent);
+}
+
+/* ── Error ── */
+.swarm-error {
+  padding: 0.75rem 1.25rem;
+  border-top: 1px solid rgba(255, 69, 58, 0.2);
+  background: rgba(255, 69, 58, 0.06);
+  color: var(--danger);
+  font-size: 0.78rem;
+}
+
+/* ── Compact Mode ── */
+.swarm-compact {
+  padding: 0.85rem;
+}
+
+.swarm-compact-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.65rem;
+}
+
+.swarm-compact-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.swarm-compact-icon {
+  font-size: 1rem;
+  flex-shrink: 0;
+  margin-top: 0.05rem;
+}
+
+.swarm-compact-header-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.swarm-compact-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.swarm-compact-scenario {
+  font-size: 0.72rem;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 0.1rem;
+}
+
+.swarm-compact-stats {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.65rem;
+}
+
+.swarm-compact-personas {
+  display: flex;
+  align-items: center;
+  gap: -4px;
+}
+
+.swarm-compact-personas .swarm-persona-avatar {
+  margin-left: -4px;
+}
+
+.swarm-compact-personas .swarm-persona-avatar:first-child {
+  margin-left: 0;
+}
+
+.swarm-compact-more {
+  font-size: 0.6rem;
+  color: var(--text-tertiary);
+  margin-left: 0.25rem;
+}
+
+.swarm-compact-chips {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex-shrink: 0;
+}
+
+.swarm-compact-chip {
+  font-size: 0.62rem;
+  color: var(--text-tertiary);
+  padding: 0.15rem 0.4rem;
+  border-radius: 999px;
+  background: var(--surface);
+  white-space: nowrap;
+}
+
+.swarm-compact-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.55rem;
+}
+
+.swarm-compact-controls .swarm-control-btn {
+  font-size: 0.62rem;
+  padding: 0.16rem 0.5rem;
+}
+
+.swarm-compact-probs {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.65rem;
+}
+
+.swarm-compact-prob-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.swarm-compact-prob-label {
+  flex: 1;
+  font-size: 0.68rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.swarm-compact-prob-track {
+  width: 60px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.05);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.swarm-compact-prob-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 400ms ease;
+}
+
+.swarm-compact-prob-pct {
+  width: 28px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  text-align: right;
+  flex-shrink: 0;
+}
+
+/* ── Live Simulation (in-chat visualization) ── */
+
+.sim-live {
+  margin: 8px 0;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  overflow: hidden;
+  animation: simLiveFadeIn 0.4s ease;
+}
+
+@keyframes simLiveFadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.sim-live-header {
+  padding: 14px 16px;
+  border-left: 3px solid var(--accent, #0a84ff);
+  border-bottom: 1px solid var(--border);
+}
+
+.sim-live-header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.sim-live-title-area {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.sim-live-pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  animation: simPulse 1.5s ease-in-out infinite;
+}
+
+@keyframes simPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(1.3); }
+}
+
+.sim-live-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sim-live-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.sim-live-badge {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 2px 8px;
+  border-radius: 20px;
+  border: 1px solid;
+}
+
+.sim-live-phase {
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.sim-live-phase.running,
+.sim-live-phase.generating-personas {
+  color: #ff9f0a;
+}
+
+.sim-live-phase.synthesizing {
+  color: #0a84ff;
+}
+
+.sim-live-phase.complete {
+  color: #30d158;
+}
+
+.sim-live-phase.error {
+  color: #ff453a;
+}
+
+.sim-live-scenario {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+/* Personas */
+.sim-live-personas {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sim-live-personas-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.sim-live-personas-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.sim-live-persona {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 4px 4px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  background: transparent;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  color: var(--text);
+  font-family: inherit;
+  animation: simPersonaIn 0.3s ease backwards;
+}
+
+.sim-live-persona:hover {
+  background: color-mix(in srgb, var(--persona-color, #888) 10%, transparent);
+  border-color: var(--persona-color, #888);
+}
+
+.sim-live-persona.expanded {
+  flex-basis: 100%;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--persona-color, #888) 5%, transparent);
+  border-color: var(--persona-color, #888);
+}
+
+@keyframes simPersonaIn {
+  from { opacity: 0; transform: scale(0.8); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.sim-live-persona-avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 700;
+  color: #fff;
+  flex-shrink: 0;
+}
+
+.sim-live-persona-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.sim-live-persona-name {
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sim-live-persona-role {
+  font-size: 10px;
+  color: var(--text-secondary);
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sim-live-persona-detail {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  width: 100%;
+}
+
+.sim-live-persona-bg,
+.sim-live-persona-persp {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  margin: 0 0 4px;
+}
+
+.sim-live-persona-persp {
+  font-style: italic;
+}
+
+/* Round Tabs */
+.sim-live-rounds {
+  border-bottom: 1px solid var(--border);
+  padding: 0 16px;
+}
+
+.sim-live-round-tabs {
+  display: flex;
+  gap: 2px;
+  overflow-x: auto;
+}
+
+.sim-live-round-tab {
+  padding: 8px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  font-family: inherit;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.sim-live-round-tab:hover {
+  color: var(--text);
+}
+
+.sim-live-round-tab.active {
+  color: var(--text);
+  border-bottom-color: var(--accent, #0a84ff);
+}
+
+.sim-live-round-tab.live {
+  color: #ff9f0a;
+}
+
+.sim-live-round-tab.final {
+  color: #30d158;
+}
+
+.sim-live-round-tab.final.active {
+  border-bottom-color: #30d158;
+}
+
+.sim-live-round-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #ff9f0a;
+  animation: simPulse 1.5s ease-in-out infinite;
+}
+
+/* Speech Bubbles */
+.sim-live-responses {
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sim-live-speech {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  animation: simSpeechIn 0.4s ease backwards;
+}
+
+@keyframes simSpeechIn {
+  from { opacity: 0; transform: translateX(-12px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.sim-live-speech-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 700;
+  color: #fff;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.sim-live-speech-bubble {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 12px;
+  border-radius: 2px 10px 10px 10px;
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  border: 1px solid var(--border);
+}
+
+.sim-live-speech-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.sim-live-speech-name {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.sim-live-speech-text {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.sim-live-speech-model {
+  display: inline-block;
+  margin-top: 4px;
+  font-size: 9px;
+  color: var(--text-muted);
+  background: var(--surface);
+  padding: 1px 6px;
+  border-radius: 8px;
+}
+
+/* Confidence Meter */
+.confidence-meter {
+  flex-shrink: 0;
+}
+
+/* Waiting Indicator */
+.sim-live-waiting {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.sim-live-waiting-dots {
+  display: flex;
+  gap: 4px;
+}
+
+.sim-live-waiting-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  animation: simWaitingDot 1.2s ease-in-out infinite;
+}
+
+.sim-live-waiting-dots span:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.sim-live-waiting-dots span:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes simWaitingDot {
+  0%, 60%, 100% { opacity: 0.2; transform: scale(0.8); }
+  30% { opacity: 1; transform: scale(1.2); }
+}
+
+/* Round Synthesis */
+.sim-live-round-synthesis {
+  padding: 10px 16px;
+  margin: 0 16px 12px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent, #0a84ff) 5%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent, #0a84ff) 15%, transparent);
+}
+
+.sim-live-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin: 0 0 6px;
+}
+
+.sim-live-synthesis-content {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Final Synthesis & Probabilities */
+.sim-live-final {
+  padding: 12px 16px;
+}
+
+.sim-live-probs {
+  margin-bottom: 14px;
+}
+
+.sim-live-prob-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.sim-live-prob-label {
+  font-size: 11px;
+  color: var(--text);
+  flex: 0 0 auto;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sim-live-prob-track {
+  flex: 1;
+  height: 8px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  overflow: hidden;
+}
+
+.sim-live-prob-fill {
+  height: 100%;
+  border-radius: 4px;
+  background: linear-gradient(90deg, #0a84ff, #5e5ce6);
+  min-width: 2px;
+}
+
+.sim-live-prob-pct {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+  flex: 0 0 40px;
+  text-align: right;
+}
+
+.sim-live-duration {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+/* Generating Personas Animation */
+.sim-live-generating {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 24px 16px;
+}
+
+.sim-live-generating-animation {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.sim-live-generating-dot {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--border);
+  animation: simGenDot 1.5s ease-in-out infinite;
+  transition: background 0.4s ease, transform 0.4s ease;
+}
+
+.sim-live-generating-dot.filled {
+  transform: scale(1.1);
+  animation: none;
+}
+
+@keyframes simGenDot {
+  0%, 100% { opacity: 0.3; transform: scale(0.8); }
+  50% { opacity: 0.6; transform: scale(1); }
+}
+
+.sim-live-generating-text {
+  font-size: 12px;
+  color: var(--text-muted);
+  animation: simPulse 2s ease-in-out infinite;
+}
+
+/* Error State */
+.sim-live-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  margin: 0 16px 12px;
+  border-radius: 8px;
+  background: rgba(255, 69, 58, 0.08);
+  border: 1px solid rgba(255, 69, 58, 0.2);
+  color: #ff453a;
+  font-size: 12px;
+}
+
+.sim-live-error-icon {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #ff453a;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+/* ── Simulation History ── */
+.sim-history {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.sim-history-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.sim-history-filters {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.sim-history-select {
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.sim-history-select:focus {
+  outline: none;
+  border-color: var(--accent-muted);
+}
+
+.sim-history-count {
+  font-size: 0.68rem;
+  color: var(--text-tertiary);
+}
+
+.sim-history-empty {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 1.25rem;
+  color: var(--text-tertiary);
+  font-size: 0.8rem;
+}
+
+.sim-history-empty-icon {
+  font-size: 1.1rem;
+}
+
+.sim-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.sim-history-item {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: transparent;
+  cursor: pointer;
+  transition: all 150ms ease;
+  text-align: left;
+  width: 100%;
+  font-family: inherit;
+}
+
+.sim-history-item:hover {
+  background: var(--surface);
+  border-color: var(--border-strong);
+}
+
+.sim-history-item.selected {
+  background: var(--surface-active);
+  border-color: var(--border-accent);
+}
+
+.sim-history-icon {
+  font-size: 1.1rem;
+  flex-shrink: 0;
+}
+
+.sim-history-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.sim-history-title-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.sim-history-title {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sim-history-status {
+  font-size: 0.6rem;
+  font-weight: 600;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.sim-history-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.68rem;
+  color: var(--text-tertiary);
+}
+
+.sim-history-dot {
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+  opacity: 0.5;
+}
+
+.sim-history-progress {
+  width: 100%;
+  height: 2px;
+  border-radius: 1px;
+  background: rgba(255, 255, 255, 0.04);
+  margin-top: 0.2rem;
+  overflow: hidden;
+}
+
+.sim-history-progress-fill {
+  height: 100%;
+  border-radius: 1px;
+  transition: width 300ms ease;
+}
+
+.sim-history-delete {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  opacity: 0;
+  transition: all 150ms ease;
+  flex-shrink: 0;
+}
+
+.sim-history-item:hover .sim-history-delete {
+  opacity: 1;
+}
+
+.sim-history-delete:hover {
+  background: rgba(255, 69, 58, 0.1);
+  color: var(--danger);
+}
+
+.sim-history-detail {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.75rem;
+  margin-bottom: 0.25rem;
+}
+
+.sim-history-detail-bar {
+  margin-bottom: 0.5rem;
+}
+
+.sim-history-close {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.3rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 0.68rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 150ms ease;
+}
+
+.sim-history-close:hover {
+  background: var(--surface);
+  color: var(--text-secondary);
+}
+
+@media (max-width: 640px) {
+  .swarm-persona-grid {
+    grid-template-columns: 1fr;
+  }
+  .swarm-prob-label {
+    width: 80px;
+  }
+}
+
+/* ─── Chat Swarm Command Center ───────────────────────────────────────────── */
+
+.chat-sim-dock {
+  position: fixed;
+  right: 1rem;
+  bottom: 7.25rem;
+  z-index: 45;
+  width: min(24rem, calc(100vw - 1.5rem));
+}
+
+.chat-sim-dock-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.52rem 0.72rem;
+  border-radius: 999px;
+  border: 1px solid rgba(90, 110, 140, 0.45);
+  background: rgba(9, 15, 26, 0.86);
+  color: var(--text-primary);
+  cursor: pointer;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.32);
+}
+
+.chat-sim-dock-toggle.live {
+  border-color: rgba(60, 210, 120, 0.72);
+  box-shadow: 0 0 0 1px rgba(60, 210, 120, 0.32), 0 12px 30px rgba(0, 0, 0, 0.38);
+}
+
+.chat-sim-dock-toggle-title {
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.chat-sim-dock-toggle-meta {
+  font-size: 0.72rem;
+  opacity: 0.82;
+  padding: 0.12rem 0.4rem;
+  border-radius: 999px;
+  border: 1px solid rgba(130, 150, 180, 0.45);
+}
+
+.chat-sim-dock-panel {
+  margin-top: 0.55rem;
+  border: 1px solid rgba(80, 100, 128, 0.6);
+  border-radius: 0.9rem;
+  background: linear-gradient(165deg, rgba(11, 18, 31, 0.95), rgba(8, 12, 22, 0.95));
+  backdrop-filter: blur(12px);
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+}
+
+.chat-sim-dock-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.7rem 0.8rem 0.62rem;
+  border-bottom: 1px solid rgba(90, 112, 142, 0.35);
+}
+
+.chat-sim-dock-head h4 {
+  margin: 0;
+  font-size: 0.84rem;
+  letter-spacing: 0.01em;
+}
+
+.chat-sim-dock-refresh {
+  border: 1px solid rgba(120, 140, 172, 0.5);
+  border-radius: 0.45rem;
+  padding: 0.28rem 0.52rem;
+  font-size: 0.72rem;
+  background: rgba(20, 28, 43, 0.75);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.chat-sim-dock-refresh:hover {
+  border-color: var(--border-accent);
+  color: var(--text-primary);
+}
+
+.chat-sim-dock-empty {
+  padding: 1rem 0.84rem;
+  color: var(--text-tertiary);
+  font-size: 0.79rem;
+}
+
+.chat-sim-dock-list {
+  max-height: 10rem;
+  overflow-y: auto;
+  padding: 0.5rem;
+  display: grid;
+  gap: 0.34rem;
+}
+
+.chat-sim-dock-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  border: 1px solid rgba(88, 106, 135, 0.38);
+  background: rgba(17, 26, 41, 0.74);
+  color: var(--text-secondary);
+  border-radius: 0.52rem;
+  padding: 0.45rem 0.54rem;
+  cursor: pointer;
+}
+
+.chat-sim-dock-item:hover,
+.chat-sim-dock-item.active {
+  border-color: var(--border-accent);
+  color: var(--text-primary);
+  background: rgba(29, 41, 62, 0.85);
+}
+
+.chat-sim-dock-item-title {
+  font-size: 0.74rem;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-sim-dock-item-status {
+  font-size: 0.66rem;
+  padding: 0.15rem 0.36rem;
+  border-radius: 999px;
+  border: 1px solid rgba(130, 150, 180, 0.45);
+}
+
+.chat-sim-dock-item-status.status-starting,
+.chat-sim-dock-item-status.status-running,
+.chat-sim-dock-item-status.status-preparing,
+.chat-sim-dock-item-status.status-ready {
+  border-color: rgba(80, 218, 132, 0.55);
+  color: #74e49f;
+}
+
+.chat-sim-dock-item-status.status-failed {
+  border-color: rgba(255, 95, 95, 0.58);
+  color: #ff7c7c;
+}
+
+.chat-sim-dock-card {
+  border-top: 1px solid rgba(90, 112, 142, 0.35);
+  padding: 0.55rem;
+}
+
+@media (max-width: 900px) {
+  .chat-sim-dock {
+    right: 0.6rem;
+    left: 0.6rem;
+    width: auto;
+    bottom: 6.8rem;
+  }
+
+  .chat-sim-dock-panel {
+    max-height: min(64vh, 36rem);
+    overflow-y: auto;
+  }
 }

@@ -13,4 +13,6 @@ export type { ToolResult };
 export interface EmberTool {
   definition: ToolDefinition;
   execute: (input: Record<string, unknown>) => Promise<ToolResult> | ToolResult;
+  /** Tool priority for model-adaptive filtering (1=essential, 5=specialized). Lower = included first. Default 3. */
+  priority?: number;
 }

@@ -48,10 +48,15 @@ interface McpState {
   };
 }
 
+interface SettingsSecretStatus {
+  sudoPasswordSet: boolean;
+  braveApiKeySet: boolean;
+}
+
 export default async function SettingsPage() {
   const [settings, runtime, providers, roles, connectorTypes, connectorModels, mcp] = await Promise.all([
-    getJson<{ item: Settings }>("/api/settings"),
-    getJson<{ runtime: RuntimeState; settings: Settings }>("/api/runtime"),
+    getJson<{ item: Settings; secretStatus: SettingsSecretStatus }>("/api/settings"),
+    getJson<{ runtime: RuntimeState; settings: Settings; secretStatus: SettingsSecretStatus }>("/api/runtime"),
     getJson<{ items: Array<Provider & { connectorType: ConnectorType | null }> }>("/api/providers"),
     getJson<{ items: RoleAssignment[]; providers: Provider[] }>("/api/roles"),
     getJson<{ items: ConnectorType[] }>("/api/connector-types"),
@@ -62,6 +67,7 @@ export default async function SettingsPage() {
   return (
     <SettingsClient
       initialSettings={settings.item}
+      initialSettingsSecretStatus={settings.secretStatus}
       runtime={runtime.runtime}
       initialProviders={providers.items}
       connectorTypes={connectorTypes.items}

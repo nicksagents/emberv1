@@ -8,7 +8,7 @@ A multi-role AI agent framework that runs a team of specialised agents — coord
 
 ### Prerequisites
 
-- **Node.js** v20 or later — [nodejs.org](https://nodejs.org)
+- **Node.js** v20 or later (**v22+ recommended for full `node:sqlite` features**) — [nodejs.org](https://nodejs.org)
 - **pnpm** — installed automatically by the setup script if missing
 - **Git**
 

@@ -1,9 +1,10 @@
 "use client";
 
-import { Fragment, type ReactNode, useState, useCallback, useEffect, useRef, useMemo } from "react";
+import React, { Fragment, type ReactNode, useState, useCallback, useEffect, useRef, useMemo } from "react";
 
 import type { ChatAttachment, ChatImageAttachment, ChatMessage, ToolCall } from "@ember/core/client";
 import { groupAttachments, isImageAttachment, isTextAttachment } from "../lib/attachments";
+import { SimulationCard, extractSimulationIdFromToolResult, isSimulationToolCall } from "./simulation-card";
 
 type MarkdownBlock =
   | { type: "heading"; level: 1 | 2 | 3 | 4 | 5 | 6; text: string }
@@ -667,9 +668,18 @@ function ToolCallItem({ tool, defaultOpen = false }: { tool: ToolCall; defaultOp
           {tool.result && (
             <div className="tool-call-section">
               <div className="tool-call-section-title">Result</div>
-              <pre className={`tool-call-code ${isError ? "error" : ""}`}>
-                {tool.result}
-              </pre>
+              {isSimulationToolCall(tool.name) && extractSimulationIdFromToolResult(tool.result) ? (
+                <div className="mt-2">
+                  <SimulationCard
+                    simulationId={extractSimulationIdFromToolResult(tool.result)!}
+                    enableSSE={true}
+                  />
+                </div>
+              ) : (
+                <pre className={`tool-call-code ${isError ? "error" : ""}`}>
+                  {tool.result}
+                </pre>
+              )}
             </div>
           )}
         </div>

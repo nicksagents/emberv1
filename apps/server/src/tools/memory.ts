@@ -3,7 +3,10 @@ import {
   MEMORY_SCOPES,
   MEMORY_SOURCE_TYPES,
   MEMORY_TYPES,
+  consolidateMemories,
   createMemoryRepository,
+  queryUnifiedMemory,
+  readConversations,
   readSettings,
   type MemoryItem,
   type MemoryRepository,
@@ -307,6 +310,67 @@ async function memorySearchExecute(input: Record<string, unknown>): Promise<stri
   }).catch((error) => `Error: ${error instanceof Error ? error.message : String(error)}`);
 }
 
+function formatUnifiedMemoryResult(result: Awaited<ReturnType<typeof queryUnifiedMemory>>): string {
+  if (result.items.length === 0) {
+    return "No unified memory results found.";
+  }
+
+  const sourceSummary = Object.entries(result.sources)
+    .map(([source, count]) => `${source}=${count}`)
+    .join(", ");
+  const lines = result.items.map((item, index) => {
+    const meta = item.key ? ` key=${item.key}` : "";
+    const timestamp = item.timestamp ? ` @ ${item.timestamp}` : "";
+    return `${index + 1}. [${item.source}] score=${item.relevanceScore.toFixed(2)}${meta}${timestamp} ${item.content}`;
+  });
+  return [
+    `Unified memory recall (${result.items.length} items, ~${result.totalTokens} tokens).`,
+    `Sources: ${sourceSummary}`,
+    ...lines,
+  ].join("\n");
+}
+
+async function unifiedMemorySearchExecute(input: Record<string, unknown>): Promise<string> {
+  const query = typeof input.query === "string" ? input.query.trim() : "";
+  if (!query) {
+    return "Error: query is required.";
+  }
+
+  const maxResults =
+    typeof input.max_results === "number" && Number.isFinite(input.max_results)
+      ? Math.max(1, Math.min(20, Math.floor(input.max_results)))
+      : 8;
+  const maxTokens =
+    typeof input.max_tokens === "number" && Number.isFinite(input.max_tokens)
+      ? Math.max(200, Math.min(8_000, Math.floor(input.max_tokens)))
+      : 2_000;
+  const sourceInput = Array.isArray(input.sources)
+    ? input.sources.filter((value): value is string => typeof value === "string")
+    : [];
+  const sources = sourceInput
+    .map((value) => value.trim().toLowerCase())
+    .filter((value): value is "flat" | "graph" | "app" | "session" =>
+      value === "flat" || value === "graph" || value === "app" || value === "session",
+    );
+  const project = typeof input.project === "string" ? input.project.trim() : "";
+
+  return withMemoryRepository(async (repository) => {
+    const conversations = await readConversations();
+    const result = await queryUnifiedMemory(
+      {
+        query,
+        maxResults,
+        maxTokens,
+        sources: sources.length > 0 ? sources : undefined,
+        project: project || undefined,
+      },
+      repository,
+      conversations,
+    );
+    return formatUnifiedMemoryResult(result);
+  }).catch((error) => `Error: ${error instanceof Error ? error.message : String(error)}`);
+}
+
 async function memoryGetExecute(input: Record<string, unknown>): Promise<string> {
   const id = typeof input.id === "string" ? input.id.trim() : "";
   if (!id) {
@@ -374,6 +438,29 @@ async function forgetMemoryExecute(input: Record<string, unknown>): Promise<stri
     }
 
     return `Forgot memory.\n${formatMemorySummary(forgotten)}`;
+  }).catch((error) => `Error: ${error instanceof Error ? error.message : String(error)}`);
+}
+
+async function memoryConsolidateExecute(input: Record<string, unknown>): Promise<string> {
+  const dryRun = input.dry_run === true;
+  const maxAgeDays =
+    typeof input.max_age_days === "number" && Number.isFinite(input.max_age_days)
+      ? Math.max(1, Math.min(365, Math.floor(input.max_age_days)))
+      : 30;
+  const maxAge = maxAgeDays * 24 * 60 * 60 * 1_000;
+
+  return withMemoryRepository(async (repository) => {
+    const report = await consolidateMemories(repository, {
+      dryRun,
+      maxAge,
+    });
+    return [
+      `Memory consolidation ${dryRun ? "(dry run) " : ""}completed.`,
+      `Merged duplicates: ${report.merged}`,
+      `Promoted recurring patterns: ${report.promoted}`,
+      `Decayed stale memories: ${report.decayed}`,
+      `Timestamp: ${report.timestamp}`,
+    ].join("\n");
   }).catch((error) => `Error: ${error instanceof Error ? error.message : String(error)}`);
 }
 
@@ -456,6 +543,45 @@ export const memorySearchTool: EmberTool = {
   execute: memorySearchExecute,
 };
 
+export const unifiedMemorySearchTool: EmberTool = {
+  definition: {
+    name: "memory_recall",
+    description:
+      "Search across long-term memory, memory graph relations, app memory, and prior session history in one call. Use this as the default recall entry point.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "What to recall from memory.",
+        },
+        max_results: {
+          type: "number",
+          description: "Optional maximum item count (default 8, max 20).",
+        },
+        max_tokens: {
+          type: "number",
+          description: "Optional output token budget (default 2000).",
+        },
+        sources: {
+          type: "array",
+          items: {
+            type: "string",
+            enum: ["flat", "graph", "app", "session"],
+          },
+          description: "Optional source filter. Defaults to all sources.",
+        },
+        project: {
+          type: "string",
+          description: "Optional project keyword filter for session recall.",
+        },
+      },
+      required: ["query"],
+    },
+  },
+  execute: unifiedMemorySearchExecute,
+};
+
 export const memoryGetTool: EmberTool = {
   definition: {
     name: "memory_get",
@@ -500,4 +626,26 @@ export const forgetMemoryTool: EmberTool = {
     },
   },
   execute: forgetMemoryExecute,
+};
+
+export const memoryConsolidateTool: EmberTool = {
+  definition: {
+    name: "memory_consolidate",
+    description:
+      "Run memory consolidation to merge duplicates, promote recurring patterns, and decay stale memories. Use this in ops workflows or maintenance passes.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        dry_run: {
+          type: "boolean",
+          description: "If true, report what would change without mutating memory.",
+        },
+        max_age_days: {
+          type: "number",
+          description: "Memories older than this many days become candidates for decay. Default 30.",
+        },
+      },
+    },
+  },
+  execute: memoryConsolidateExecute,
 };

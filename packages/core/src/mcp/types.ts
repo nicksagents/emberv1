@@ -89,3 +89,37 @@ export interface McpToolEntry {
   /** Ember roles that may call this tool (from the server's `roles` config). */
   roles: string[];
 }
+
+// ── MCP Resources ─────────────────────────────────────────────────────────────
+
+/** A resource exposed by an MCP server via listResources(). */
+export interface McpResourceInfo {
+  uri: string;
+  name: string;
+  description?: string;
+  mimeType?: string;
+}
+
+/** A URI template exposed by an MCP server via listResourceTemplates(). */
+export interface McpResourceTemplateInfo {
+  uriTemplate: string;
+  name: string;
+  description?: string;
+  mimeType?: string;
+}
+
+// ── MCP Prompts ───────────────────────────────────────────────────────────────
+
+/** A prompt argument descriptor from an MCP server. */
+export interface McpPromptArgument {
+  name: string;
+  description?: string;
+  required?: boolean;
+}
+
+/** A prompt template exposed by an MCP server via listPrompts(). */
+export interface McpPromptInfo {
+  name: string;
+  description?: string;
+  arguments?: McpPromptArgument[];
+}

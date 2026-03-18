@@ -6,9 +6,12 @@ import test from "node:test";
 
 import type { Conversation } from "../types";
 import { defaultMemoryConfig } from "./defaults";
-import { consolidateConversationMemory } from "./consolidation";
+import { consolidateConversationMemory, consolidateMemories } from "./consolidation";
 import { getItemInternalMetadata } from "./metadata";
 import { createMemoryRepository } from "./store";
+import { isNodeSqliteAvailable } from "./sqlite";
+
+const sqliteTest = isNodeSqliteAvailable() ? test : test.skip;
 
 function makeConversation(messages: Conversation["messages"]): Conversation {
   return {
@@ -25,14 +28,14 @@ function makeConversation(messages: Conversation["messages"]): Conversation {
   };
 }
 
-test("consolidation canonicalizes date of birth and supersedes stale profile values", async () => {
+sqliteTest("consolidation canonicalizes date of birth and supersedes stale profile values", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "ember-memory-consolidation-"));
   const previousRoot = process.env.EMBER_ROOT;
   process.env.EMBER_ROOT = tempRoot;
 
   try {
     const config = defaultMemoryConfig();
-    config.backend = "sqlite";
+    config.backend = "file";
     const repository = createMemoryRepository(config);
 
     const [oldDob] = await repository.upsertItems([
@@ -101,14 +104,14 @@ test("consolidation canonicalizes date of birth and supersedes stale profile val
   }
 });
 
-test("consolidation promotes sourced world facts from fetched pages", async () => {
+sqliteTest("consolidation promotes sourced world facts from fetched pages", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "ember-memory-consolidation-"));
   const previousRoot = process.env.EMBER_ROOT;
   process.env.EMBER_ROOT = tempRoot;
 
   try {
     const config = defaultMemoryConfig();
-    config.backend = "sqlite";
+    config.backend = "file";
     const repository = createMemoryRepository(config);
 
     const conversation = makeConversation([
@@ -185,14 +188,14 @@ test("consolidation promotes sourced world facts from fetched pages", async () =
   }
 });
 
-test("consolidation redacts secrets from session summaries", async () => {
+sqliteTest("consolidation redacts secrets from session summaries", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "ember-memory-consolidation-"));
   const previousRoot = process.env.EMBER_ROOT;
   process.env.EMBER_ROOT = tempRoot;
 
   try {
     const config = defaultMemoryConfig();
-    config.backend = "sqlite";
+    config.backend = "file";
     const repository = createMemoryRepository(config);
 
     const conversation = makeConversation([
@@ -236,7 +239,7 @@ test("consolidation redacts secrets from session summaries", async () => {
   }
 });
 
-test("consolidation distills project facts from strong tool evidence and records support edges", async () => {
+sqliteTest("consolidation distills project facts from strong tool evidence and records support edges", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "ember-memory-consolidation-"));
   const previousRoot = process.env.EMBER_ROOT;
   process.env.EMBER_ROOT = tempRoot;
@@ -328,7 +331,7 @@ test("consolidation distills project facts from strong tool evidence and records
   }
 });
 
-test("consolidation promotes repeated successful terminal commands instead of single one-off commands", async () => {
+sqliteTest("consolidation promotes repeated successful terminal commands instead of single one-off commands", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "ember-memory-consolidation-"));
   const previousRoot = process.env.EMBER_ROOT;
   process.env.EMBER_ROOT = tempRoot;
@@ -399,7 +402,7 @@ test("consolidation promotes repeated successful terminal commands instead of si
   }
 });
 
-test("consolidation skips active session summary rewrites when the summary changed only marginally", async () => {
+sqliteTest("consolidation skips active session summary rewrites when the summary changed only marginally", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "ember-memory-consolidation-"));
   const previousRoot = process.env.EMBER_ROOT;
   process.env.EMBER_ROOT = tempRoot;
@@ -487,7 +490,7 @@ test("consolidation skips active session summary rewrites when the summary chang
   }
 });
 
-test("consolidation supersedes stale environment facts when stronger evidence updates them", async () => {
+sqliteTest("consolidation supersedes stale environment facts when stronger evidence updates them", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "ember-memory-consolidation-"));
   const previousRoot = process.env.EMBER_ROOT;
   process.env.EMBER_ROOT = tempRoot;
@@ -591,7 +594,7 @@ test("consolidation supersedes stale environment facts when stronger evidence up
   }
 });
 
-test("consolidation distills repeated project constraints from conversation text", async () => {
+sqliteTest("consolidation distills repeated project constraints from conversation text", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "ember-memory-consolidation-"));
   const previousRoot = process.env.EMBER_ROOT;
   process.env.EMBER_ROOT = tempRoot;
@@ -648,7 +651,7 @@ test("consolidation distills repeated project constraints from conversation text
   }
 });
 
-test("consolidation distills repo conventions from files and directory structure", async () => {
+sqliteTest("consolidation distills repo conventions from files and directory structure", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "ember-memory-consolidation-"));
   const previousRoot = process.env.EMBER_ROOT;
   process.env.EMBER_ROOT = tempRoot;
@@ -747,7 +750,7 @@ test("consolidation distills repo conventions from files and directory structure
   }
 });
 
-test("consolidation reinforces repeated user facts instead of duplicating them", async () => {
+sqliteTest("consolidation reinforces repeated user facts instead of duplicating them", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "ember-memory-consolidation-"));
   const previousRoot = process.env.EMBER_ROOT;
   process.env.EMBER_ROOT = tempRoot;
@@ -819,7 +822,7 @@ test("consolidation reinforces repeated user facts instead of duplicating them",
   }
 });
 
-test("archived session consolidation records outcomes, open threads, and closure metadata", async () => {
+sqliteTest("archived session consolidation records outcomes, open threads, and closure metadata", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "ember-memory-consolidation-"));
   const previousRoot = process.env.EMBER_ROOT;
   process.env.EMBER_ROOT = tempRoot;
@@ -902,6 +905,115 @@ test("archived session consolidation records outcomes, open threads, and closure
           /Failure or caution from archived session/i.test(item.content),
       ),
     );
+
+    await repository.close?.();
+  } finally {
+    if (previousRoot === undefined) {
+      delete process.env.EMBER_ROOT;
+    } else {
+      process.env.EMBER_ROOT = previousRoot;
+    }
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("consolidateMemories merges duplicates, promotes patterns, decays stale memories, and supports dry-run", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "ember-memory-consolidation-"));
+  const previousRoot = process.env.EMBER_ROOT;
+  process.env.EMBER_ROOT = tempRoot;
+
+  try {
+    const config = defaultMemoryConfig();
+    config.backend = "file";
+    const repository = createMemoryRepository(config);
+
+    const [dupA, dupB, staleItem] = await repository.upsertItems([
+      {
+        sessionId: "dup_session",
+        memoryType: "project_fact",
+        scope: "workspace",
+        content: "API timeout threshold is 12 seconds for sync jobs.",
+        tags: ["duplicate-test"],
+        sourceType: "assistant_message",
+        confidence: 0.7,
+        salience: 0.7,
+        volatility: "slow-changing",
+      },
+      {
+        sessionId: "dup_session",
+        memoryType: "project_fact",
+        scope: "workspace",
+        content: "API timeout threshold is 12 seconds for sync jobs.",
+        tags: ["duplicate-test"],
+        sourceType: "assistant_message",
+        confidence: 0.69,
+        salience: 0.68,
+        volatility: "slow-changing",
+      },
+      {
+        sessionId: "stale_session",
+        memoryType: "project_fact",
+        scope: "workspace",
+        content: "Legacy cron runs every 15 minutes.",
+        tags: ["stale-test"],
+        sourceType: "assistant_message",
+        confidence: 0.8,
+        salience: 0.9,
+        volatility: "slow-changing",
+      },
+    ]);
+
+    for (let idx = 0; idx < 5; idx += 1) {
+      await repository.upsertItems([
+        {
+          sessionId: `pattern_${idx}`,
+          memoryType: "episode_summary",
+          scope: "workspace",
+          content: "Deployment rollback required due to authentication token expiry in production.",
+          tags: ["pattern-seed"],
+          sourceType: "session_summary",
+          confidence: 0.72,
+          salience: 0.7,
+          volatility: "event",
+        },
+      ]);
+    }
+
+    await repository.reinforceItem(staleItem.id, {
+      now: "2025-01-01T00:00:00.000Z",
+      lastRetrievedAt: "2025-01-01T00:00:00.000Z",
+      reinforcementDelta: 0,
+      retrievalSuccessDelta: 0,
+    });
+    const staleBefore = await repository.getItem(staleItem.id);
+
+    const report = await consolidateMemories(repository, {
+      maxAge: 30 * 24 * 60 * 60 * 1_000,
+    });
+
+    assert.ok(report.merged >= 1);
+    assert.ok(report.promoted >= 1);
+    assert.ok(report.decayed >= 1);
+
+    const duplicateAfter = await repository.getItem(dupB.id);
+    assert.ok(duplicateAfter?.tags.includes("forgotten"));
+
+    const staleAfter = await repository.getItem(staleItem.id);
+    assert.ok((staleAfter?.salience ?? 0) < (staleBefore?.salience ?? 1));
+
+    const promotedPattern = (await repository.listItems()).find((item) =>
+      item.tags.includes("__consolidated_pattern"),
+    );
+    assert.ok(promotedPattern);
+
+    const dryRunReport = await consolidateMemories(repository, {
+      dryRun: true,
+      maxAge: 30 * 24 * 60 * 60 * 1_000,
+    });
+    assert.equal(dryRunReport.dryRun, true);
+
+    const dupAAfterDryRun = await repository.getItem(dupA.id);
+    assert.ok(dupAAfterDryRun);
 
     await repository.close?.();
   } finally {

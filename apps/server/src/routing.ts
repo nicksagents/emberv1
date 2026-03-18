@@ -378,6 +378,9 @@ export function routeAutoRequestPolicy(request: ChatRequest): PolicyRouteEvaluat
   const substantialCoding =
     codingScore >= 2 &&
     (complexityScore >= 1 || taskCount >= 3 || wordCount >= 20 || /(across backend and frontend|multi-file|refactor)/.test(normalized));
+  const explicitImplementation =
+    codingScore >= 1 &&
+    /\b(implement|build|create|fix|debug|refactor|patch)\b/.test(normalized);
   const routineExecution = browserScore + researchScore + filesystemScore + systemOpsScore >= 1;
 
   if (wantsProductDelivery) {
@@ -448,6 +451,17 @@ export function routeAutoRequestPolicy(request: ChatRequest): PolicyRouteEvaluat
         "The request is substantial technical execution that likely needs deeper coding loops.",
         "policy",
         0.94,
+      ),
+    );
+  }
+
+  if (explicitImplementation) {
+    return createPolicyEvaluation(
+      createDecision(
+        "director",
+        "The request is explicit implementation or bug-fix work and should run in the director lane.",
+        "policy",
+        0.9,
       ),
     );
   }

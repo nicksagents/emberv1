@@ -17,18 +17,34 @@ skillManager.initialize({
   bundledDir: join(__testDir, "..", "..", "..", "skills"),
 });
 
-import { deleteFileTool, editFileTool, listDirectoryTool, readFileTool, statPathTool, writeFileTool } from "./tools/files.js";
+import {
+  deleteFileTool,
+  editFileTool,
+  listDirectoryTool,
+  readFileTool,
+  setFileToolWorkspaceRoot,
+  statPathTool,
+  writeFileTool,
+} from "./tools/files.js";
 import { credentialGetTool, credentialListTool, credentialSaveTool } from "./tools/credentials.js";
 import { resetMockCredentialSecretStore } from "./tools/credential-secret-store.js";
 import { fetchPageTool } from "./tools/fetch-page.js";
 import { gitInspectTool } from "./tools/git-inspect.js";
 import { httpRequestTool } from "./tools/http-request.js";
-import { forgetMemoryTool, memoryGetTool, memorySearchTool, saveMemoryTool } from "./tools/memory.js";
+import { forgetMemoryTool, memoryGetTool, memorySearchTool, saveMemoryTool, unifiedMemorySearchTool } from "./tools/memory.js";
 import { parallelTasksTool } from "./tools/parallel-tasks.js";
 import { projectOverviewTool } from "./tools/project-overview.js";
 import { searchFilesFallback, searchFilesTool } from "./tools/search-files.js";
+import { sessionRecallTool } from "./tools/session-recall.js";
 import { sshExecuteTool } from "./tools/ssh-execute.js";
-import { createToolHandler, getExecutionToolsForRole, getToolSystemPrompt, registerMcpTools, replaceMcpTools } from "./tools/index.js";
+import {
+  applyParallelChildToolProfile,
+  createToolHandler,
+  getExecutionToolsForRole,
+  getToolSystemPrompt,
+  registerMcpTools,
+  replaceMcpTools,
+} from "./tools/index.js";
 import type { EmberTool } from "./tools/index.js";
 import { terminalTool } from "./tools/terminal.js";
 
@@ -88,6 +104,51 @@ test("read_file supports line ranges", async () => {
   assert.match(result, /Lines: 2-3 of 5/);
   assert.match(result, /2 \| two/);
   assert.match(result, /3 \| three/);
+});
+
+test("read_file blocks denied sensitive paths", async () => {
+  const blockedEtc = expectText(await readFileTool.execute({ path: "/etc/shadow" }));
+  const blockedSsh = expectText(await readFileTool.execute({ path: "../../.ssh/id_rsa" }));
+
+  assert.match(blockedEtc, /blocked by security policy/i);
+  assert.match(blockedSsh, /blocked by security policy/i);
+});
+
+test("read_file blocks dotenv files and allows normal project files", async () => {
+  const dir = tempDir();
+  const safeFilePath = path.join(dir, "notes.txt");
+  const envPath = path.join(dir, ".env");
+  writeFileSync(safeFilePath, "safe content", "utf8");
+  writeFileSync(envPath, "SECRET=1", "utf8");
+
+  const blocked = expectText(await readFileTool.execute({ path: envPath }));
+  const allowed = expectText(await readFileTool.execute({ path: safeFilePath }));
+
+  assert.match(blocked, /blocked by security policy/i);
+  assert.equal(allowed, "safe content");
+});
+
+test("write_file blocks paths outside configured workspace root", async () => {
+  const workspace = tempDir();
+  const insidePath = path.join(workspace, "inside.txt");
+  const outsidePath = path.join(path.dirname(workspace), "outside.txt");
+
+  setFileToolWorkspaceRoot(workspace);
+  try {
+    const insideResult = expectText(await writeFileTool.execute({
+      path: insidePath,
+      content: "inside",
+    }));
+    const blockedResult = expectText(await writeFileTool.execute({
+      path: outsidePath,
+      content: "outside",
+    }));
+
+    assert.match(insideResult, /Written:/);
+    assert.match(blockedResult, /outside the configured workspace root/i);
+  } finally {
+    setFileToolWorkspaceRoot(null);
+  }
 });
 
 test("write_file can append and edit_file can replace all", async () => {
@@ -395,6 +456,77 @@ sqliteTest("memory tools can save, search, inspect, and forget memories", async 
   }
 });
 
+test("session_recall returns ranked prior-session snippets with filters", async () => {
+  const dir = tempDir();
+  const previousRoot = process.env.EMBER_ROOT;
+  process.env.EMBER_ROOT = dir;
+  mkdirSync(path.join(dir, "data"), { recursive: true });
+  writeFileSync(path.join(dir, "data", "conversations.json"), JSON.stringify([
+    {
+      id: "conv_recall",
+      title: "Auth hardening",
+      mode: "chat",
+      createdAt: "2026-03-15T09:00:00.000Z",
+      updatedAt: "2026-03-15T10:00:00.000Z",
+      archivedAt: null,
+      lastMessageAt: "2026-03-15T10:00:00.000Z",
+      preview: "Added bearer auth and route coverage.",
+      messageCount: 2,
+      messages: [
+        {
+          id: "msg_user",
+          role: "user",
+          authorRole: "user",
+          mode: "chat",
+          content: "Please harden API auth and coverage.",
+          createdAt: "2026-03-15T09:30:00.000Z",
+        },
+        {
+          id: "msg_assistant",
+          role: "assistant",
+          authorRole: "director",
+          mode: "chat",
+          content: "Implemented bearer token auth and test coverage.",
+          createdAt: "2026-03-15T10:00:00.000Z",
+          toolCalls: [
+            {
+              id: "tool_1",
+              name: "run_terminal_command",
+              arguments: { command: "pnpm -C apps/server test" },
+              status: "complete",
+              startedAt: "2026-03-15T09:59:00.000Z",
+              endedAt: "2026-03-15T10:00:00.000Z",
+              result: "tests passed",
+            },
+          ],
+        },
+      ],
+    },
+  ], null, 2), "utf8");
+
+  try {
+    const result = expectText(await sessionRecallTool.execute({
+      query: "run_terminal_command pnpm test",
+      project: "auth",
+      role: "director",
+      source: "tool",
+      date_from: "2026-03-01",
+      date_to: "2026-03-31",
+      max_results: 3,
+      max_chars: 1200,
+    }));
+    assert.match(result, /Session recall results/i);
+    assert.match(result, /conv_recall/);
+    assert.match(result, /tool\/director/i);
+  } finally {
+    if (previousRoot === undefined) {
+      delete process.env.EMBER_ROOT;
+    } else {
+      process.env.EMBER_ROOT = previousRoot;
+    }
+  }
+});
+
 test("project_overview summarizes repo structure and scripts", async () => {
   const dir = tempDir();
   mkdirSync(path.join(dir, "apps", "web"), { recursive: true });
@@ -446,12 +578,14 @@ test("project-scaffold skill teaches small roles to scaffold then hand off", () 
   assert.match(skill!.body, /hand off to `director`/i);
 });
 
-test("memory-tools skill teaches save, search, inspect, and forget workflow", () => {
+test("memory-tools skill teaches unified recall, save, search, inspect, and forget workflow", () => {
   const skill = skillManager.loadSkill("memory-tools");
   assert.ok(skill, "memory-tools skill must exist");
   assert.deepEqual(skill!.roles, ["coordinator", "advisor", "director", "inspector"]);
-  assert.deepEqual(skill!.tools, ["save_memory", "memory_search", "memory_get", "forget_memory"]);
+  assert.deepEqual(skill!.tools, ["memory_recall", "save_memory", "memory_search", "memory_get", "session_recall", "forget_memory"]);
+  assert.match(skill!.body, /memory_recall/);
   assert.match(skill!.body, /memory_search/);
+  assert.match(skill!.body, /session_recall/);
   assert.match(skill!.body, /forget_memory/);
 });
 
@@ -530,6 +664,73 @@ test("handoff tool enforces the structured message contract and single registrat
     message,
   }));
   assert.match(duplicate, /already registered/i);
+});
+
+test("handoff tool is blocked when a role is pinned", async () => {
+  const handler = createToolHandler({
+    activeRole: "director",
+    rolePinned: true,
+  });
+  const message = [
+    "GOAL: ship the fix",
+    "DONE: reproduced the issue and scoped the root cause",
+    "TODO: patch the failing code path",
+    "FILES: apps/server/src/index.ts",
+    "NOTES: run the targeted tests after the edit",
+  ].join("\n");
+  const result = expectText(await handler.onToolCall("handoff", {
+    role: "advisor",
+    message,
+  }));
+  assert.match(result, /handoff is disabled/i);
+  assert.match(result, /director/i);
+});
+
+test("tool handler resolves common swarm tool typos", async () => {
+  const fakeSwarmTool: EmberTool = {
+    definition: {
+      name: "swarm_simulate",
+      description: "test swarm tool",
+      inputSchema: { type: "object", properties: {} },
+    },
+    execute: async () => "alias-ok",
+  };
+  const toolSnapshot = new Map<string, EmberTool>([
+    ["swarm_simulate", fakeSwarmTool],
+  ]);
+  const handler = createToolHandler({ toolSnapshot });
+
+  const result = expectText(await handler.onToolCall("swarn_simulate", {
+    action: "list",
+  }));
+  assert.equal(result, "alias-ok");
+});
+
+test("custom tool trust mode restricts create_tool and custom tool execution", async () => {
+  const disabledTools = getExecutionToolsForRole("coordinator", {
+    customToolTrustMode: "disabled",
+  });
+  assert.equal(disabledTools.some((tool) => tool.name === "create_tool"), false);
+
+  const localOnlyTools = getExecutionToolsForRole("coordinator", {
+    customToolTrustMode: "local-only",
+  });
+  assert.equal(localOnlyTools.some((tool) => tool.name === "create_tool"), true);
+
+  const handler = createToolHandler({
+    customToolTrustMode: "local-only",
+  });
+  const blockedCreate = expectText(await handler.onToolCall("create_tool", {
+    action: "create",
+    name: "demo_tool",
+    description: "demo",
+    code: "return 'ok';",
+    scope: "user",
+  }));
+  assert.match(blockedCreate, /project-scoped tools/i);
+
+  const blockedCustomTool = expectText(await handler.onToolCall("custom__demo_tool", {}));
+  assert.match(blockedCustomTool, /blocked/i);
 });
 
 test("compact coordinator tool selection keeps scaffold MCP tools reachable", () => {
@@ -676,7 +877,9 @@ test("tool schemas expose small-model-friendly aliases; skills inject correctly 
     inputSchema: { type: "object", properties: {} },
   };
   const memorySearchDefinition = memorySearchTool.definition;
+  const memoryRecallDefinition = unifiedMemorySearchTool.definition;
   const memoryGetDefinition = memoryGetTool.definition;
+  const sessionRecallDefinition = sessionRecallTool.definition;
   const saveMemoryDefinition = saveMemoryTool.definition;
   const forgetMemoryDefinition = forgetMemoryTool.definition;
   const credentialSaveDefinition = credentialSaveTool.definition;
@@ -694,8 +897,10 @@ test("tool schemas expose small-model-friendly aliases; skills inject correctly 
     credentialSaveDefinition,
     credentialListDefinition,
     credentialGetDefinition,
+    memoryRecallDefinition,
     memorySearchDefinition,
     memoryGetDefinition,
+    sessionRecallDefinition,
     saveMemoryDefinition,
     forgetMemoryDefinition,
     parallelTasksTool.definition,
@@ -719,7 +924,8 @@ test("tool schemas expose small-model-friendly aliases; skills inject correctly 
   assert.match(promptNoRole, /ssh_execute action=test.*action=run/i);
   assert.match(promptNoRole, /SSH Remote Control/);
   // Memory workflow hints present
-  assert.match(promptNoRole, /memory_search first, then memory_get/i);
+  assert.match(promptNoRole, /memory_recall first/i);
+  assert.match(promptNoRole, /full prior-chat recall/i);
   assert.match(promptNoRole, /Use save_memory only for durable facts/i);
   assert.match(promptNoRole, /Parallel Subtasks/);
   assert.match(promptNoRole, /host machine/i);
@@ -736,8 +942,10 @@ test("tool schemas expose small-model-friendly aliases; skills inject correctly 
       credentialSaveDefinition,
       credentialListDefinition,
       credentialGetDefinition,
+      memoryRecallDefinition,
       memorySearchDefinition,
       memoryGetDefinition,
+      sessionRecallDefinition,
       saveMemoryDefinition,
       forgetMemoryDefinition,
       parallelTasksTool.definition,
@@ -763,6 +971,7 @@ test("tool schemas expose small-model-friendly aliases; skills inject correctly 
   assert.match(promptWithRole, /credential_get/);
   // memory-tools skill injected for coordinator
   assert.match(promptWithRole, /## Memory Tools/);
+  assert.match(promptWithRole, /session_recall/);
   assert.match(promptWithRole, /forget_memory/);
   // desktop-small-model skill injected for coordinator
   assert.match(promptWithRole, /Desktop Automation — Small-Model Rules/);
@@ -816,7 +1025,7 @@ test("compact coordinator tool prompt stays much shorter for small-model executi
     { compact: true },
   );
 
-  assert.match(compactPrompt, /## Active Skills/);
+  assert.match(compactPrompt, /## Tools/);
   assert.match(compactPrompt, /browser-small-model: Supplementary Playwright browser guidance/i);
   assert.ok(compactPrompt.length < fullPrompt.length / 2);
   assert.doesNotMatch(compactPrompt, /## Playwright Browser — Small-Model Rules/);
@@ -858,9 +1067,58 @@ test("compact coordinator tool selection keeps only tools relevant to the curren
     conversation: [],
   });
   const recallToolNames = new Set(recallTools.map((tool) => tool.name));
+  assert.ok(recallToolNames.has("memory_recall"));
   assert.ok(recallToolNames.has("memory_search"));
   assert.ok(recallToolNames.has("memory_get"));
+  assert.ok(recallToolNames.has("session_recall"));
   assert.equal(recallToolNames.has("project_overview"), false);
+});
+
+test("parallel child tool profiles restrict mutating and high-risk tools", () => {
+  const coordinatorTools = getExecutionToolsForRole("coordinator", {
+    compact: false,
+  });
+  const readOnly = new Set(
+    applyParallelChildToolProfile(coordinatorTools, "read-only").map((tool) => tool.name),
+  );
+  const investigation = new Set(
+    applyParallelChildToolProfile(coordinatorTools, "investigation").map((tool) => tool.name),
+  );
+
+  assert.equal(readOnly.has("write_file"), false);
+  assert.equal(readOnly.has("edit_file"), false);
+  assert.equal(readOnly.has("run_terminal_command"), false);
+  assert.ok(readOnly.has("read_file"));
+  assert.ok(readOnly.has("search_files"));
+
+  assert.equal(investigation.has("credential_get"), false);
+  assert.equal(investigation.has("run_terminal_command"), false);
+  assert.equal(investigation.has("save_memory"), false);
+  assert.ok(investigation.has("web_search"));
+});
+
+test("parallel child tool profiles block MCP and custom tools by default", () => {
+  registerMcpTools([
+    {
+      tool: makeNoopTool("mcp__demo__write_remote", "Mutating MCP action."),
+      roles: ["coordinator"],
+    },
+    {
+      tool: makeNoopTool("custom__user_mutator", "Custom mutating tool."),
+      roles: ["coordinator"],
+    },
+  ]);
+
+  const coordinatorTools = getExecutionToolsForRole("coordinator", {
+    compact: false,
+  });
+  const readOnlyNames = new Set(
+    applyParallelChildToolProfile(coordinatorTools, "read-only").map((tool) => tool.name),
+  );
+  assert.equal(readOnlyNames.has("mcp__demo__write_remote"), false);
+  assert.equal(readOnlyNames.has("custom__user_mutator"), false);
+
+  replaceMcpTools([]);
 });
 
 test("compact coordinator tool selection keeps stat_path for filesystem inspection tasks", () => {
@@ -1003,7 +1261,7 @@ test("credential tools store secrets locally while redacting memory observations
 
     const rawVault = expectText(await readFileTool.execute({ path: path.join(dir, "data", "credential-vault.json") }));
     assert.doesNotMatch(rawVault, /super-secret-password/);
-    assert.match(rawVault, /"secretBackend": "mock"/);
+    assert.match(rawVault, /"__format": "ember-aes-256-gcm-v1"/);
 
     const observations: import("@ember/core").MemoryToolObservation[] = [];
     const handler = createToolHandler({

@@ -139,3 +139,90 @@ export function extractImageResult(
     imageMimeType: mime as "image/png" | "image/jpeg" | "image/webp",
   };
 }
+
+// ── MCP Resource formatting ─────────────────────────────────────────────────
+
+export interface McpResourceContents {
+  uri: string;
+  mimeType?: string;
+  text?: string;
+  blob?: string;
+}
+
+/**
+ * Format an MCP readResource result into a readable string.
+ * Text contents are returned directly; binary blobs get a placeholder.
+ */
+export function formatResourceContents(
+  contents: McpResourceContents[],
+  resourceUri: string,
+): string {
+  if (!contents || contents.length === 0) {
+    return `[resource:${resourceUri}] (empty)`;
+  }
+
+  const parts: string[] = [];
+  for (const block of contents) {
+    if (block.text) {
+      parts.push(block.text);
+    } else if (block.blob) {
+      parts.push(`[binary: ${block.mimeType ?? "application/octet-stream"}, ${Math.ceil((block.blob.length * 3) / 4)} bytes]`);
+    } else {
+      parts.push(`[resource: ${block.uri ?? resourceUri}]`);
+    }
+  }
+
+  return parts.join("\n");
+}
+
+// ── MCP Prompt formatting ───────────────────────────────────────────────────
+
+export interface McpPromptMessage {
+  role: string;
+  content:
+    | { type: "text"; text: string }
+    | { type: "image"; data: string; mimeType: string }
+    | { type: "resource"; resource: { uri: string; mimeType?: string; text?: string } }
+    | Array<{ type: string; text?: string; data?: string; mimeType?: string; resource?: unknown }>;
+}
+
+/**
+ * Format MCP getPrompt result messages into a readable string for the agent.
+ */
+export function formatPromptMessages(
+  messages: McpPromptMessage[],
+  promptName: string,
+  description?: string,
+): string {
+  if (!messages || messages.length === 0) {
+    return `[prompt:${promptName}] (empty)`;
+  }
+
+  const parts: string[] = [];
+  if (description) {
+    parts.push(`# ${promptName}\n${description}\n`);
+  }
+
+  for (const msg of messages) {
+    const role = msg.role === "assistant" ? "Assistant" : "User";
+    const content = msg.content;
+
+    if (Array.isArray(content)) {
+      const textParts = content
+        .filter((c) => c.type === "text" && c.text)
+        .map((c) => c.text);
+      if (textParts.length > 0) {
+        parts.push(`[${role}]\n${textParts.join("\n")}`);
+      }
+    } else if (content.type === "text") {
+      parts.push(`[${role}]\n${content.text}`);
+    } else if (content.type === "resource") {
+      const res = content.resource;
+      parts.push(`[${role}]\n${res.text ?? `[resource: ${res.uri}]`}`);
+    } else if (content.type === "image") {
+      parts.push(`[${role}]\n[image: ${content.mimeType}]`);
+    }
+  }
+
+  return parts.join("\n\n");
+}

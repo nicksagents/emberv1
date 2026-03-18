@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "build": "next build",
-    "dev": "next dev",
-    "start": "next start",
+    "dev": "next dev --hostname 0.0.0.0",
+    "start": "next start --hostname 0.0.0.0",
+    "test": "bash -lc 'shopt -s globstar nullglob; tests=(__tests__/**/*.test.ts __tests__/**/*.test.tsx); if [ ${#tests[@]} -eq 0 ]; then echo \"No test files found.\"; exit 0; fi; node --import tsx --test --test-concurrency=1 --test-force-exit \"${tests[@]}\"'",
     "typecheck": "tsc --project tsconfig.json --noEmit"
   },
   "dependencies": {

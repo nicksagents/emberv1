@@ -2,12 +2,15 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import nodeTest from "node:test";
 
 import type { Conversation } from "../types";
 import { consolidateConversationMemory } from "./consolidation";
 import { defaultMemoryConfig } from "./defaults";
+import { isNodeSqliteAvailable } from "./sqlite";
 import { createMemoryRepository } from "./store";
+
+const test = isNodeSqliteAvailable() ? nodeTest : nodeTest.skip;
 
 function makeConversation(id: string, messages: Conversation["messages"]): Conversation {
   const lastMessage = messages.at(-1);

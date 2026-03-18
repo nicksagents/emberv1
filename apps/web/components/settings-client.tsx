@@ -20,6 +20,7 @@ import {
 import type { McpServerConfig } from "@ember/core/mcp";
 
 import { clientApiPath } from "../lib/api";
+import { SimulationHistory } from "./simulation-history";
 
 interface ProviderView extends Provider {
   connectorType: ConnectorType | null;
@@ -115,6 +116,30 @@ interface McpState {
     activeTools: number;
     activeCalls?: number;
   };
+}
+
+interface SettingsSecretStatus {
+  sudoPasswordSet: boolean;
+  braveApiKeySet: boolean;
+}
+
+interface TerminalApproval {
+  id: string;
+  sessionKey: string;
+  command: string;
+  reasons: string[];
+  createdAt: string;
+  expiresAt: string;
+}
+
+interface CheckpointSummary {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  reason: string;
+  turnKey: string | null;
+  scopeDir: string;
+  snapshotCount: number;
 }
 
 function ProviderIcon({ id }: { id: string }) {
@@ -234,6 +259,17 @@ const QUICK_PRESETS: QuickPreset[] = [
   },
 ];
 
+const MIN_SWARM_PERSONAS = 8;
+const MAX_SWARM_PERSONAS = 200;
+const MIN_SWARM_ROUNDS = 1;
+const MAX_SWARM_ROUNDS = 120;
+const MIN_SWARM_CONCURRENCY = 1;
+const MAX_SWARM_CONCURRENCY = 32;
+
+function clampInt(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, Math.floor(value)));
+}
+
 const ROLE_DETAILS: Record<Role, { title: string; description: string }> = {
   dispatch: {
     title: "Dispatch",
@@ -261,8 +297,161 @@ const ROLE_DETAILS: Record<Role, { title: string; description: string }> = {
   },
 };
 
-type SettingsPanelId = "general" | "providers" | "roles" | "mcp" | "prompts";
+type SettingsPanelId = "general" | "providers" | "roles" | "mcp" | "prompts" | "simulation";
 type McpInstallTransport = "package" | "sse" | "streamable-http";
+
+// ── MCP Service Keys ─────────────────────────────────────────────────────────
+
+interface McpServiceKeyDef {
+  /** MCP server name in mcp.default.json */
+  serverName: string;
+  /** Human-readable service label */
+  label: string;
+  /** Short description shown under the label */
+  description: string;
+  /** Env var name → input placeholder */
+  envKeys: Array<{
+    key: string;
+    label: string;
+    placeholder: string;
+    helpUrl?: string;
+    /** If false the field is shown as plain text (e.g. email, URL). Defaults to true. */
+    sensitive?: boolean;
+  }>;
+}
+
+const MCP_SERVICE_KEYS: McpServiceKeyDef[] = [
+  {
+    serverName: "github",
+    label: "GitHub",
+    description: "Repos, issues, PRs, and code search via the GitHub API.",
+    envKeys: [
+      {
+        key: "GITHUB_PERSONAL_ACCESS_TOKEN",
+        label: "Personal Access Token",
+        placeholder: "ghp_...",
+        helpUrl: "https://github.com/settings/tokens",
+      },
+    ],
+  },
+  {
+    serverName: "brave-search",
+    label: "Brave Search",
+    description: "Web and local search powered by the Brave Search API.",
+    envKeys: [
+      {
+        key: "BRAVE_API_KEY",
+        label: "API Key",
+        placeholder: "BSA...",
+        helpUrl: "https://brave.com/search/api/",
+      },
+    ],
+  },
+  {
+    serverName: "slack",
+    label: "Slack",
+    description: "Read channels, post messages, and search Slack conversations.",
+    envKeys: [
+      {
+        key: "SLACK_BOT_TOKEN",
+        label: "Bot Token",
+        placeholder: "xoxb-...",
+        helpUrl: "https://api.slack.com/apps",
+      },
+      {
+        key: "SLACK_TEAM_ID",
+        label: "Team ID",
+        placeholder: "T0123456789",
+        sensitive: false,
+      },
+    ],
+  },
+  {
+    serverName: "gitlab",
+    label: "GitLab",
+    description: "Projects, issues, merge requests, and repo operations.",
+    envKeys: [
+      {
+        key: "GITLAB_PERSONAL_ACCESS_TOKEN",
+        label: "Personal Access Token",
+        placeholder: "glpat-...",
+        helpUrl: "https://gitlab.com/-/user_settings/personal_access_tokens",
+      },
+      {
+        key: "GITLAB_API_URL",
+        label: "API URL",
+        placeholder: "https://gitlab.com/api/v4",
+        sensitive: false,
+      },
+    ],
+  },
+  {
+    serverName: "google-maps",
+    label: "Google Maps",
+    description: "Geocoding, directions, place search, and distance calculations.",
+    envKeys: [
+      {
+        key: "GOOGLE_MAPS_API_KEY",
+        label: "API Key",
+        placeholder: "AIza...",
+        helpUrl: "https://console.cloud.google.com/apis/credentials",
+      },
+    ],
+  },
+  {
+    serverName: "postgres",
+    label: "PostgreSQL",
+    description: "Read-only schema inspection and SELECT queries.",
+    envKeys: [
+      {
+        key: "_POSTGRES_CONNECTION_STRING",
+        label: "Connection String",
+        placeholder: "postgres://user:pass@host:5432/db",
+        sensitive: false,
+      },
+    ],
+  },
+  // ── Email ──────────────────────────────────────────────────────────────
+  {
+    serverName: "gmail",
+    label: "Gmail",
+    description: "Read, search, send, and manage Gmail emails via IMAP/SMTP.",
+    envKeys: [
+      {
+        key: "GMAIL_EMAIL",
+        label: "Gmail Address",
+        placeholder: "you@gmail.com",
+        sensitive: false,
+      },
+      {
+        key: "GMAIL_APP_PASSWORD",
+        label: "App Password",
+        placeholder: "xxxx xxxx xxxx xxxx",
+        helpUrl: "https://myaccount.google.com/apppasswords",
+      },
+    ],
+  },
+  {
+    serverName: "outlook-mail",
+    label: "Outlook / Microsoft 365",
+    description: "Read, send, search Outlook/365 emails via Microsoft Graph API.",
+    envKeys: [
+      {
+        key: "MICROSOFT_CLIENT_ID",
+        label: "Azure App Client ID",
+        placeholder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+        helpUrl: "https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps",
+        sensitive: false,
+      },
+      {
+        key: "MICROSOFT_TENANT_ID",
+        label: "Tenant ID",
+        placeholder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+        sensitive: false,
+      },
+    ],
+  },
+];
 
 const SETTINGS_PANELS: Array<{
   id: SettingsPanelId;
@@ -293,6 +482,11 @@ const SETTINGS_PANELS: Array<{
     id: "prompts",
     label: "Prompts",
     description: "System overrides",
+  },
+  {
+    id: "simulation",
+    label: "Simulation",
+    description: "Swarm settings",
   },
 ];
 
@@ -539,6 +733,7 @@ function sanitizeRoleAssignments(assignments: RoleAssignment[]): RoleAssignment[
 
 export function SettingsClient({
   initialSettings,
+  initialSettingsSecretStatus,
   runtime,
   initialProviders,
   connectorTypes,
@@ -547,6 +742,7 @@ export function SettingsClient({
   initialMcpState,
 }: {
   initialSettings: Settings;
+  initialSettingsSecretStatus: SettingsSecretStatus;
   runtime: RuntimeState;
   initialProviders: ProviderView[];
   connectorTypes: ConnectorType[];
@@ -555,6 +751,7 @@ export function SettingsClient({
   initialMcpState: McpState;
 }) {
   const [settings, setSettings] = useState(initialSettings);
+  const [settingsSecretStatus, setSettingsSecretStatus] = useState(initialSettingsSecretStatus);
   const [providers, setProviders] = useState(initialProviders);
   const [assignments, setAssignments] = useState(() => sanitizeRoleAssignments(initialAssignments));
   const [savedSettings, setSavedSettings] = useState(initialSettings);
@@ -589,6 +786,26 @@ export function SettingsClient({
   const [mcpHeaders, setMcpHeaders] = useState("");
   const [mcpTimeout, setMcpTimeout] = useState("30000");
   const [mcpRoles, setMcpRoles] = useState<Role[]>(["coordinator", "director", "inspector"]);
+  const [terminalApprovals, setTerminalApprovals] = useState<TerminalApproval[]>([]);
+  const [terminalApprovalBusyId, setTerminalApprovalBusyId] = useState<string | null>(null);
+  const [checkpoints, setCheckpoints] = useState<CheckpointSummary[]>([]);
+  const [checkpointBusyId, setCheckpointBusyId] = useState<string | null>(null);
+
+  // Service key state: serverName → envKey → value
+  const [serviceKeys, setServiceKeys] = useState<Record<string, Record<string, string>>>(() => {
+    const keys: Record<string, Record<string, string>> = {};
+    for (const def of MCP_SERVICE_KEYS) {
+      const server = initialMcpState.items.find((s) => s.name === def.serverName)
+        ?? initialMcpState.merged.find((s) => s.name === def.serverName);
+      const env = server?.config?.env ?? {};
+      keys[def.serverName] = {};
+      for (const envDef of def.envKeys) {
+        keys[def.serverName][envDef.key] = env[envDef.key] ?? "";
+      }
+    }
+    return keys;
+  });
+  const [serviceKeySaving, setServiceKeySaving] = useState<string | null>(null);
 
   const providerMap = useMemo(
     () => new Map(providers.map((provider) => [provider.id, provider])),
@@ -666,6 +883,21 @@ export function SettingsClient({
       JSON.stringify(normalizedAssignments) !== JSON.stringify(savedAssignments),
     [normalizedAssignments, savedAssignments, savedSettings, settings],
   );
+  const simulationPool = settings.simulation?.providerModelPool ?? [];
+  const configuredPersonaInstances = useMemo(
+    () =>
+      simulationPool.reduce((sum, entry) => {
+        if (entry.enabled === false || entry.usage === "synthesis") return sum;
+        return sum + clampInt(entry.replicas ?? 1, 1, MAX_SWARM_PERSONAS);
+      }, 0),
+    [simulationPool],
+  );
+  const targetSimulationPersonas = clampInt(
+    settings.simulation?.defaultPersonaCount ?? MIN_SWARM_PERSONAS,
+    MIN_SWARM_PERSONAS,
+    MAX_SWARM_PERSONAS,
+  );
+  const simulationDeploymentMismatch = configuredPersonaInstances !== targetSimulationPersonas;
 
   useEffect(() => {
     if (roleReadyProviders.length === 0) {
@@ -695,6 +927,110 @@ export function SettingsClient({
       }),
     );
   }, [providerMap, providerModelsMap, roleReadyProviders]);
+
+  async function refreshTerminalApprovals() {
+    try {
+      const response = await fetch(clientApiPath("/terminal/approvals"), {
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        throw new Error(`Terminal approvals request failed (${response.status}).`);
+      }
+      const payload = (await response.json()) as { items?: TerminalApproval[] };
+      setTerminalApprovals(Array.isArray(payload.items) ? payload.items : []);
+    } catch (error) {
+      console.warn(
+        "[settings] failed to refresh terminal approvals:",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  async function refreshCheckpoints() {
+    try {
+      const response = await fetch(clientApiPath("/checkpoints?limit=20"), {
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        throw new Error(`Checkpoint list request failed (${response.status}).`);
+      }
+      const payload = (await response.json()) as { items?: CheckpointSummary[] };
+      setCheckpoints(Array.isArray(payload.items) ? payload.items : []);
+    } catch (error) {
+      console.warn(
+        "[settings] failed to refresh checkpoints:",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  async function decideTerminalApproval(
+    approvalId: string,
+    decision: "deny" | "once" | "session" | "always",
+  ) {
+    setTerminalApprovalBusyId(approvalId);
+    setNotice(null);
+
+    try {
+      const response = await fetch(clientApiPath(`/terminal/approvals/${approvalId}`), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ decision }),
+      });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(payload?.error ?? `Approval update failed (${response.status}).`);
+      }
+      await refreshTerminalApprovals();
+      setNotice({
+        tone: "success",
+        message: `Terminal approval decision saved (${decision}).`,
+      });
+    } catch (error) {
+      setNotice({
+        tone: "danger",
+        message: error instanceof Error ? error.message : "Failed to update terminal approval.",
+      });
+    } finally {
+      setTerminalApprovalBusyId(null);
+    }
+  }
+
+  async function rollbackCheckpoint(checkpointId: string) {
+    setCheckpointBusyId(checkpointId);
+    setNotice(null);
+    try {
+      const response = await fetch(clientApiPath(`/checkpoints/${checkpointId}/rollback`), {
+        method: "POST",
+      });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(payload?.error ?? `Checkpoint rollback failed (${response.status}).`);
+      }
+      await refreshCheckpoints();
+      setNotice({
+        tone: "success",
+        message: "Checkpoint rollback completed.",
+      });
+    } catch (error) {
+      setNotice({
+        tone: "danger",
+        message: error instanceof Error ? error.message : "Failed to rollback checkpoint.",
+      });
+    } finally {
+      setCheckpointBusyId(null);
+    }
+  }
+
+  useEffect(() => {
+    void refreshTerminalApprovals();
+    void refreshCheckpoints();
+    const timer = setInterval(() => {
+      void refreshTerminalApprovals();
+      void refreshCheckpoints();
+    }, 10_000);
+    return () => clearInterval(timer);
+  }, []);
 
   function resetProviderBuilder() {
     setShowAddProvider(false);
@@ -827,8 +1163,16 @@ export function SettingsClient({
         throw new Error("Saving settings failed.");
       }
 
+      const settingsPayload = (await settingsResponse.json()) as {
+        item: Settings;
+        secretStatus?: SettingsSecretStatus;
+      };
+
       setSavedSettings(settings);
       setSavedAssignments(normalizedAssignments);
+      if (settingsPayload.secretStatus) {
+        setSettingsSecretStatus(settingsPayload.secretStatus);
+      }
       setNotice({ tone: "success", message: "Settings saved successfully." });
     } catch (error) {
       setNotice({
@@ -1256,6 +1600,74 @@ export function SettingsClient({
     }
   }
 
+  function setServiceKey(serverName: string, envKey: string, value: string) {
+    setServiceKeys((prev) => ({
+      ...prev,
+      [serverName]: { ...prev[serverName], [envKey]: value },
+    }));
+  }
+
+  async function saveServiceKey(def: McpServiceKeyDef) {
+    setServiceKeySaving(def.serverName);
+    setNotice(null);
+
+    try {
+      const env: Record<string, string> = {};
+      for (const envDef of def.envKeys) {
+        const value = serviceKeys[def.serverName]?.[envDef.key]?.trim() ?? "";
+        if (value) {
+          env[envDef.key] = value;
+        }
+      }
+
+      // Postgres is special: connection string goes as a CLI arg, not env
+      let args: string[] | undefined;
+      if (def.serverName === "postgres" && env["_POSTGRES_CONNECTION_STRING"]) {
+        const connStr = env["_POSTGRES_CONNECTION_STRING"];
+        delete env["_POSTGRES_CONNECTION_STRING"];
+        // Build the full args with the connection string appended
+        args = ["-y", "@modelcontextprotocol/server-postgres", connStr];
+      }
+
+      // Check if any real key has a value — if so, enable the server
+      const hasAnyKey = def.envKeys.some((e) => {
+        const v = serviceKeys[def.serverName]?.[e.key]?.trim() ?? "";
+        return v.length > 0;
+      });
+
+      const config: Partial<McpServerConfig> = {
+        env,
+        enabled: hasAnyKey ? true : undefined,
+        ...(args ? { args } : {}),
+      };
+
+      const response = await fetch(clientApiPath(`/mcp/servers/user/${def.serverName}`), {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ config }),
+      });
+
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(payload?.error ?? `Save failed with status ${response.status}.`);
+      }
+
+      const payload = (await response.json()) as McpState;
+      setMcpState(payload);
+      setNotice({
+        tone: "success",
+        message: `Saved ${def.label} configuration. ${hasAnyKey ? "Server enabled." : ""}`,
+      });
+    } catch (error) {
+      setNotice({
+        tone: "danger",
+        message: error instanceof Error ? error.message : `Failed to save ${def.label} keys.`,
+      });
+    } finally {
+      setServiceKeySaving(null);
+    }
+  }
+
   function renderWorkspaceSaveAction(label: string) {
     return (
       <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
@@ -1409,8 +1821,165 @@ export function SettingsClient({
                     </div>
                     <div className="settings-info-note" style={{ maxWidth: "400px" }}>
                       <span className="label">Status</span>
-                      <p>{settings.braveApiKey?.trim() ? "Brave Search active" : "Using DuckDuckGo fallback"}</p>
+                      <p>
+                        {settings.braveApiKey?.trim() || settingsSecretStatus.braveApiKeySet
+                          ? "Brave Search active"
+                          : "Using DuckDuckGo fallback"}
+                      </p>
                     </div>
+                  </div>
+                </section>
+
+                <section className="settings-block">
+                  <div className="settings-block-head">
+                    <h3>Custom Tool Trust</h3>
+                    <p className="helper-copy">
+                      Control whether runtime-created custom tools can be created and executed.
+                    </p>
+                  </div>
+                  <div className="settings-block-content">
+                    <div className="settings-field" style={{ maxWidth: "400px" }}>
+                      <label>Trust mode</label>
+                      <select
+                        value={settings.customTools.trustMode}
+                        onChange={(e) =>
+                          setSettings((current) => ({
+                            ...current,
+                            customTools: {
+                              ...current.customTools,
+                              trustMode: e.target.value as Settings["customTools"]["trustMode"],
+                            },
+                          }))
+                        }
+                      >
+                        <option value="disabled">Disabled</option>
+                        <option value="local-only">Local-only (project scoped)</option>
+                        <option value="allow">Allow all custom tools</option>
+                      </select>
+                    </div>
+                    <div className="settings-info-note" style={{ maxWidth: "700px" }}>
+                      <span className="label">Mode details</span>
+                      <p>
+                        Disabled blocks create_tool and all custom__* tools. Local-only allows create_tool for
+                        project scope and blocks user-scoped custom tools. Allow enables all custom tools.
+                      </p>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="settings-block">
+                  <div className="settings-block-head">
+                    <h3>Terminal Command Approvals</h3>
+                    <p className="helper-copy">
+                      Review and decide pending dangerous terminal commands detected by the runtime.
+                    </p>
+                  </div>
+                  <div className="settings-block-content">
+                    {terminalApprovals.length === 0 ? (
+                      <div className="settings-empty-state" style={{ margin: 0 }}>
+                        <strong>No pending approvals</strong>
+                        <span>Dangerous commands will appear here when operator confirmation is required.</span>
+                      </div>
+                    ) : (
+                      <div className="settings-provider-list" style={{ padding: 0 }}>
+                        {terminalApprovals.map((approval) => (
+                          <article key={approval.id} className="settings-provider-card">
+                            <div className="settings-provider-head">
+                              <div className="settings-provider-title">
+                                <h4 style={{ margin: 0 }}>Session: {approval.sessionKey}</h4>
+                                <p style={{ margin: 0, opacity: 0.75 }}>
+                                  Requested {new Date(approval.createdAt).toLocaleString()} • Expires{" "}
+                                  {new Date(approval.expiresAt).toLocaleTimeString()}
+                                </p>
+                              </div>
+                            </div>
+                            <div className="settings-info-note" style={{ marginLeft: 0 }}>
+                              <span className="label">Command</span>
+                              <p style={{ fontFamily: "var(--font-mono, monospace)" }}>{approval.command}</p>
+                              <span className="label">Risk Signals</span>
+                              <p>{approval.reasons.join(", ")}</p>
+                            </div>
+                            <div className="settings-provider-actions">
+                              <button
+                                className="button ghost"
+                                disabled={terminalApprovalBusyId === approval.id}
+                                onClick={() => void decideTerminalApproval(approval.id, "deny")}
+                              >
+                                Deny
+                              </button>
+                              <button
+                                className="button ghost"
+                                disabled={terminalApprovalBusyId === approval.id}
+                                onClick={() => void decideTerminalApproval(approval.id, "once")}
+                              >
+                                Allow Once
+                              </button>
+                              <button
+                                className="button ghost"
+                                disabled={terminalApprovalBusyId === approval.id}
+                                onClick={() => void decideTerminalApproval(approval.id, "session")}
+                              >
+                                Allow Session
+                              </button>
+                              <button
+                                className="button"
+                                disabled={terminalApprovalBusyId === approval.id}
+                                onClick={() => void decideTerminalApproval(approval.id, "always")}
+                              >
+                                Always Allow
+                              </button>
+                            </div>
+                          </article>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </section>
+
+                <section className="settings-block">
+                  <div className="settings-block-head">
+                    <h3>Checkpoint Rollback</h3>
+                    <p className="helper-copy">
+                      File mutations create safety checkpoints. Roll back a checkpoint to restore prior file state.
+                    </p>
+                  </div>
+                  <div className="settings-block-content">
+                    {checkpoints.length === 0 ? (
+                      <div className="settings-empty-state" style={{ margin: 0 }}>
+                        <strong>No checkpoints yet</strong>
+                        <span>Checkpoints appear after write_file, edit_file, or delete_file mutations.</span>
+                      </div>
+                    ) : (
+                      <div className="settings-provider-list" style={{ padding: 0 }}>
+                        {checkpoints.map((checkpoint) => (
+                          <article key={checkpoint.id} className="settings-provider-card">
+                            <div className="settings-provider-head">
+                              <div className="settings-provider-title">
+                                <h4 style={{ margin: 0 }}>{checkpoint.id}</h4>
+                                <p style={{ margin: 0, opacity: 0.75 }}>
+                                  {new Date(checkpoint.createdAt).toLocaleString()} • files {checkpoint.snapshotCount}
+                                </p>
+                              </div>
+                            </div>
+                            <div className="settings-info-note" style={{ marginLeft: 0 }}>
+                              <span className="label">Scope</span>
+                              <p style={{ fontFamily: "var(--font-mono, monospace)" }}>{checkpoint.scopeDir}</p>
+                              <span className="label">Reason</span>
+                              <p>{checkpoint.reason}{checkpoint.turnKey ? ` • turn ${checkpoint.turnKey}` : ""}</p>
+                            </div>
+                            <div className="settings-provider-actions">
+                              <button
+                                className="button ghost"
+                                disabled={checkpointBusyId === checkpoint.id}
+                                onClick={() => void rollbackCheckpoint(checkpoint.id)}
+                              >
+                                Rollback
+                              </button>
+                            </div>
+                          </article>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </section>
 
@@ -2153,6 +2722,93 @@ export function SettingsClient({
 
                 <section className="settings-block">
                   <div className="settings-block-head">
+                    <h3>Service Keys</h3>
+                    <p className="helper-copy">
+                      API keys and credentials for MCP servers that connect to external services.
+                      Keys are saved to your user config and persist across projects.
+                    </p>
+                  </div>
+                  <div className="settings-block-content">
+                    <div className="settings-service-keys-grid">
+                      {MCP_SERVICE_KEYS.map((def) => {
+                        const serverStatus = mcpState.items.find((s) => s.name === def.serverName);
+                        const isRunning = serverStatus?.status === "running";
+                        const isDisabled = serverStatus?.status === "disabled";
+                        const isError = serverStatus?.status === "error";
+                        const hasAllKeys = def.envKeys.every(
+                          (e) => (serviceKeys[def.serverName]?.[e.key]?.trim() ?? "").length > 0,
+                        );
+                        const isSaving = serviceKeySaving === def.serverName;
+
+                        return (
+                          <article key={def.serverName} className="settings-service-key-card">
+                            <div className="settings-service-key-head">
+                              <div>
+                                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                                  <div
+                                    className={`provider-status-dot ${isRunning ? "connected" : isError ? "error" : "idle"}`}
+                                  />
+                                  <h4 style={{ margin: 0, fontSize: "0.95rem" }}>{def.label}</h4>
+                                </div>
+                                <p className="helper-copy" style={{ margin: "0.25rem 0 0 0" }}>
+                                  {def.description}
+                                </p>
+                              </div>
+                              <span
+                                className={`settings-status-pill ${isRunning ? "connected" : isDisabled ? "idle" : isError ? "error" : "idle"}`}
+                                style={{ flexShrink: 0 }}
+                              >
+                                {isRunning ? "Active" : isError ? "Error" : isDisabled ? "Needs keys" : "Configured"}
+                              </span>
+                            </div>
+                            <div className="settings-service-key-fields">
+                              {def.envKeys.map((envDef) => (
+                                <div key={envDef.key} className="settings-field">
+                                  <label>
+                                    {envDef.label}
+                                    {envDef.helpUrl && (
+                                      <>
+                                        {" "}
+                                        <a
+                                          href={envDef.helpUrl}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                          style={{ color: "var(--accent)", fontSize: "0.8rem" }}
+                                        >
+                                          Get key
+                                        </a>
+                                      </>
+                                    )}
+                                  </label>
+                                  <input
+                                    type={envDef.sensitive === false ? "text" : "password"}
+                                    value={serviceKeys[def.serverName]?.[envDef.key] ?? ""}
+                                    onChange={(e) => setServiceKey(def.serverName, envDef.key, e.target.value)}
+                                    placeholder={envDef.placeholder}
+                                    autoComplete={envDef.sensitive === false ? "off" : "new-password"}
+                                  />
+                                </div>
+                              ))}
+                            </div>
+                            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "0.5rem" }}>
+                              <button
+                                className="button primary"
+                                style={{ padding: "0.4rem 1rem", fontSize: "0.85rem" }}
+                                onClick={() => void saveServiceKey(def)}
+                                disabled={isSaving}
+                              >
+                                {isSaving ? "Saving..." : hasAllKeys ? "Save & Enable" : "Save"}
+                              </button>
+                            </div>
+                          </article>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </section>
+
+                <section className="settings-block">
+                  <div className="settings-block-head">
                     <h3>Add MCP Server</h3>
                     <p className="helper-copy">Install a public npm MCP package or add a remote SSE/Streamable HTTP endpoint, scope it to roles, then reload it into the live tool registry.</p>
                   </div>
@@ -2430,6 +3086,439 @@ export function SettingsClient({
                         />
                       </div>
                     ))}
+                  </div>
+                </section>
+              </div>
+            )}
+
+            {/* Simulation Panel */}
+            {activePanel === "simulation" && (
+              <div className="settings-pane">
+                <div className="settings-pane-head">
+                  <div>
+                    <h2>Simulation</h2>
+                    <p className="helper-copy">Configure swarm simulation defaults and provider pool.</p>
+                  </div>
+                  {renderWorkspaceSaveAction("Save Changes")}
+                </div>
+
+                {/* Execution Defaults */}
+                <section className="settings-block">
+                  <div className="settings-block-head">
+                    <h3>Execution Defaults</h3>
+                    <p className="helper-copy">Default parameters for new simulations.</p>
+                  </div>
+                  <div className="settings-block-content">
+                    <div className="settings-field-row">
+                      <div className="settings-field">
+                        <label>Personas <span className="optional">{MIN_SWARM_PERSONAS}-{MAX_SWARM_PERSONAS}</span></label>
+                        <input
+                          type="number"
+                          min={MIN_SWARM_PERSONAS}
+                          max={MAX_SWARM_PERSONAS}
+                          value={settings.simulation?.defaultPersonaCount ?? MIN_SWARM_PERSONAS}
+                          onChange={(e) => {
+                            const raw = e.target.value;
+                            const n = raw === "" ? undefined : parseInt(raw);
+                            setSettings((c) => ({ ...c, simulation: { ...c.simulation, defaultPersonaCount: n } }));
+                          }}
+                          onBlur={() =>
+                            setSettings((c) => ({
+                              ...c,
+                              simulation: {
+                                ...c.simulation,
+                                defaultPersonaCount: clampInt(
+                                  c.simulation?.defaultPersonaCount ?? MIN_SWARM_PERSONAS,
+                                  MIN_SWARM_PERSONAS,
+                                  MAX_SWARM_PERSONAS,
+                                ),
+                              },
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="settings-field">
+                        <label>Rounds <span className="optional">{MIN_SWARM_ROUNDS}-{MAX_SWARM_ROUNDS}</span></label>
+                        <input
+                          type="number"
+                          min={MIN_SWARM_ROUNDS}
+                          max={MAX_SWARM_ROUNDS}
+                          value={settings.simulation?.defaultRoundCount ?? 3}
+                          onChange={(e) => {
+                            const raw = e.target.value;
+                            const n = raw === "" ? undefined : parseInt(raw);
+                            setSettings((c) => ({ ...c, simulation: { ...c.simulation, defaultRoundCount: n } }));
+                          }}
+                          onBlur={() =>
+                            setSettings((c) => ({
+                              ...c,
+                              simulation: {
+                                ...c.simulation,
+                                defaultRoundCount: clampInt(
+                                  c.simulation?.defaultRoundCount ?? 3,
+                                  MIN_SWARM_ROUNDS,
+                                  MAX_SWARM_ROUNDS,
+                                ),
+                              },
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="settings-field">
+                        <label>Concurrency <span className="optional">{MIN_SWARM_CONCURRENCY}-{MAX_SWARM_CONCURRENCY}</span></label>
+                        <input
+                          type="number"
+                          min={MIN_SWARM_CONCURRENCY}
+                          max={MAX_SWARM_CONCURRENCY}
+                          value={settings.simulation?.maxConcurrency ?? 4}
+                          onChange={(e) => {
+                            const raw = e.target.value;
+                            const n = raw === "" ? undefined : parseInt(raw);
+                            setSettings((c) => ({ ...c, simulation: { ...c.simulation, maxConcurrency: n } }));
+                          }}
+                          onBlur={() =>
+                            setSettings((c) => ({
+                              ...c,
+                              simulation: {
+                                ...c.simulation,
+                                maxConcurrency: clampInt(
+                                  c.simulation?.maxConcurrency ?? 4,
+                                  MIN_SWARM_CONCURRENCY,
+                                  MAX_SWARM_CONCURRENCY,
+                                ),
+                              },
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="settings-field">
+                        <label>Timeout <span className="optional">ms</span></label>
+                        <input
+                          type="number"
+                          min={5000}
+                          max={120000}
+                          step={1000}
+                          value={settings.simulation?.personaTimeoutMs ?? 60000}
+                          onChange={(e) => {
+                            const raw = e.target.value;
+                            const n = raw === "" ? undefined : parseInt(raw);
+                            setSettings((c) => ({ ...c, simulation: { ...c.simulation, personaTimeoutMs: n } }));
+                          }}
+                          onBlur={() =>
+                            setSettings((c) => ({
+                              ...c,
+                              simulation: { ...c.simulation, personaTimeoutMs: Math.max(5000, Math.min(120000, c.simulation?.personaTimeoutMs ?? 60000)) },
+                            }))
+                          }
+                        />
+                      </div>
+                    </div>
+                    <div className="settings-field">
+                      <label className="settings-checkbox">
+                        <input
+                          type="checkbox"
+                          checked={settings.simulation?.autoRetryOnParseFail ?? true}
+                          onChange={(e) =>
+                            setSettings((c) => ({
+                              ...c,
+                              simulation: {
+                                ...c.simulation,
+                                autoRetryOnParseFail: e.target.checked,
+                              },
+                            }))
+                          }
+                        />
+                        Auto-retry on parse failure
+                      </label>
+                    </div>
+                    <div className="settings-field">
+                      <label className="settings-checkbox">
+                        <input
+                          type="checkbox"
+                          checked={settings.simulation?.compactMode ?? false}
+                          onChange={(e) =>
+                            setSettings((c) => ({
+                              ...c,
+                              simulation: {
+                                ...c.simulation,
+                                compactMode: e.target.checked,
+                              },
+                            }))
+                          }
+                        />
+                        Force compact prompts (for small models)
+                      </label>
+                    </div>
+                  </div>
+                </section>
+
+                {/* Simulation Provider Pool */}
+                <section className="settings-block">
+                  <div className="settings-block-head">
+                    <h3>Provider &amp; Model Pool</h3>
+                    <p className="helper-copy">
+                      Choose which providers and models to use in simulations.
+                      Only connected providers with available models are shown.
+                    </p>
+                  </div>
+                  <div className="settings-block-content">
+                    <div className="helper-copy" style={{ marginBottom: "0.5rem" }}>
+                      Configured persona instances: <strong>{configuredPersonaInstances}</strong> / target personas: <strong>{targetSimulationPersonas}</strong>
+                      {simulationDeploymentMismatch && (
+                        <span style={{ color: "var(--danger-400)", marginLeft: "0.5rem" }}>
+                          Mismatch. Set replicas so totals match exactly.
+                        </span>
+                      )}
+                    </div>
+                    {roleReadyProviders.length === 0 ? (
+                      <p className="helper-copy" style={{ opacity: 0.6 }}>
+                        No connected providers with models available. Add providers in the Providers tab first.
+                      </p>
+                    ) : (
+                      <>
+                        {roleReadyProviders.map((provider) => {
+                          const models = providerModelsMap.get(provider.id) ?? [];
+                          const pool = settings.simulation?.providerModelPool ?? [];
+                          const providerEntries = pool.filter((e) => e.providerId === provider.id);
+                          const hasAnyEntry = providerEntries.length > 0;
+
+                          return (
+                            <div
+                              key={provider.id}
+                              className="settings-field"
+                              style={{
+                                border: `1px solid ${hasAnyEntry ? "var(--border-accent)" : "var(--border)"}`,
+                                borderRadius: "var(--radius-md)",
+                                padding: "0.75rem",
+                                marginBottom: "0.5rem",
+                              }}
+                            >
+                              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: hasAnyEntry ? "0.5rem" : 0 }}>
+                                <label style={{ fontWeight: 600, fontSize: "0.82rem" }}>{provider.name}</label>
+                                <span style={{ fontSize: "0.68rem", color: "var(--text-tertiary)" }}>
+                                  {models.length} model{models.length !== 1 ? "s" : ""}
+                                </span>
+                              </div>
+
+                              {/* Entries for this provider */}
+                              {providerEntries.map((entry, ei) => (
+                                <div key={`${entry.providerId}-${entry.modelId}-${ei}`} style={{ display: "flex", alignItems: "center", gap: "0.4rem", marginBottom: "0.35rem", flexWrap: "wrap" }}>
+                                  <select
+                                    style={{ flex: "1 1 140px", minWidth: 0, fontSize: "0.78rem" }}
+                                    value={entry.modelId}
+                                    onChange={(e) => {
+                                      const updated = [...pool];
+                                      const idx = updated.findIndex((x) => x === entry);
+                                      if (idx >= 0) updated[idx] = { ...entry, modelId: e.target.value };
+                                      setSettings((c) => ({ ...c, simulation: { ...c.simulation, providerModelPool: updated } }));
+                                    }}
+                                  >
+                                    {models.map((m) => (
+                                      <option key={m} value={m}>{m}</option>
+                                    ))}
+                                  </select>
+                                  <select
+                                    style={{ width: "90px", fontSize: "0.78rem" }}
+                                    value={entry.usage}
+                                    onChange={(e) => {
+                                      const updated = [...pool];
+                                      const idx = updated.findIndex((x) => x === entry);
+                                      if (idx >= 0) updated[idx] = { ...entry, usage: e.target.value as "persona" | "synthesis" | "both" };
+                                      setSettings((c) => ({ ...c, simulation: { ...c.simulation, providerModelPool: updated } }));
+                                    }}
+                                  >
+                                    <option value="both">Both</option>
+                                    <option value="persona">Persona</option>
+                                    <option value="synthesis">Synthesis</option>
+                                  </select>
+                                  <input
+                                    type="number"
+                                    min={1}
+                                    max={99}
+                                    title="Priority (lower = used first)"
+                                    placeholder="Pri"
+                                    style={{ width: "52px", fontSize: "0.78rem", textAlign: "center" }}
+                                    value={entry.priority ?? 50}
+                                    onChange={(e) => {
+                                      const updated = [...pool];
+                                      const idx = updated.findIndex((x) => x === entry);
+                                      if (idx >= 0) updated[idx] = { ...entry, priority: Math.max(1, parseInt(e.target.value) || 50) };
+                                      setSettings((c) => ({ ...c, simulation: { ...c.simulation, providerModelPool: updated } }));
+                                    }}
+                                  />
+                                  <input
+                                    type="number"
+                                    min={1}
+                                    max={MAX_SWARM_PERSONAS}
+                                    title="Replicas/instances for this provider+model"
+                                    placeholder="Rep"
+                                    style={{ width: "58px", fontSize: "0.78rem", textAlign: "center" }}
+                                    value={entry.replicas ?? 1}
+                                    onChange={(e) => {
+                                      const updated = [...pool];
+                                      const idx = updated.findIndex((x) => x === entry);
+                                      if (idx >= 0) updated[idx] = {
+                                        ...entry,
+                                        replicas: clampInt(parseInt(e.target.value) || 1, 1, MAX_SWARM_PERSONAS),
+                                      };
+                                      setSettings((c) => ({ ...c, simulation: { ...c.simulation, providerModelPool: updated } }));
+                                    }}
+                                  />
+                                  <label className="settings-checkbox" style={{ fontSize: "0.72rem", gap: "0.25rem" }}>
+                                    <input
+                                      type="checkbox"
+                                      checked={entry.enabled !== false}
+                                      onChange={(e) => {
+                                        const updated = [...pool];
+                                        const idx = updated.findIndex((x) => x === entry);
+                                        if (idx >= 0) updated[idx] = { ...entry, enabled: e.target.checked };
+                                        setSettings((c) => ({ ...c, simulation: { ...c.simulation, providerModelPool: updated } }));
+                                      }}
+                                    />
+                                    On
+                                  </label>
+                                  <button
+                                    type="button"
+                                    className="icon-btn"
+                                    style={{ width: "1.4rem", height: "1.4rem" }}
+                                    title="Remove"
+                                    onClick={() => {
+                                      const updated = pool.filter((x) => x !== entry);
+                                      setSettings((c) => ({ ...c, simulation: { ...c.simulation, providerModelPool: updated } }));
+                                    }}
+                                  >
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                      <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                                    </svg>
+                                  </button>
+                                </div>
+                              ))}
+
+                              {/* Add model button */}
+                              {models.length > 0 && (
+                                <button
+                                  type="button"
+                                  className="text-btn"
+                                  style={{ fontSize: "0.72rem", marginTop: hasAnyEntry ? "0.25rem" : 0 }}
+                                  onClick={() => {
+                                    const newEntry = {
+                                      providerId: provider.id,
+                                      modelId: models[0],
+                                      usage: "both" as const,
+                                      priority: 50,
+                                      enabled: true,
+                                      replicas: 1,
+                                    };
+                                    setSettings((c) => ({
+                                      ...c,
+                                      simulation: {
+                                        ...c.simulation,
+                                        providerModelPool: [...(c.simulation?.providerModelPool ?? []), newEntry],
+                                      },
+                                    }));
+                                  }}
+                                >
+                                  + Add model from {provider.name}
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })}
+
+                        {(settings.simulation?.providerModelPool ?? []).length > 0 && (
+                          <p className="helper-copy" style={{ fontSize: "0.68rem", marginTop: "0.5rem" }}>
+                            Usage: <strong>Persona</strong> = individual agents, <strong>Synthesis</strong> = round/final summaries, <strong>Both</strong> = either.
+                            Lower priority number = used first. <strong>Rep</strong> sets per-model instances and must total your persona count.
+                          </p>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </section>
+
+                {/* Provider Use Policy */}
+                <section className="settings-block">
+                  <div className="settings-block-head">
+                    <h3>Provider Policy</h3>
+                    <p className="helper-copy">How providers are distributed across simulation personas.</p>
+                  </div>
+                  <div className="settings-block-content">
+                    <div className="settings-field">
+                      <label>Distribution strategy</label>
+                      <select
+                        value={settings.simulation?.providerUsePolicy?.strategy ?? "use-all-selected"}
+                        onChange={(e) =>
+                          setSettings((c) => ({
+                            ...c,
+                            simulation: {
+                              ...c.simulation,
+                              providerUsePolicy: {
+                                ...c.simulation?.providerUsePolicy,
+                                strategy: e.target.value as "use-all-selected" | "weighted-distribution" | "tier-strict",
+                              },
+                            },
+                          }))
+                        }
+                      >
+                        <option value="use-all-selected">Use all selected providers</option>
+                        <option value="weighted-distribution">Weighted distribution</option>
+                        <option value="tier-strict">Strict tier routing</option>
+                      </select>
+                    </div>
+                    <div className="settings-field">
+                      <label>Fallback strategy</label>
+                      <select
+                        value={settings.simulation?.providerUsePolicy?.fallbackStrategy ?? "continue-with-remaining"}
+                        onChange={(e) =>
+                          setSettings((c) => ({
+                            ...c,
+                            simulation: {
+                              ...c.simulation,
+                              providerUsePolicy: {
+                                ...c.simulation?.providerUsePolicy,
+                                fallbackStrategy: e.target.value as "continue-with-remaining" | "retry-on-same-tier" | "fail-fast",
+                              },
+                            },
+                          }))
+                        }
+                      >
+                        <option value="continue-with-remaining">Continue with remaining providers</option>
+                        <option value="retry-on-same-tier">Retry on same tier</option>
+                        <option value="fail-fast">Fail fast</option>
+                      </select>
+                    </div>
+                    <div className="settings-field">
+                      <label className="settings-checkbox">
+                        <input
+                          type="checkbox"
+                          checked={settings.simulation?.providerUsePolicy?.enforceAllProvidersPerRun ?? true}
+                          onChange={(e) =>
+                            setSettings((c) => ({
+                              ...c,
+                              simulation: {
+                                ...c.simulation,
+                                providerUsePolicy: {
+                                  ...c.simulation?.providerUsePolicy,
+                                  enforceAllProvidersPerRun: e.target.checked,
+                                },
+                              },
+                            }))
+                          }
+                        />
+                        Enforce all providers per run
+                      </label>
+                    </div>
+                  </div>
+                </section>
+
+                {/* Past Simulations */}
+                <section className="settings-block">
+                  <div className="settings-block-head">
+                    <h3>Past Simulations</h3>
+                    <p className="helper-copy">Browse and manage previous swarm simulation runs.</p>
+                  </div>
+                  <div className="settings-block-content">
+                    <SimulationHistory />
                   </div>
                 </section>
               </div>

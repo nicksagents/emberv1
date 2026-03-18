@@ -4,6 +4,7 @@ import {
   resolveProviderContextWindowTokens,
 } from "@ember/core";
 import type { MemoryConfig, MemorySearchQuery, Provider, Role, Settings } from "@ember/core";
+import { inferModelCapabilities, shouldIncludeAdvancedPromptSections, type ModelTier } from "./model-capabilities.js";
 
 const MEMORY_CONTEXT_SOFT_CAP_TOKENS = 64_000;
 const MEMORY_CHAR_BUDGET_RATIO = 0.028;
@@ -40,6 +41,12 @@ export interface ExecutionModelProfile {
   compactToolset: boolean;
   /** Ultra-compact: strip optional properties and descriptions from tool schemas. */
   ultraCompactToolset: boolean;
+  /** Resolved model tier from capability profile. */
+  modelTier: ModelTier;
+  /** Whether metacognition, attention context, and procedure context should be included. */
+  includeAdvancedSections: boolean;
+  /** Maximum number of tools this model can handle effectively. 0 = unlimited. */
+  maxEffectiveTools: number;
 }
 
 export function resolveAdaptiveMemoryRetrievalBudget(
@@ -185,16 +192,23 @@ export function resolveExecutionModelProfile(
   contextPressure?: number,
 ): ExecutionModelProfile {
   const contextWindowTokens = resolveProviderContextWindowTokens(provider, settings);
+  const modelId = provider?.config.defaultModelId ?? provider?.availableModels[0] ?? "";
+  const capabilities = inferModelCapabilities(modelId, contextWindowTokens);
   // All models under 50k get compact prompts — a 35k model can't afford 3.7k of prompt overhead
   const compactProfile = contextWindowTokens <= COMPACT_CONTEXT_WINDOW_TOKENS;
   const ultraCompactProfile = contextWindowTokens <= ULTRA_COMPACT_CONTEXT_WINDOW_TOKENS;
+  // Tiny/small model tiers always get compact prompts regardless of context window
+  const tierCompact = capabilities.tier === "tiny" || capabilities.tier === "small";
   const pressureCompact = (contextPressure ?? 0) >= PRESSURE_COMPACT_FILL_RATIO;
-  const compactRolePrompt = compactProfile || ultraCompactProfile || pressureCompact;
+  const compactRolePrompt = compactProfile || ultraCompactProfile || tierCompact || pressureCompact;
 
   return {
     compactRolePrompt,
     compactToolPrompt: compactRolePrompt,
     compactToolset: compactRolePrompt,
-    ultraCompactToolset: ultraCompactProfile || (pressureCompact && compactProfile),
+    ultraCompactToolset: ultraCompactProfile || tierCompact || (pressureCompact && compactProfile),
+    modelTier: capabilities.tier,
+    includeAdvancedSections: shouldIncludeAdvancedPromptSections(capabilities.tier) && !pressureCompact,
+    maxEffectiveTools: capabilities.maxEffectiveTools,
   };
 }

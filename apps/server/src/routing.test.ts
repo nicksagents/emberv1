@@ -111,13 +111,33 @@ test("policy preserves follow-up continuity when the task type has not changed",
   assert.equal(result.shouldQueryDispatch, true);
 });
 
-test("policy marks smaller technical work as ambiguous coordinator-first routing", () => {
+test("policy routes explicit bug-fix execution to director", () => {
   const result = routeAutoRequestPolicy(
     makeRequest("fix this bug in the settings page"),
   );
 
-  assert.equal(result.decision.role, "coordinator");
+  assert.equal(result.decision.role, "director");
   assert.equal(result.shouldQueryDispatch, true);
+});
+
+test("dispatch phrase mapping: fix the login bug -> director", () => {
+  const result = routeAutoRequestPolicy(makeRequest("Fix the login bug"));
+  assert.equal(result.decision.role, "director");
+});
+
+test("dispatch phrase mapping: what does this function do -> coordinator", () => {
+  const result = routeAutoRequestPolicy(makeRequest("What does this function do?"));
+  assert.equal(result.decision.role, "coordinator");
+});
+
+test("dispatch phrase mapping: plan the new auth system -> advisor", () => {
+  const result = routeAutoRequestPolicy(makeRequest("Plan the new auth system"));
+  assert.equal(result.decision.role, "advisor");
+});
+
+test("dispatch phrase mapping: review the PR -> inspector", () => {
+  const result = routeAutoRequestPolicy(makeRequest("Review the PR"));
+  assert.equal(result.decision.role, "inspector");
 });
 
 test("dispatch input includes recent transcript and strict json instructions", () => {
@@ -139,7 +159,7 @@ test("dispatch input can include the policy fallback hint for the router model",
   const input = buildDispatchInput(request, policy.decision);
 
   assert.match(input, /policy_fallback/);
-  assert.match(input, /role=coordinator/);
+  assert.match(input, /role=director/);
   assert.match(input, /reason=/);
 });
 

@@ -4,7 +4,15 @@ import os from "node:os";
 import path from "node:path";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 
-import { appendNodeOption, buildRuntimeEnv, ensureLocalEnvFile, hasManagedRuntime, resolveEmberRoot } from "./runtime.js";
+import {
+  appendNodeOption,
+  buildRuntimeEnv,
+  ensureLocalEnvFile,
+  evaluateNodeRuntimeContract,
+  hasManagedRuntime,
+  parseNodeMajor,
+  resolveEmberRoot,
+} from "./runtime.js";
 
 function createWorkspaceFixture(): { root: string; nested: string } {
   const root = mkdtempSync(path.join(os.tmpdir(), "ember-cli-workspace-"));
@@ -82,4 +90,24 @@ test("ensureLocalEnvFile copies .env.example only when .env is missing", () => {
   writeFileSync(envPath, "EMBER_WEB_PORT=4010\n", "utf8");
   ensureLocalEnvFile(workspace.root);
   assert.equal(readFileSync(envPath, "utf8"), "EMBER_WEB_PORT=4010\n");
+});
+
+test("parseNodeMajor extracts valid major versions", () => {
+  assert.equal(parseNodeMajor("v22.9.0"), 22);
+  assert.equal(parseNodeMajor("20.15.1"), 20);
+  assert.equal(parseNodeMajor("invalid"), null);
+});
+
+test("evaluateNodeRuntimeContract reports minimum and sqlite support", () => {
+  const node18 = evaluateNodeRuntimeContract("v18.20.0");
+  assert.equal(node18.meetsMinimum, false);
+  assert.equal(node18.supportsSqlite, false);
+
+  const node20 = evaluateNodeRuntimeContract("v20.12.0");
+  assert.equal(node20.meetsMinimum, true);
+  assert.equal(node20.supportsSqlite, false);
+
+  const node22 = evaluateNodeRuntimeContract("v22.1.0");
+  assert.equal(node22.meetsMinimum, true);
+  assert.equal(node22.supportsSqlite, true);
 });

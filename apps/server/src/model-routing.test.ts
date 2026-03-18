@@ -7,6 +7,7 @@ import type { ChatRequest, Provider } from "@ember/core";
 import {
   buildAssignedModelFallbackDecision,
   buildModelDispatchInput,
+  formatModelRouteSource,
   parseModelDispatchDecision,
   resolveModelDispatchDecision,
   resolveModelRoutePolicy,
@@ -171,4 +172,70 @@ test("resolveModelDispatchDecision falls back when dispatch picks an invalid can
 
   assert.equal(decision.modelId, "gpt-5.3-codex");
   assert.equal(decision.source, "policy-fallback");
+});
+
+test("resolveModelRoutePolicy returns null decision when provider has no usable models", () => {
+  const provider = makeProvider("Empty", []);
+  provider.config.defaultModelId = "";
+
+  const result = resolveModelRoutePolicy({
+    role: "coordinator",
+    provider,
+    assignedModelId: null,
+    request: makeRequest("quick status check"),
+  });
+
+  assert.equal(result.decision.modelId, null);
+  assert.equal(result.shouldQueryDispatch, false);
+  assert.equal(result.candidates.length, 0);
+});
+
+test("resolveModelDispatchDecision keeps fallback when dispatch confidence is too low", () => {
+  const fallback = {
+    modelId: "gpt-5.4",
+    confidence: 0.78,
+    reason: "Policy-selected best match.",
+    source: "policy" as const,
+  };
+
+  const decision = resolveModelDispatchDecision(
+    '{"modelId":"gpt-5.3-codex","confidence":0.21,"reason":"too uncertain"}',
+    fallback,
+    [
+      { modelId: "gpt-5.4", summary: "reasoning-heavy" },
+      { modelId: "gpt-5.3-codex", summary: "coding-specialized" },
+    ],
+  );
+
+  assert.equal(decision.modelId, "gpt-5.4");
+  assert.equal(decision.source, "policy-fallback");
+});
+
+test("model policy honors deep-profile override and routes complex work to stronger models", () => {
+  const provider = makeProvider("Local", ["qwen3-8b", "qwen3-32b"]);
+
+  const baseline = resolveModelRoutePolicy({
+    role: "director",
+    provider,
+    assignedModelId: null,
+    request: makeRequest("check status"),
+  });
+  const override = resolveModelRoutePolicy({
+    role: "director",
+    provider,
+    assignedModelId: null,
+    request: makeRequest("check status"),
+    profileOverrides: {
+      complexityHigh: true,
+    },
+  });
+
+  assert.equal(baseline.decision.modelId, "qwen3-8b");
+  assert.equal(override.decision.modelId, "qwen3-32b");
+});
+
+test("formatModelRouteSource maps routing source labels", () => {
+  assert.equal(formatModelRouteSource("policy"), "model policy");
+  assert.equal(formatModelRouteSource("router-llm"), "dispatch");
+  assert.equal(formatModelRouteSource("policy-fallback"), "model policy fallback");
 });

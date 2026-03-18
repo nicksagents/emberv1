@@ -1,10 +1,25 @@
 import { Dirent, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, extname, join, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
+import { createFileMutationCheckpoint } from "../checkpoints.js";
+import { writeAuditEvent } from "../audit-log.js";
+import { CONFIG } from "../config.js";
 import type { EmberTool } from "./types.js";
 
-const MAX_READ_CHARS = 100_000;
-const DEFAULT_DIRECTORY_LIMIT = 200;
+const MAX_READ_CHARS = CONFIG.tools.maxReadChars;
+const DEFAULT_DIRECTORY_LIMIT = CONFIG.tools.defaultDirectoryLimit;
+const DENIED_PATH_PREFIXES = [
+  "/etc/shadow",
+  "/etc/gshadow",
+  "/.ssh",
+  "/id_rsa",
+  "/id_ed25519",
+  "/.gnupg",
+  "/.aws/credentials",
+  "/.docker/config.json",
+];
+const DENIED_BASENAME_PATTERN = /^\.env($|\.)/i;
+let workspaceRoot: string | null = null;
 
 function formatPath(inputPath: string): string {
   try {
@@ -12,6 +27,80 @@ function formatPath(inputPath: string): string {
   } catch {
     return inputPath;
   }
+}
+
+function normalizePathForChecks(value: string): string {
+  return value.replace(/\\/g, "/").toLowerCase();
+}
+
+function isPathWithinWorkspace(targetPath: string, rootPath: string): boolean {
+  const rel = relative(rootPath, targetPath);
+  return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
+}
+
+function validatePath(resolvedPath: string): string | null {
+  const normalizedPath = normalizePathForChecks(resolvedPath);
+  for (const prefix of DENIED_PATH_PREFIXES) {
+    const normalizedPrefix = normalizePathForChecks(prefix);
+    if (normalizedPath.includes(normalizedPrefix)) {
+      return `Path "${resolvedPath}" is blocked by security policy.`;
+    }
+  }
+
+  const lowerBasename = basename(resolvedPath).toLowerCase();
+  if (DENIED_BASENAME_PATTERN.test(lowerBasename)) {
+    return `Access to "${lowerBasename}" is blocked by security policy.`;
+  }
+
+  if (workspaceRoot && !isPathWithinWorkspace(resolvedPath, workspaceRoot)) {
+    return `Path "${resolvedPath}" is outside the configured workspace root "${workspaceRoot}".`;
+  }
+
+  return null;
+}
+
+function logDeniedPathAttempt(toolName: string, inputPath: string, resolvedPath: string, reason: string): void {
+  void writeAuditEvent({
+    action: "tool.path.denied",
+    method: "tool",
+    path: toolName,
+    ip: "local-session",
+    status: "denied",
+    details: {
+      tool: toolName,
+      inputPath,
+      resolvedPath,
+      reason,
+    },
+  }).catch(() => {
+    // Best-effort only for tool-level auditing.
+  });
+}
+
+function resolveValidatedPath(toolName: string, inputPath: string): { path: string | null; error: string | null } {
+  const resolvedPath = formatPath(inputPath);
+  const validationError = validatePath(resolvedPath);
+  if (validationError) {
+    logDeniedPathAttempt(toolName, inputPath, resolvedPath, validationError);
+    return {
+      path: null,
+      error: `Error: ${validationError}`,
+    };
+  }
+  return {
+    path: resolvedPath,
+    error: null,
+  };
+}
+
+export function setFileToolWorkspaceRoot(rootPath: string | null | undefined): void {
+  const trimmed = typeof rootPath === "string" ? rootPath.trim() : "";
+  workspaceRoot = trimmed ? formatPath(trimmed) : null;
+}
+
+function resolveCheckpointTurnKey(input: Record<string, unknown>): string | null {
+  const turnKey = typeof input.__sessionKey === "string" ? input.__sessionKey.trim() : "";
+  return turnKey || null;
 }
 
 function executeReadFile(input: Record<string, unknown>): string {
@@ -33,13 +122,18 @@ function executeReadFile(input: Record<string, unknown>): string {
 
   console.log(`[tool:read_file] ${filePath}`);
 
+  const { path: resolvedPath, error: pathError } = resolveValidatedPath("read_file", filePath);
+  if (!resolvedPath || pathError) {
+    return pathError ?? "Error: invalid path.";
+  }
+
   try {
-    const stats = statSync(filePath);
+    const stats = statSync(resolvedPath);
     if (stats.isDirectory()) {
       return `Error: ${filePath} is a directory. Use list_directory for folders.`;
     }
 
-    const content = readFileSync(filePath, "utf8");
+    const content = readFileSync(resolvedPath, "utf8");
     if (startLine !== null || endLine !== null) {
       const lines = content.split("\n");
       const from = startLine ?? 1;
@@ -67,7 +161,7 @@ function executeReadFile(input: Record<string, unknown>): string {
   }
 }
 
-function executeWriteFile(input: Record<string, unknown>): string {
+async function executeWriteFile(input: Record<string, unknown>): Promise<string> {
   const filePath = typeof input.path === "string" ? input.path : "";
   const content = typeof input.content === "string" ? input.content : "";
   const append = input.append === true;
@@ -75,16 +169,27 @@ function executeWriteFile(input: Record<string, unknown>): string {
 
   console.log(`[tool:write_file] ${filePath}${append ? " (append)" : ""}`);
 
+  const { path: resolvedPath, error: pathError } = resolveValidatedPath("write_file", filePath);
+  if (!resolvedPath || pathError) {
+    return pathError ?? "Error: invalid path.";
+  }
+
   try {
-    mkdirSync(dirname(filePath), { recursive: true });
-    writeFileSync(filePath, content, { encoding: "utf8", flag: append ? "a" : "w" });
-    return `${append ? "Appended" : "Written"}: ${filePath}`;
+    await createFileMutationCheckpoint({
+      paths: [resolvedPath],
+      reason: append ? "write_file:append" : "write_file",
+      turnKey: resolveCheckpointTurnKey(input),
+    });
+
+    mkdirSync(dirname(resolvedPath), { recursive: true });
+    writeFileSync(resolvedPath, content, { encoding: "utf8", flag: append ? "a" : "w" });
+    return `${append ? "Appended" : "Written"}: ${resolvedPath}`;
   } catch (err) {
     return `Error writing file: ${err instanceof Error ? err.message : String(err)}`;
   }
 }
 
-function executeEditFile(input: Record<string, unknown>): string {
+async function executeEditFile(input: Record<string, unknown>): Promise<string> {
   const filePath = typeof input.path === "string" ? input.path : "";
   const oldString = typeof input.old_string === "string" ? input.old_string : "";
   const newString = typeof input.new_string === "string" ? input.new_string : "";
@@ -98,25 +203,36 @@ function executeEditFile(input: Record<string, unknown>): string {
 
   console.log(`[tool:edit_file] ${filePath}${replaceAll ? " (replace_all)" : ""}`);
 
+  const { path: resolvedPath, error: pathError } = resolveValidatedPath("edit_file", filePath);
+  if (!resolvedPath || pathError) {
+    return pathError ?? "Error: invalid path.";
+  }
+
   try {
-    const current = readFileSync(filePath, "utf8");
+    await createFileMutationCheckpoint({
+      paths: [resolvedPath],
+      reason: "edit_file",
+      turnKey: resolveCheckpointTurnKey(input),
+    });
+
+    const current = readFileSync(resolvedPath, "utf8");
     const count = current.split(oldString).length - 1;
-    if (count === 0) return `Error: old_string not found in ${filePath}.`;
+    if (count === 0) return `Error: old_string not found in ${resolvedPath}.`;
     if (expectedReplacements !== null && count !== expectedReplacements) {
-      return `Error: old_string appears ${count} times in ${filePath}, expected ${expectedReplacements}.`;
+      return `Error: old_string appears ${count} times in ${resolvedPath}, expected ${expectedReplacements}.`;
     }
     if (!replaceAll && count > 1) {
-      return `Error: old_string appears ${count} times in ${filePath} — make it more specific or set replace_all=true.`;
+      return `Error: old_string appears ${count} times in ${resolvedPath} — make it more specific or set replace_all=true.`;
     }
     const updated = replaceAll ? current.split(oldString).join(newString) : current.replace(oldString, newString);
-    writeFileSync(filePath, updated, "utf8");
-    return `Edited: ${filePath} (${replaceAll ? count : 1} replacement${replaceAll || count !== 1 ? "s" : ""})`;
+    writeFileSync(resolvedPath, updated, "utf8");
+    return `Edited: ${resolvedPath} (${replaceAll ? count : 1} replacement${replaceAll || count !== 1 ? "s" : ""})`;
   } catch (err) {
     return `Error editing file: ${err instanceof Error ? err.message : String(err)}`;
   }
 }
 
-function executeDeleteFile(input: Record<string, unknown>): string {
+async function executeDeleteFile(input: Record<string, unknown>): Promise<string> {
   const filePath =
     typeof input.path === "string" && input.path.trim()
       ? input.path
@@ -129,13 +245,24 @@ function executeDeleteFile(input: Record<string, unknown>): string {
 
   console.log(`[tool:delete_file] ${filePath}${recursive ? " (recursive)" : ""}`);
 
+  const { path: resolvedPath, error: pathError } = resolveValidatedPath("delete_file", filePath);
+  if (!resolvedPath || pathError) {
+    return pathError ?? "Error: invalid path.";
+  }
+
   try {
-    const stats = statSync(filePath);
+    await createFileMutationCheckpoint({
+      paths: [resolvedPath],
+      reason: recursive ? "delete_file:recursive" : "delete_file",
+      turnKey: resolveCheckpointTurnKey(input),
+    });
+
+    const stats = statSync(resolvedPath);
     if (stats.isDirectory() && !recursive) {
-      return `Error: ${filePath} is a directory. Set recursive=true to delete directories.`;
+      return `Error: ${resolvedPath} is a directory. Set recursive=true to delete directories.`;
     }
-    rmSync(filePath, { recursive, force: false });
-    return `Deleted: ${filePath}`;
+    rmSync(resolvedPath, { recursive, force: false });
+    return `Deleted: ${resolvedPath}`;
   } catch (err) {
     return `Error deleting file: ${err instanceof Error ? err.message : String(err)}`;
   }
@@ -163,9 +290,14 @@ function executeStatPath(input: Record<string, unknown>): string {
 
   console.log(`[tool:stat_path] ${targetPath}`);
 
+  const { path: resolvedPath, error: pathError } = resolveValidatedPath("stat_path", targetPath);
+  if (!resolvedPath || pathError) {
+    return pathError ?? "Error: invalid path.";
+  }
+
   try {
-    const stats = lstatSync(targetPath);
-    const absolutePath = formatPath(targetPath);
+    const stats = lstatSync(resolvedPath);
+    const absolutePath = formatPath(resolvedPath);
     const type = stats.isDirectory()
       ? "directory"
       : stats.isFile()
@@ -183,15 +315,15 @@ function executeStatPath(input: Record<string, unknown>): string {
     ];
 
     if (type === "file") {
-      lines.push(`Extension: ${extname(targetPath) || "(none)"}`);
+      lines.push(`Extension: ${extname(resolvedPath) || "(none)"}`);
     }
 
     if (type === "directory") {
-      lines.push(`Entries: ${readdirSync(targetPath).length}`);
+      lines.push(`Entries: ${readdirSync(resolvedPath).length}`);
     }
 
     if (type === "symlink") {
-      lines.push(`Symlink target: ${readlinkSync(targetPath)}`);
+      lines.push(`Symlink target: ${readlinkSync(resolvedPath)}`);
     }
 
     return lines.join("\n");
@@ -267,15 +399,20 @@ function executeListDirectory(input: Record<string, unknown>): string {
 
   console.log(`[tool:list_directory] ${directoryPath}${recursive ? ` (depth=${depth})` : ""}`);
 
+  const { path: resolvedPath, error: pathError } = resolveValidatedPath("list_directory", directoryPath);
+  if (!resolvedPath || pathError) {
+    return pathError ?? "Error: invalid path.";
+  }
+
   try {
-    const stats = statSync(directoryPath);
+    const stats = statSync(resolvedPath);
     if (!stats.isDirectory()) {
-      return `Error: ${directoryPath} is not a directory.`;
+      return `Error: ${resolvedPath} is not a directory.`;
     }
 
-    const items = walkDirectory(directoryPath, depth, includeHidden, limit);
+    const items = walkDirectory(resolvedPath, depth, includeHidden, limit);
     const suffix = items.length >= limit ? `\n\n[truncated — reached limit ${limit}]` : "";
-    return `Directory: ${formatPath(directoryPath)}\nEntries: ${items.length}${suffix}\n\n${items.join("\n") || "(empty directory)"}`;
+    return `Directory: ${formatPath(resolvedPath)}\nEntries: ${items.length}${suffix}\n\n${items.join("\n") || "(empty directory)"}`;
   } catch (err) {
     return `Error listing directory: ${err instanceof Error ? err.message : String(err)}`;
   }

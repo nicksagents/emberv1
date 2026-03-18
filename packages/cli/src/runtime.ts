@@ -4,6 +4,17 @@ import path from "node:path";
 import { resolveRepoRoot, type RuntimeState } from "@ember/core";
 
 const WORKSPACE_MARKER = "pnpm-workspace.yaml";
+const MIN_NODE_MAJOR = 20;
+const SQLITE_NODE_MAJOR = 22;
+
+export interface NodeRuntimeContract {
+  version: string;
+  major: number | null;
+  minimumMajor: number;
+  sqliteMajor: number;
+  meetsMinimum: boolean;
+  supportsSqlite: boolean;
+}
 
 function isWorkspaceRoot(target: string): boolean {
   return existsSync(path.join(target, WORKSPACE_MARKER));
@@ -47,6 +58,27 @@ export function appendNodeOption(existing: string | undefined, option: string): 
     return current;
   }
   return `${current} ${option}`;
+}
+
+export function parseNodeMajor(version: string): number | null {
+  const match = version.trim().match(/^v?(\d+)/i);
+  if (!match) {
+    return null;
+  }
+  const major = Number.parseInt(match[1] ?? "", 10);
+  return Number.isFinite(major) ? major : null;
+}
+
+export function evaluateNodeRuntimeContract(version = process.version): NodeRuntimeContract {
+  const major = parseNodeMajor(version);
+  return {
+    version,
+    major,
+    minimumMajor: MIN_NODE_MAJOR,
+    sqliteMajor: SQLITE_NODE_MAJOR,
+    meetsMinimum: major !== null && major >= MIN_NODE_MAJOR,
+    supportsSqlite: major !== null && major >= SQLITE_NODE_MAJOR,
+  };
 }
 
 export function buildRuntimeEnv(options: {

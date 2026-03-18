@@ -11,16 +11,29 @@ import { skillManager } from "@ember/core/skills";
 import type { DeliveryWorkflowState } from "../delivery-workflow.js";
 import { resolveDeliveryWorkflowAfterHandoff } from "../delivery-workflow.js";
 
-// browserTool is intentionally NOT imported here — replaced by @playwright/mcp (Phase 3).
-// See apps/server/mcp.default.json and skills/playwright-browser/SKILL.md.
-// To roll back: re-import browserTool and add it to REGISTRY + ROLE_TOOLS.
 import { fetchPageTool } from "./fetch-page.js";
-import { deleteFileTool, editFileTool, listDirectoryTool, readFileTool, statPathTool, writeFileTool } from "./files.js";
+import {
+  deleteFileTool,
+  editFileTool,
+  listDirectoryTool,
+  readFileTool,
+  setFileToolWorkspaceRoot,
+  statPathTool,
+  writeFileTool,
+} from "./files.js";
 import { gitInspectTool } from "./git-inspect.js";
 import { handoffTool } from "./handoff.js";
 import { httpRequestTool } from "./http-request.js";
 import { credentialGetTool, credentialListTool, credentialSaveTool } from "./credentials.js";
-import { forgetMemoryTool, memoryGetTool, memorySearchTool, saveMemoryTool } from "./memory.js";
+import {
+  forgetMemoryTool,
+  memoryConsolidateTool,
+  memoryGetTool,
+  memorySearchTool,
+  saveMemoryTool,
+  unifiedMemorySearchTool,
+} from "./memory.js";
+import { sessionRecallTool } from "./session-recall.js";
 import { networkToolsTool } from "./network-tools.js";
 import { parallelTasksTool } from "./parallel-tasks.js";
 import { processManagerTool } from "./process-manager.js";
@@ -31,8 +44,35 @@ import { systemInfoTool } from "./system-info.js";
 import { setSudoPassword, terminalTool } from "./terminal.js";
 import type { EmberTool } from "./types.js";
 import { webSearchTool } from "./web-search.js";
+import { appMemorySaveTool, appMemorySearchTool, appMemoryGetTool, appMemoryDeleteTool, appMemoryListTool } from "./app-memory.js";
+import { discoverResourceTool } from "./resource-discovery.js";
+import { createDisposableEmailTool, checkDisposableInboxTool, manageAgentAccountsTool } from "./agent-identity.js";
+import { mcpSearchTool, mcpInstallTool, setMcpInstallContext } from "./mcp-manage.js";
+import {
+  createToolTool,
+  getCustomToolScope,
+  isCustomToolName,
+  setToolMakerContext,
+  loadCustomTools,
+} from "./tool-maker.js";
+import { swarmSimulateTool, swarmInterviewTool, swarmReportTool, setSwarmLlmCall, setSwarmEventSink } from "./swarm-simulation.js";
+import { codeSandboxTool } from "./code-sandbox.js";
+export { setMcpInstallContext } from "./mcp-manage.js";
+export type { McpInstallContext } from "./mcp-manage.js";
+export { setToolMakerContext, loadCustomTools } from "./tool-maker.js";
+export type { ToolMakerContext } from "./tool-maker.js";
+export { setSwarmLlmCall, setSwarmEventSink } from "./swarm-simulation.js";
+export {
+  loadToolPlugins,
+  cleanupPlugins,
+  getActivePlugins,
+  setActivePlugins,
+  type EmberToolPlugin,
+} from "./plugin-loader.js";
 
 export type { EmberTool };
+type CustomToolTrustMode = "disabled" | "local-only" | "allow";
+export type ParallelChildToolProfile = "standard" | "read-only" | "investigation" | "swarm-agent";
 
 // ─── Registry ─────────────────────────────────────────────────────────────────
 // Add your tool to this array to make it available to the system.
@@ -57,15 +97,33 @@ const BASE_REGISTRY: EmberTool[] = [
   credentialListTool,
   credentialGetTool,
   saveMemoryTool,
+  unifiedMemorySearchTool,
   memorySearchTool,
   memoryGetTool,
+  sessionRecallTool,
   forgetMemoryTool,
+  memoryConsolidateTool,
   parallelTasksTool,
   systemInfoTool,
   processManagerTool,
   networkToolsTool,
   sshExecuteTool,
-  // browserTool removed — replaced by @playwright/mcp (mcp__playwright__browser_*)
+  appMemorySaveTool,
+  appMemorySearchTool,
+  appMemoryGetTool,
+  appMemoryDeleteTool,
+  appMemoryListTool,
+  discoverResourceTool,
+  createDisposableEmailTool,
+  checkDisposableInboxTool,
+  manageAgentAccountsTool,
+  mcpSearchTool,
+  mcpInstallTool,
+  createToolTool,
+  swarmSimulateTool,
+  swarmInterviewTool,
+  swarmReportTool,
+  codeSandboxTool,
   handoffTool,
 ];
 
@@ -76,6 +134,87 @@ const TOOL_MAP = new Map<string, EmberTool>(
   REGISTRY.map((tool) => [tool.definition.name, tool]),
 );
 
+// ─── Tool priorities for model-adaptive filtering ──────────────────────────
+// Lower number = more essential. Used to cap tool count for small models.
+// Priority 1: Essential (always included)
+// Priority 2: Core workflow
+// Priority 3: Extended capabilities (default)
+// Priority 4: Advanced features
+// Priority 5: Specialized
+const TOOL_PRIORITY: Record<string, number> = {
+  // Priority 1: Essential
+  handoff: 1,
+  read_file: 1,
+  write_file: 1,
+  run_terminal_command: 1,
+
+  // Priority 2: Core workflow
+  edit_file: 2,
+  list_directory: 2,
+  search_files: 2,
+  save_memory: 2,
+  memory_recall: 2,
+  memory_search: 2,
+  stat_path: 2,
+
+  // Priority 3: Extended (default for unlisted tools)
+  web_search: 3,
+  fetch_page: 3,
+  http_request: 3,
+  git_inspect: 3,
+  project_overview: 3,
+  memory_get: 3,
+  delete_file: 3,
+
+  // Priority 4: Advanced
+  launch_parallel_tasks: 4,
+  swarm_simulate: 4,
+  session_recall: 4,
+  system_info: 4,
+  process_manager: 4,
+  forget_memory: 4,
+  memory_consolidate: 4,
+  create_tool: 4,
+
+  execute_code: 3,
+
+  // Priority 5: Specialized
+  ssh_execute: 5,
+  credential_save: 5,
+  credential_list: 5,
+  credential_get: 5,
+  mcp_search: 5,
+  mcp_install: 5,
+  network_tools: 5,
+  app_memory_save: 5,
+  app_memory_search: 5,
+  app_memory_get: 5,
+  app_memory_delete: 5,
+  app_memory_list: 5,
+  discover_resource: 5,
+  create_disposable_email: 5,
+  check_disposable_inbox: 5,
+  manage_agent_accounts: 5,
+  swarm_interview: 5,
+  swarm_report: 5,
+};
+
+function getToolPriority(tool: EmberTool): number {
+  return tool.priority ?? TOOL_PRIORITY[tool.definition.name] ?? 3;
+}
+
+/**
+ * Cap tools by model's effective tool limit.
+ * Sorts by priority (lower = more essential) and takes the first N.
+ */
+export function capToolsByModelLimit(tools: EmberTool[], maxTools: number): EmberTool[] {
+  if (tools.length <= maxTools) {
+    return tools;
+  }
+  const sorted = [...tools].sort((a, b) => getToolPriority(a) - getToolPriority(b));
+  return sorted.slice(0, maxTools);
+}
+
 // ─── Per-role tool sets ────────────────────────────────────────────────────────
 // Controls which tools each role can call. Roles not listed here get no tools.
 // MCP tools are appended to these arrays by registerMcpTools() at startup.
@@ -85,11 +224,11 @@ const TOOL_MAP = new Map<string, EmberTool>(
 // Roles: coordinator, advisor, director, inspector get mcp__playwright__browser_*
 const BASE_ROLE_TOOLS: Record<Role, EmberTool[]> = {
   dispatch:    [],
-  coordinator: [projectOverviewTool, gitInspectTool, statPathTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, credentialSaveTool, credentialListTool, credentialGetTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, parallelTasksTool, systemInfoTool, processManagerTool, networkToolsTool, sshExecuteTool, handoffTool],
-  advisor:     [projectOverviewTool, gitInspectTool, statPathTool, listDirectoryTool, searchFilesTool, readFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, credentialSaveTool, credentialListTool, credentialGetTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, parallelTasksTool, systemInfoTool, networkToolsTool, sshExecuteTool, handoffTool],
-  director:    [projectOverviewTool, gitInspectTool, statPathTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, credentialSaveTool, credentialListTool, credentialGetTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, parallelTasksTool, systemInfoTool, processManagerTool, networkToolsTool, sshExecuteTool, handoffTool],
-  inspector:   [projectOverviewTool, gitInspectTool, statPathTool, listDirectoryTool, searchFilesTool, readFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, credentialSaveTool, credentialListTool, credentialGetTool, saveMemoryTool, memorySearchTool, memoryGetTool, forgetMemoryTool, parallelTasksTool, systemInfoTool, processManagerTool, networkToolsTool, sshExecuteTool, handoffTool],
-  ops:         [editFileTool, deleteFileTool],
+  coordinator: [projectOverviewTool, gitInspectTool, statPathTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, credentialSaveTool, credentialListTool, credentialGetTool, saveMemoryTool, unifiedMemorySearchTool, memorySearchTool, memoryGetTool, sessionRecallTool, forgetMemoryTool, appMemorySaveTool, appMemorySearchTool, appMemoryGetTool, appMemoryDeleteTool, appMemoryListTool, discoverResourceTool, createDisposableEmailTool, checkDisposableInboxTool, manageAgentAccountsTool, parallelTasksTool, systemInfoTool, processManagerTool, networkToolsTool, sshExecuteTool, mcpSearchTool, mcpInstallTool, createToolTool, swarmSimulateTool, swarmInterviewTool, swarmReportTool, codeSandboxTool, handoffTool],
+  advisor:     [projectOverviewTool, gitInspectTool, statPathTool, listDirectoryTool, searchFilesTool, readFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, credentialSaveTool, credentialListTool, credentialGetTool, saveMemoryTool, unifiedMemorySearchTool, memorySearchTool, memoryGetTool, sessionRecallTool, forgetMemoryTool, appMemorySaveTool, appMemorySearchTool, appMemoryGetTool, appMemoryDeleteTool, appMemoryListTool, discoverResourceTool, createDisposableEmailTool, checkDisposableInboxTool, manageAgentAccountsTool, parallelTasksTool, systemInfoTool, networkToolsTool, sshExecuteTool, mcpSearchTool, mcpInstallTool, createToolTool, swarmSimulateTool, swarmInterviewTool, swarmReportTool, handoffTool],
+  director:    [projectOverviewTool, gitInspectTool, statPathTool, listDirectoryTool, searchFilesTool, readFileTool, writeFileTool, editFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, credentialSaveTool, credentialListTool, credentialGetTool, saveMemoryTool, unifiedMemorySearchTool, memorySearchTool, memoryGetTool, sessionRecallTool, forgetMemoryTool, appMemorySaveTool, appMemorySearchTool, appMemoryGetTool, appMemoryDeleteTool, appMemoryListTool, discoverResourceTool, createDisposableEmailTool, checkDisposableInboxTool, manageAgentAccountsTool, parallelTasksTool, systemInfoTool, processManagerTool, networkToolsTool, sshExecuteTool, mcpSearchTool, mcpInstallTool, createToolTool, swarmSimulateTool, swarmInterviewTool, swarmReportTool, codeSandboxTool, handoffTool],
+  inspector:   [projectOverviewTool, gitInspectTool, statPathTool, listDirectoryTool, searchFilesTool, readFileTool, terminalTool, webSearchTool, httpRequestTool, fetchPageTool, credentialSaveTool, credentialListTool, credentialGetTool, saveMemoryTool, unifiedMemorySearchTool, memorySearchTool, memoryGetTool, sessionRecallTool, forgetMemoryTool, appMemorySearchTool, appMemoryGetTool, appMemoryListTool, discoverResourceTool, manageAgentAccountsTool, parallelTasksTool, systemInfoTool, processManagerTool, networkToolsTool, sshExecuteTool, mcpSearchTool, mcpInstallTool, createToolTool, swarmSimulateTool, swarmInterviewTool, swarmReportTool, codeSandboxTool, handoffTool],
+  ops:         [editFileTool, deleteFileTool, memoryConsolidateTool],
 };
 
 const ROLE_TOOLS: Record<Role, EmberTool[]> = Object.fromEntries(
@@ -178,6 +317,45 @@ const COMPACT_TOOL_SELECTION_STOP_WORDS = new Set([
 ]);
 const OBSERVATION_SENSITIVE_KEY_PATTERN =
   /(^|_)(password|passcode|passwd|secret|token|api_key|access_token|refresh_token|auth_token|private_key|ssh_password|otp|pin)(_|$)/i;
+const CHILD_PROFILE_BLOCKED_TOOLS: Record<Exclude<ParallelChildToolProfile, "standard" | "swarm-agent">, Set<string>> = {
+  "read-only": new Set([
+    "write_file",
+    "edit_file",
+    "delete_file",
+    "run_terminal_command",
+    "process_manager",
+    "create_tool",
+    "mcp_install",
+    "credential_save",
+    "save_memory",
+    "forget_memory",
+    "app_memory_save",
+    "app_memory_delete",
+    "swarm_simulate",
+    "handoff",
+    "launch_parallel_tasks",
+  ]),
+  investigation: new Set([
+    "write_file",
+    "edit_file",
+    "delete_file",
+    "run_terminal_command",
+    "process_manager",
+    "create_tool",
+    "mcp_install",
+    "credential_save",
+    "credential_get",
+    "save_memory",
+    "forget_memory",
+    "app_memory_save",
+    "app_memory_delete",
+    "swarm_simulate",
+    "swarm_interview",
+    "ssh_execute",
+    "handoff",
+    "launch_parallel_tasks",
+  ]),
+};
 
 function toolResultToText(result: ToolResult): string {
   return typeof result === "string" ? result : result.text;
@@ -333,6 +511,53 @@ function scoreCompactToolRelevance(
   return score;
 }
 
+const SWARM_AGENT_ALLOWED_TOOLS = new Set([
+  "web_search",
+  "http_request",
+  "fetch_page",
+]);
+
+function isToolAllowedByChildProfile(
+  toolName: string,
+  profile: ParallelChildToolProfile,
+): boolean {
+  if (profile === "standard") {
+    return true;
+  }
+  if (profile === "swarm-agent") {
+    return SWARM_AGENT_ALLOWED_TOOLS.has(toolName);
+  }
+  // Child profiles are hard safety boundaries: block unknown MCP/custom tools
+  // unless they are explicitly allowed by the built-in profile policy.
+  if (toolName.startsWith("mcp__") || isCustomToolName(toolName)) {
+    return false;
+  }
+  const blocked = CHILD_PROFILE_BLOCKED_TOOLS[profile];
+  if (!blocked.has(toolName)) {
+    return true;
+  }
+  return false;
+}
+
+export function applyParallelChildToolProfile(
+  tools: ToolDefinition[],
+  profile: ParallelChildToolProfile,
+): ToolDefinition[] {
+  return tools.filter((tool) => isToolAllowedByChildProfile(tool.name, profile));
+}
+
+export function applyParallelChildToolProfileToSnapshot(
+  snapshot: ToolSnapshot,
+  profile: ParallelChildToolProfile,
+): ToolSnapshot {
+  if (profile === "standard") {
+    return snapshot;
+  }
+  return new Map(
+    [...snapshot.entries()].filter(([name]) => isToolAllowedByChildProfile(name, profile)),
+  );
+}
+
 function selectRelevantCompactMcpTools(
   tools: ToolDefinition[],
   contextText: string,
@@ -406,6 +631,9 @@ export function createToolHandler(options?: {
   toolSnapshot?: ToolSnapshot;
   parallelDepth?: number;
   contextWindowTokens?: number;
+  /** When true, the user has pinned a specific role. Handoff calls are rejected. */
+  rolePinned?: boolean;
+  customToolTrustMode?: CustomToolTrustMode;
   onParallelTasks?: (input: Record<string, unknown>) => Promise<import("@ember/core").ToolResult>;
   onToolResult?: (observation: MemoryToolObservation) => void;
 }) {
@@ -420,7 +648,24 @@ export function createToolHandler(options?: {
 
   return {
     async onToolCall(name: string, input: Record<string, unknown>): Promise<import("@ember/core").ToolResult> {
+      const customToolTrustMode = options?.customToolTrustMode ?? "allow";
+      if (!isToolAllowedByTrustMode(name, customToolTrustMode, input)) {
+        if (name === "create_tool") {
+          if (customToolTrustMode === "disabled") {
+            return "create_tool is disabled by settings (customTools.trustMode=disabled).";
+          }
+          return "create_tool can only create project-scoped tools when trust mode is local-only. Set scope=project.";
+        }
+        if (customToolTrustMode === "disabled") {
+          return `Custom tool "${name}" is disabled by settings (customTools.trustMode=disabled).`;
+        }
+        return `Custom tool "${name}" is blocked because trust mode is local-only and it is user-scoped.`;
+      }
+
       if (name === "handoff") {
+        if (options?.rolePinned) {
+          return `Handoff is disabled. The user selected the ${options.activeRole ?? "current"} role directly — you must handle the full task yourself. Do not attempt to hand off.`;
+        }
         if (pendingHandoff) {
           return `Handoff already registered for ${pendingHandoff.role}. Finish your response without calling handoff again.`;
         }
@@ -491,9 +736,20 @@ export function createToolHandler(options?: {
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
-export function setToolConfig(config: { sudoPassword?: string }) {
+export function setToolConfig(config: {
+  sudoPassword?: string;
+  sudoSessionKey?: string;
+  workspaceRoot?: string | null;
+}) {
   if (config.sudoPassword !== undefined) {
-    setSudoPassword(config.sudoPassword);
+    try {
+      setSudoPassword(config.sudoPassword, config.sudoSessionKey ?? "default");
+    } catch (error) {
+      console.warn(`[tool:terminal] ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  if (config.workspaceRoot !== undefined) {
+    setFileToolWorkspaceRoot(config.workspaceRoot);
   }
 }
 
@@ -518,6 +774,24 @@ export function replaceMcpTools(
   entries: Array<{ tool: EmberTool; roles: Role[] }>,
 ): void {
   ingestMcpTools(entries, true);
+}
+
+/**
+ * Register tools from loaded plugins into the tool registry.
+ * Plugin tools are namespaced (plugin:<id>:<name>) and treated like MCP tools.
+ */
+export function registerPluginTools(
+  plugins: import("./plugin-loader.js").EmberToolPlugin[],
+): void {
+  const entries: Array<{ tool: EmberTool; roles: Role[] }> = [];
+  for (const plugin of plugins) {
+    for (const tool of plugin.tools) {
+      entries.push({ tool, roles: plugin.roles });
+    }
+  }
+  if (entries.length > 0) {
+    ingestMcpTools(entries, false);
+  }
 }
 
 export function getToolsForRole(role: Role): ToolDefinition[] {
@@ -581,9 +855,15 @@ export function getExecutionToolsForRole(
     ultraCompact?: boolean;
     content?: string;
     conversation?: ChatMessage[];
+    customToolTrustMode?: CustomToolTrustMode;
+    /** Maximum number of tools this model can effectively use. */
+    maxEffectiveTools?: number;
   } = {},
 ): ToolDefinition[] {
-  const tools = selectExecutionToolsForRole(role, options);
+  let tools = selectExecutionToolsForRole(role, options);
+  if (options.maxEffectiveTools && options.maxEffectiveTools > 0) {
+    tools = capToolsByModelLimit(tools, options.maxEffectiveTools);
+  }
   if (!options.compact) {
     return tools.map((tool) => tool.definition);
   }
@@ -597,6 +877,7 @@ export function getExecutionToolSnapshotForRole(
     compact?: boolean;
     content?: string;
     conversation?: ChatMessage[];
+    customToolTrustMode?: CustomToolTrustMode;
   } = {},
 ): ToolSnapshot {
   return new Map(
@@ -610,9 +891,13 @@ function selectExecutionToolsForRole(
     compact?: boolean;
     content?: string;
     conversation?: ChatMessage[];
+    customToolTrustMode?: CustomToolTrustMode;
   } = {},
 ): EmberTool[] {
-  const tools = ROLE_TOOLS[role] ?? [];
+  const trustMode = options.customToolTrustMode ?? "allow";
+  const tools = (ROLE_TOOLS[role] ?? []).filter((tool) =>
+    isToolDefinitionAllowedByTrustMode(tool.definition.name, trustMode),
+  );
   if (!options.compact) {
     return [...tools];
   }
@@ -709,6 +994,10 @@ function selectExecutionToolsForRole(
     /\b(earlier|previous|last time|from before|past chat|past conversation|what do you remember|what do you know about me|you saved|memory)\b/i.test(
       contextText,
     );
+  const needsSessionRecall =
+    /\b(prior session|previous session|conversation history|chat history|full history|what happened before|earlier chats?|past chats?|last session|recall session)\b/i.test(
+      contextText,
+    ) || needsMemoryRecall;
   const needsSystemInfo =
     /\b(cpu|memory usage|ram|disk space|disk usage|system info|system resources|load average|load avg|how much memory|how much disk|what os|operating system|network interface|my ip|local ip)\b/i.test(
       contextText,
@@ -727,6 +1016,10 @@ function selectExecutionToolsForRole(
     );
   const needsPackageInstall =
     /\b(brew install|npm install|pip install|cargo install|apt install|apt-get install|install (?:the |a |package|library|tool|cli|module)|pnpm add|npx )\b/i.test(
+      contextText,
+    );
+  const needsCreateTool =
+    /\b(create tool|make tool|build tool|custom tool|new tool|tool maker|create_tool|need a tool|missing tool|no tool for)\b/i.test(
       contextText,
     );
 
@@ -785,8 +1078,12 @@ function selectExecutionToolsForRole(
     selected.add("credential_save");
   }
   if (needsMemoryRecall) {
+    selected.add("memory_recall");
     selected.add("memory_search");
     selected.add("memory_get");
+  }
+  if (needsSessionRecall) {
+    selected.add("session_recall");
   }
   if (needsMemoryMutation) {
     selected.add("save_memory");
@@ -807,6 +1104,9 @@ function selectExecutionToolsForRole(
   }
   if (needsSsh) {
     selected.add("network_tools");
+  }
+  if (needsCreateTool) {
+    selected.add("create_tool");
   }
 
   const compactMcpTools = selectRelevantCompactMcpTools(
@@ -900,8 +1200,14 @@ export function getToolSystemPrompt(
   if (toolNames.has("web_search") && toolNames.has("fetch_page")) {
     workflows.push("For external research: web_search auto-fetches the top 3 pages. Only use fetch_page if you need more content from a specific result or a URL you already have.");
   }
+  if (toolNames.has("memory_recall")) {
+    workflows.push("For cross-system recall: use memory_recall first to search saved memory plus prior sessions in one call.");
+  }
   if (toolNames.has("memory_search") && toolNames.has("memory_get")) {
-    workflows.push("For cross-session recall: memory_search first, then memory_get on the best id before asking the user to repeat themselves.");
+    workflows.push("For precise long-term-memory inspection: memory_search then memory_get on the best id.");
+  }
+  if (toolNames.has("session_recall")) {
+    workflows.push("For full prior-chat recall (not just saved memory facts): use session_recall with query + project/date/role/source filters to pull compact snippets.");
   }
   if (toolNames.has("credential_list") && toolNames.has("credential_get")) {
     workflows.push(
@@ -963,6 +1269,46 @@ export function getToolSystemPrompt(
       "For remote host actions: validate LAN/Tailscale reachability first, then ssh_execute action=test before action=run. Prefer credential vault entries over typing raw SSH passwords in prompts.",
     );
   }
+  if ([...toolNames].some((n) => n.startsWith("mcp__memory__"))) {
+    workflows.push(
+      "For structured knowledge: use knowledge graph memory (mcp__memory__*) to store entities and relations — architecture maps, project relationships, domain models. Use Ember's save_memory for simple facts and procedures.",
+    );
+  }
+  if ([...toolNames].some((n) => n.startsWith("mcp__github__"))) {
+    workflows.push(
+      "For GitHub operations: search_repositories or search_code to find repos/code, get_file_contents to read, create_or_update_file or push_files to write, list_issues/create_issue/create_pull_request for collaboration. Use native git tools for local repo work.",
+    );
+  }
+  if (toolNames.has("mcp__sequential_thinking__sequentialthinking")) {
+    workflows.push(
+      "For complex reasoning: use sequential thinking to decompose hard problems step by step before acting — architecture decisions, debugging strategies, multi-part analysis.",
+    );
+  }
+  if (toolNames.has("mcp_search") && toolNames.has("mcp_install")) {
+    workflows.push(
+      "When you lack a tool for a task: mcp_search to find an MCP server that provides it, then mcp_install to add it at runtime. New tools become available immediately. Check the curated registry first, then npm.",
+    );
+  }
+  if (toolNames.has("create_tool")) {
+    workflows.push(
+      "When you need a capability that no existing tool provides: use create_tool to build it at runtime. Write the code, test it immediately, and it persists for future sessions. Use list/view/delete actions to manage custom tools. Custom tools are sandboxed — use fetch() for HTTP, not require().",
+    );
+  }
+  if ([...toolNames].some((n) => n.startsWith("custom__"))) {
+    workflows.push(
+      "Custom tools (custom__*) were created with create_tool and are immediately available. Use them like any other tool.",
+    );
+  }
+  if (toolNames.has("mcp_resources")) {
+    workflows.push(
+      "For MCP server data: mcp_resources action=list to see what's available, then action=read with a server name and URI to fetch content. Resources expose contextual data (files, configs, live state) from connected MCP servers.",
+    );
+  }
+  if (toolNames.has("mcp_prompts")) {
+    workflows.push(
+      "For MCP prompt templates: mcp_prompts action=list to discover available prompts, then action=get with server name, prompt name, and any required arguments to retrieve the template.",
+    );
+  }
 
   if (options.compact) {
     const compactSkills = [...toolSkills, ...roleSkills]
@@ -1006,6 +1352,53 @@ export function getToolSystemPrompt(
 function buildToolSelectionContext(content: string, conversation: ChatMessage[]): string {
   const recentMessages = conversation.slice(-6).map((message) => message.content);
   return [content, ...recentMessages].join(" ").toLowerCase();
+}
+
+function isToolDefinitionAllowedByTrustMode(
+  name: string,
+  trustMode: CustomToolTrustMode,
+): boolean {
+  if (trustMode === "allow") {
+    return true;
+  }
+  if (name === "create_tool") {
+    return trustMode !== "disabled";
+  }
+  if (!isCustomToolName(name)) {
+    return true;
+  }
+  if (trustMode === "disabled") {
+    return false;
+  }
+  return getCustomToolScope(name) === "project";
+}
+
+function isToolAllowedByTrustMode(
+  name: string,
+  trustMode: CustomToolTrustMode,
+  input: Record<string, unknown>,
+): boolean {
+  if (trustMode === "allow") {
+    return true;
+  }
+  if (name === "create_tool") {
+    if (trustMode === "disabled") {
+      return false;
+    }
+    const action = typeof input.action === "string" ? input.action.toLowerCase() : "create";
+    if (action !== "create") {
+      return true;
+    }
+    const scope = typeof input.scope === "string" ? input.scope.toLowerCase() : "project";
+    return scope === "project";
+  }
+  if (!isCustomToolName(name)) {
+    return true;
+  }
+  if (trustMode === "disabled") {
+    return false;
+  }
+  return getCustomToolScope(name) === "project";
 }
 
 function compactToolDefinition(tool: ToolDefinition, ultraCompact = false): ToolDefinition {
@@ -1149,11 +1542,42 @@ export async function handleToolCall(
   return tool.execute(input);
 }
 
-function resolveTool(name: string, tools: ToolSnapshot = TOOL_MAP): EmberTool | null {
-  let tool = tools.get(name) ?? null;
+const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
+  swarn_simulate: "swarm_simulate",
+  swarn_interview: "swarm_interview",
+  swarn_report: "swarm_report",
+  swarm_simulation: "swarm_simulate",
+  swarm_sim: "swarm_simulate",
+};
 
-  if (!tool && !name.includes("__")) {
-    const suffix = `__${name}`;
+function normalizeToolAliasName(name: string, tools: ToolSnapshot): string {
+  const trimmed = name.trim();
+  if (!trimmed) return trimmed;
+  if (tools.has(trimmed)) return trimmed;
+
+  const directAlias = TOOL_NAME_ALIASES[trimmed.toLowerCase()];
+  if (directAlias && tools.has(directAlias)) {
+    return directAlias;
+  }
+
+  const swarnCandidate = trimmed.replace(/^swarn_/i, "swarm_");
+  if (swarnCandidate !== trimmed && tools.has(swarnCandidate)) {
+    return swarnCandidate;
+  }
+
+  return trimmed;
+}
+
+function resolveTool(name: string, tools: ToolSnapshot = TOOL_MAP): EmberTool | null {
+  const normalizedName = normalizeToolAliasName(name, tools);
+  if (normalizedName !== name) {
+    console.log(`[tools] alias resolved: "${name}" → "${normalizedName}"`);
+  }
+
+  let tool = tools.get(normalizedName) ?? null;
+
+  if (!tool && !normalizedName.includes("__")) {
+    const suffix = `__${normalizedName}`;
     const matches: EmberTool[] = [];
     for (const [registeredName, registeredTool] of tools) {
       if (registeredName.endsWith(suffix)) {
@@ -1161,11 +1585,11 @@ function resolveTool(name: string, tools: ToolSnapshot = TOOL_MAP): EmberTool | 
       }
     }
     if (matches.length === 1) {
-      console.log(`[tools] alias resolved: "${name}" → "${matches[0].definition.name}"`);
+      console.log(`[tools] alias resolved: "${normalizedName}" → "${matches[0].definition.name}"`);
       tool = matches[0];
     } else if (matches.length > 1) {
       console.warn(
-        `[tools] ambiguous tool alias "${name}" across: ${matches.map((candidate) => candidate.definition.name).join(", ")}`,
+        `[tools] ambiguous tool alias "${normalizedName}" across: ${matches.map((candidate) => candidate.definition.name).join(", ")}`,
       );
       return null;
     }

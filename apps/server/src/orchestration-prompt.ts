@@ -6,11 +6,11 @@ const ROUTEABLE_ROLES: Role[] = ["coordinator", "advisor", "director", "inspecto
 const ROLE_ORDER: Role[] = ["dispatch", "coordinator", "advisor", "director", "inspector", "ops"];
 const ROLE_LANES: Record<Role, string> = {
   dispatch: "routing only",
-  coordinator: "default execution, research, browsing, and short build loops",
-  advisor: "planning, architecture, and sequencing before implementation",
-  director: "deep implementation, debugging, and broad build/test/fix loops",
-  inspector: "review, QA, validation, and bug-finding",
-  ops: "safe cleanup and small polish only",
+  coordinator: "triage, research, investigation, orientation, and lightweight single-file edits",
+  advisor: "architecture, planning, and sequencing — never implements",
+  director: "primary implementation — code, build, test, fix, debug, refactor",
+  inspector: "review, QA, validation, and bug-finding — never implements fixes",
+  ops: "safe cosmetic cleanup only — naming, dead code, formatting",
 };
 
 function resolveAssignedModel(provider: Provider | null, assignment: RoleAssignment | undefined): string | null {
@@ -48,7 +48,7 @@ function toTitleCase(value: string): string {
     .join(" ");
 }
 
-function collectMcpServerRoster(): Array<{ serverName: string; roles: Role[] }> {
+function collectMcpServerRoster(): Array<{ serverName: string; roles: Role[]; hasResources: boolean; hasPrompts: boolean }> {
   const servers = new Map<string, Set<Role>>();
 
   for (const role of ROLES) {
@@ -69,10 +69,22 @@ function collectMcpServerRoster(): Array<{ serverName: string; roles: Role[] }> 
     }
   }
 
+  // Check for resource/prompt interaction tools (these indicate capability)
+  const allToolNames = new Set<string>();
+  for (const role of ROLES) {
+    for (const tool of getToolsForRole(role)) {
+      allToolNames.add(tool.name);
+    }
+  }
+  const hasResources = allToolNames.has("mcp_resources");
+  const hasPrompts = allToolNames.has("mcp_prompts");
+
   return Array.from(servers.entries())
     .map(([serverName, roles]) => ({
       serverName,
       roles: ROLE_ORDER.filter((role) => roles.has(role)),
+      hasResources,
+      hasPrompts,
     }))
     .sort((left, right) => left.serverName.localeCompare(right.serverName));
 }
@@ -98,7 +110,13 @@ export function buildOrchestrationPrompt(options: {
       .join("; ");
     const compactMcp = mcpRoster
       .slice(0, 3)
-      .map((entry) => `${entry.serverName}[${entry.roles.join("/")}]`)
+      .map((entry) => {
+        const caps: string[] = [];
+        if (entry.hasResources) caps.push("R");
+        if (entry.hasPrompts) caps.push("P");
+        const suffix = caps.length > 0 ? `+${caps.join("")}` : "";
+        return `${entry.serverName}[${entry.roles.join("/")}${suffix}]`;
+      })
       .join("; ");
 
     return [
@@ -117,7 +135,13 @@ export function buildOrchestrationPrompt(options: {
       const provider = options.providers.find((candidate) => candidate.id === assignment?.providerId) ?? null;
       return `- ${role}: ${ROLE_LANES[role]}. Lane: ${formatProviderLane(provider, assignment)}`;
     });
-  const mcpLines = mcpRoster.map((entry) => `- ${toTitleCase(entry.serverName)}: ${entry.roles.join(", ")}`);
+  const mcpLines = mcpRoster.map((entry) => {
+    const caps: string[] = [];
+    if (entry.hasResources) caps.push("resources");
+    if (entry.hasPrompts) caps.push("prompts");
+    const suffix = caps.length > 0 ? ` (+ ${caps.join(", ")})` : "";
+    return `- ${toTitleCase(entry.serverName)}: ${entry.roles.join(", ")}${suffix}`;
+  });
 
   return [
     `Current lane: ${currentLane}.`,

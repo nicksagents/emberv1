@@ -11,6 +11,7 @@ import {
   resolveProviderDispatchDecision,
   resolveProviderRoutePolicy,
 } from "./provider-routing.js";
+import { clearFailoverMetrics, recordProviderFailure } from "./failover.js";
 
 function makeProvider(options: {
   id: string;
@@ -141,23 +142,18 @@ test("assigned provider fallback keeps the explicit role lane when policy prefer
     baseUrl: "https://api.example.test/v1",
     models: ["gpt-5.4", "gpt-5.3-codex"],
   });
-
-  const policy = resolveProviderRoutePolicy({
-    role: "coordinator",
-    providers: [localProvider, codexProvider],
-    preferredProviderId: "provider_local",
-    request: makeRequest("go through the repo, inspect the tooling, and explain what you can do"),
-    settings,
-    requiresImages: false,
-  });
-
-  assert.equal(policy.decision.providerId, "provider_codex");
+  const policyDecision = {
+    providerId: "provider_codex",
+    confidence: 0.81,
+    reason: "Codex is the best fit for this step.",
+    source: "policy" as const,
+  };
 
   const fallback = buildAssignedProviderFallbackDecision({
     role: "coordinator",
     preferredProviderId: "provider_local",
     providers: [localProvider, codexProvider],
-    policyDecision: policy.decision,
+    policyDecision,
   });
 
   assert.equal(fallback.providerId, "provider_local");
@@ -207,4 +203,70 @@ test("resolveProviderDispatchDecision falls back when dispatch picks an invalid 
 
   assert.equal(decision.providerId, "provider_codex");
   assert.equal(decision.source, "policy-fallback");
+});
+
+test("provider policy filters providers that are circuit-broken", () => {
+  clearFailoverMetrics();
+  const localProvider = makeProvider({
+    id: "provider_local",
+    name: "Local Qwen",
+    models: ["Qwen3.5-35B-A3B-Q5_K_M.gguf"],
+  });
+  const codexProvider = makeProvider({
+    id: "provider_codex",
+    name: "Codex",
+    typeId: "codex-cli",
+    baseUrl: "https://api.example.test/v1",
+    models: ["gpt-5.4", "gpt-5.3-codex"],
+  });
+
+  const base = Date.now();
+  recordProviderFailure("provider_codex", base + 1_000);
+  recordProviderFailure("provider_codex", base + 2_000);
+  recordProviderFailure("provider_codex", base + 3_000);
+
+  const result = resolveProviderRoutePolicy({
+    role: "director",
+    providers: [localProvider, codexProvider],
+    preferredProviderId: "provider_codex",
+    request: makeRequest("implement auth across backend and frontend"),
+    settings,
+    requiresImages: false,
+  });
+
+  assert.equal(result.decision.providerId, "provider_local");
+  clearFailoverMetrics();
+});
+
+test("provider policy returns clear error when all providers are circuit-broken", () => {
+  clearFailoverMetrics();
+  const providerA = makeProvider({
+    id: "provider_a",
+    name: "Provider A",
+    models: ["model-a"],
+  });
+  const providerB = makeProvider({
+    id: "provider_b",
+    name: "Provider B",
+    models: ["model-b"],
+  });
+  const base = Date.now();
+  for (const providerId of ["provider_a", "provider_b"]) {
+    recordProviderFailure(providerId, base + 1_000);
+    recordProviderFailure(providerId, base + 2_000);
+    recordProviderFailure(providerId, base + 3_000);
+  }
+
+  const result = resolveProviderRoutePolicy({
+    role: "coordinator",
+    providers: [providerA, providerB],
+    preferredProviderId: "provider_a",
+    request: makeRequest("summarize status"),
+    settings,
+    requiresImages: false,
+  });
+
+  assert.equal(result.decision.providerId, null);
+  assert.match(result.decision.reason, /currently unavailable/i);
+  clearFailoverMetrics();
 });

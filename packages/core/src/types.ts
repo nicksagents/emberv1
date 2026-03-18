@@ -127,7 +127,43 @@ export interface Settings {
     webUrl: string;
     apiUrl: string;
   };
+  customTools: {
+    trustMode: "disabled" | "local-only" | "allow";
+  };
+  agent?: {
+    autoSimulate?: boolean;
+  };
   memory: MemoryConfig;
+  simulation?: {
+    defaultPersonaCount?: number;
+    defaultRoundCount?: number;
+    maxConcurrency?: number;
+    personaTimeoutMs?: number;
+    autoRetryOnParseFail?: boolean;
+    providerModelPool?: Array<{
+      providerId: string;
+      modelId: string;
+      usage: "persona" | "synthesis" | "both";
+      priority?: number;
+      enabled?: boolean;
+      replicas?: number;
+      weight?: number;
+      minPersonaSlotsPerRound?: number;
+    }>;
+    providerUsePolicy?: {
+      strategy?: "use-all-selected" | "weighted-distribution" | "tier-strict";
+      enforceAllProvidersPerRun?: boolean;
+      allowReplicaBurst?: boolean;
+      fallbackStrategy?: "continue-with-remaining" | "retry-on-same-tier" | "fail-fast";
+      minDistinctProviders?: number;
+    };
+    compactMode?: boolean;
+  };
+}
+
+export interface SettingsSecrets {
+  sudoPassword: string;
+  braveApiKey: string;
 }
 
 export interface RuntimeState {
@@ -248,6 +284,10 @@ export type ChatStreamEvent =
       text: string;
     }
   | {
+      type: "simulation";
+      event: SimulationStreamEvent;
+    }
+  | {
       type: "complete";
       message: ChatMessage;
       conversationId: string | null;
@@ -264,6 +304,27 @@ export type ChatStreamEvent =
       statusCode?: number;
     };
 
+// ─── Simulation Stream Events (for real-time chat visualization) ────────────
+
+export type SimulationStreamEvent =
+  | { type: "sim:start"; simulationId: string; title: string; scenario: string; personaCount: number; roundCount: number; domain: string }
+  | { type: "sim:persona"; simulationId: string; persona: { id: string; name: string; role: string; perspective: string; background: string } }
+  | { type: "sim:round-start"; simulationId: string; round: number; totalRounds: number }
+  | { type: "sim:persona-response"; simulationId: string; round: number; personaId: string; personaName: string; confidence: number; content: string; providerId?: string; modelId?: string }
+  | { type: "sim:round-synthesis"; simulationId: string; round: number; synthesis: string }
+  | { type: "sim:round-complete"; simulationId: string; round: number }
+  | { type: "sim:final"; simulationId: string; synthesis: string; probabilities: Record<string, number> | null }
+  | { type: "sim:complete"; simulationId: string; duration: number }
+  | { type: "sim:error"; simulationId: string; error: string };
+
+export interface ConversationUsage {
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  messageCount: number;
+  toolCallCount: number;
+  providerUsage: Record<string, { inputTokens: number; outputTokens: number }>;
+}
+
 export interface Conversation {
   id: string;
   title: string;
@@ -275,6 +336,7 @@ export interface Conversation {
   preview: string;
   messageCount: number;
   messages: ChatMessage[];
+  usage?: ConversationUsage;
 }
 
 export interface ConversationSummary {
@@ -332,6 +394,8 @@ export interface ProviderExecutionRequest {
   purpose?: "chat" | "route";
   tools?: ToolDefinition[];
   onToolCall?: (name: string, input: Record<string, unknown>) => Promise<ToolResult>;
+  onProviderSuccess?: (providerId: string) => void;
+  onProviderFailure?: (providerId: string, message: string) => void;
 }
 
 export interface TokenUsage {
@@ -344,4 +408,16 @@ export interface ProviderExecutionResult {
   modelId: string | null;
   thinking?: string | null;
   usage?: TokenUsage | null;
+}
+
+export interface TaskOutcome {
+  taskDescription: string;
+  approach: string;
+  result: "success" | "failure" | "partial";
+  failureReason?: string;
+  toolsUsed: string[];
+  providerUsed: string;
+  modelUsed: string;
+  duration: number;
+  timestamp: string;
 }

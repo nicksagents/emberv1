@@ -7,8 +7,10 @@ import { existsSync } from "node:fs";
 
 import { defaultMemoryConfig } from "./defaults";
 import { getItemInternalMetadata } from "./metadata";
-import { createMemoryRepository, initializeMemoryInfrastructure } from "./store";
-import { getMemorySqlitePath } from "./sqlite";
+import { createMemoryRepository, initializeMemoryInfrastructure, recordTaskOutcomeMemory } from "./store";
+import { getMemorySqlitePath, isNodeSqliteAvailable } from "./sqlite";
+
+const sqliteTest = isNodeSqliteAvailable() ? test : test.skip;
 
 test("file memory repository stores sessions and items", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "ember-memory-"));
@@ -544,7 +546,7 @@ test("retrieval success metadata boosts useful memories on future searches", asy
   }
 });
 
-test("initializeMemoryInfrastructure creates the SQLite database before first chat", async () => {
+sqliteTest("initializeMemoryInfrastructure creates the SQLite database before first chat", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "ember-memory-"));
   const previousRoot = process.env.EMBER_ROOT;
   process.env.EMBER_ROOT = tempRoot;
@@ -556,6 +558,44 @@ test("initializeMemoryInfrastructure creates the SQLite database before first ch
     await initializeMemoryInfrastructure(config);
 
     assert.equal(existsSync(getMemorySqlitePath(config)), true);
+  } finally {
+    if (previousRoot === undefined) {
+      delete process.env.EMBER_ROOT;
+    } else {
+      process.env.EMBER_ROOT = previousRoot;
+    }
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+sqliteTest("recordTaskOutcomeMemory stores tagged task outcomes for feedback lookup", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "ember-memory-"));
+  const previousRoot = process.env.EMBER_ROOT;
+  process.env.EMBER_ROOT = tempRoot;
+
+  try {
+    const config = defaultMemoryConfig();
+    config.backend = "sqlite";
+    const repository = createMemoryRepository(config);
+
+    const stored = await recordTaskOutcomeMemory(repository, {
+      taskDescription: "Deploy OAuth refresh token changes",
+      approach: "Patch the auth middleware and run integration checks",
+      result: "failure",
+      failureReason: "Expired token path was not refreshed.",
+      toolsUsed: ["search_files", "run_terminal_command"],
+      providerUsed: "provider_alpha",
+      modelUsed: "gpt-5.3-codex",
+      duration: 3_450,
+      timestamp: "2026-03-17T12:30:00.000Z",
+    });
+
+    assert.equal(stored.memoryType, "task_outcome");
+    assert.ok(stored.tags.includes("__task_outcome"));
+    assert.match(stored.content, /Task outcome \(failure\)/);
+    assert.equal(stored.jsonValue?.providerUsed, "provider_alpha");
+
+    await repository.close?.();
   } finally {
     if (previousRoot === undefined) {
       delete process.env.EMBER_ROOT;

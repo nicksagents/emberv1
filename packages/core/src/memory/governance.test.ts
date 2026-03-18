@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import nodeTest from "node:test";
 
 import { defaultMemoryConfig } from "./defaults";
 import {
@@ -13,7 +13,10 @@ import {
   retireProcedureMemory,
   suppressMemoryItem,
 } from "./governance";
+import { isNodeSqliteAvailable } from "./sqlite";
 import { createMemoryRepository } from "./store";
+
+const test = isNodeSqliteAvailable() ? nodeTest : nodeTest.skip;
 
 async function withRepository(
   fn: (repository: ReturnType<typeof createMemoryRepository>, config: ReturnType<typeof defaultMemoryConfig>) => Promise<void>,

@@ -30,5 +30,6 @@ tool, not just a note-taking shortcut.
 - Keep each task self-contained and explicit.
 - Prefer 2-4 tasks, not micro-fragmentation.
 - Default role is your current role. Set `role=auto` only when EMBER should decide.
-- Do not nest parallel fan-out. One layer is enough.
+- Use `profile=read-only` or `profile=investigation` for audit/research subtasks that should not mutate files.
+- Parallel fan-out depth/concurrency/time budgets are policy-limited and inherited by child runs.
 - After the results come back, synthesize them and either continue or hand off once.

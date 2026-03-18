@@ -9,6 +9,7 @@ import {
   type Settings,
 } from "@ember/core";
 import { isProductDeliveryRequest } from "./delivery-workflow.js";
+import { isProviderAvailable, isProviderAvailablePassive } from "./failover.js";
 
 export type ProviderRoutedRole = Exclude<Role, "dispatch">;
 
@@ -110,7 +111,7 @@ export function parseProviderDispatchDecision(content: string): DispatchProvider
   }
 }
 
-interface ProviderTaskProfile {
+export interface ProviderTaskProfile {
   simpleTask: boolean;
   browserOrResearch: boolean;
   codeHeavy: boolean;
@@ -122,7 +123,13 @@ interface ProviderTaskProfile {
   needsTools: boolean;
 }
 
-function buildTaskProfile(content: string, role: ProviderRoutedRole): ProviderTaskProfile {
+export interface ProviderTaskProfileOverrides {
+  complexityHigh?: boolean;
+  securityHeavy?: boolean;
+  planningHeavy?: boolean;
+}
+
+export function buildTaskProfile(content: string, role: ProviderRoutedRole): ProviderTaskProfile {
   const normalized = content.toLowerCase().trim();
   const taskCount = estimateTaskCount(normalized);
   const wordCount = normalized.split(/\s+/).filter(Boolean).length;
@@ -358,12 +365,17 @@ export function resolveProviderRoutePolicy(options: {
   request: Pick<ChatRequest, "content" | "conversation">;
   settings: Settings;
   requiresImages?: boolean;
+  profileOverrides?: ProviderTaskProfileOverrides;
 }): PolicyProviderRouteEvaluation {
-  const profile = buildTaskProfile(options.request.content, options.role);
+  const profile = {
+    ...buildTaskProfile(options.request.content, options.role),
+    ...(options.profileOverrides ?? {}),
+  };
 
   const scored = options.providers
     .filter((provider) => provider.status === "connected" && provider.capabilities.canChat)
     .filter((provider) => !options.requiresImages || provider.capabilities.canUseImages)
+    .filter((provider) => isProviderAvailable(provider.id))
     .map((provider) => {
       let score = 0;
       if (provider.id === options.preferredProviderId) {
@@ -409,10 +421,19 @@ export function resolveProviderRoutePolicy(options: {
     .sort((left, right) => right.score - left.score || left.provider.name.localeCompare(right.provider.name));
 
   if (scored.length === 0) {
+    const connectedProviders = options.providers
+      .filter((provider) => provider.status === "connected" && provider.capabilities.canChat)
+      .filter((provider) => !options.requiresImages || provider.capabilities.canUseImages);
+    const allCircuitBroken =
+      connectedProviders.length > 0 &&
+      connectedProviders.every((provider) => !isProviderAvailablePassive(provider.id));
+    const reason = allCircuitBroken
+      ? "All configured providers are currently unavailable due to circuit breakers."
+      : "No connected provider can satisfy this request.";
     return {
       decision: {
         providerId: null,
-        reason: "No connected provider can satisfy this request.",
+        reason,
         source: "policy",
         confidence: 1,
       },
@@ -466,7 +487,8 @@ export function buildAssignedProviderFallbackDecision(options: {
   const preferredProvider = options.providers.find((provider) =>
     provider.id === options.preferredProviderId &&
     provider.status === "connected" &&
-    provider.capabilities.canChat,
+    provider.capabilities.canChat &&
+    isProviderAvailablePassive(provider.id),
   );
 
   if (!preferredProvider) {

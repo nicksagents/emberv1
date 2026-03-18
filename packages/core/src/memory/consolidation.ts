@@ -1,7 +1,13 @@
+import os from "node:os";
+import path from "node:path";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+
 import { getHistorySummaryMessage, isHistorySummaryMessage } from "../conversation-compaction";
 import { redactSensitiveText } from "../privacy";
+import { getDataRoot } from "../store";
 import type { ChatMessage, Conversation } from "../types";
 import { defaultMemoryConfig } from "./defaults";
+import { getItemInternalMetadata } from "./metadata";
 import { extractProcedureMemory } from "./procedures";
 import type {
   MemoryConfig,
@@ -164,6 +170,16 @@ interface DistilledSemanticFact {
   revalidationDueAt?: string | null;
 }
 
+export interface ConsolidationReport {
+  merged: number;
+  promoted: number;
+  decayed: number;
+  timestamp: string;
+  dryRun: boolean;
+}
+
+const CONSOLIDATION_LOG_FILENAME = "consolidation-log.json";
+
 export async function consolidateConversationMemory(
   repository: MemoryRepository,
   input: ConversationMemoryConsolidationInput,
@@ -301,6 +317,232 @@ export async function consolidateConversationMemory(
     writtenItems: [...writtenItems, ...reinforcedItems],
     reinforcedItems,
   };
+}
+
+function normalizeFingerprint(content: string): string {
+  return content
+    .toLowerCase()
+    .replace(/[`"'.,:;!?()[\]{}]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildDuplicateGroups(items: MemoryItem[]): MemoryItem[][] {
+  const groups = new Map<string, MemoryItem[]>();
+  for (const item of items) {
+    if (item.supersededById || !item.content.trim()) {
+      continue;
+    }
+    const fingerprint = normalizeFingerprint(item.content);
+    if (!fingerprint) {
+      continue;
+    }
+    const key = `${item.scope}::${item.memoryType}::${fingerprint}`;
+    const bucket = groups.get(key);
+    if (bucket) {
+      bucket.push(item);
+    } else {
+      groups.set(key, [item]);
+    }
+  }
+  return [...groups.values()].filter((group) => group.length >= 2);
+}
+
+function chooseCanonicalMemory(group: MemoryItem[]): MemoryItem {
+  return [...group].sort((left, right) => {
+    const salienceDelta = right.salience - left.salience;
+    if (salienceDelta !== 0) return salienceDelta;
+    const confidenceDelta = right.confidence - left.confidence;
+    if (confidenceDelta !== 0) return confidenceDelta;
+    return right.updatedAt.localeCompare(left.updatedAt);
+  })[0]!;
+}
+
+interface RecurringPattern {
+  key: string;
+  sessions: Set<string>;
+  snippets: string[];
+}
+
+function extractRecurringPatternKey(content: string): string | null {
+  const normalized = normalizeFingerprint(content);
+  if (!normalized) return null;
+  const words = normalized.split(" ").filter(Boolean);
+  if (words.length < 4) return null;
+  const compact = words.slice(0, 8).join(" ");
+  return compact.length >= 24 ? compact : null;
+}
+
+function findRecurringPatterns(items: MemoryItem[]): RecurringPattern[] {
+  const patterns = new Map<string, RecurringPattern>();
+  for (const item of items) {
+    if (item.supersededById) continue;
+    if (!(item.memoryType === "episode_summary" || item.memoryType === "task_outcome" || item.memoryType === "warning_or_constraint")) {
+      continue;
+    }
+    const key = extractRecurringPatternKey(item.content);
+    if (!key) continue;
+    const session = item.sessionId ?? `session:${item.id}`;
+    const existing = patterns.get(key);
+    if (existing) {
+      existing.sessions.add(session);
+      if (existing.snippets.length < 3) {
+        existing.snippets.push(summarizeText(item.content, 140));
+      }
+    } else {
+      patterns.set(key, {
+        key,
+        sessions: new Set([session]),
+        snippets: [summarizeText(item.content, 140)],
+      });
+    }
+  }
+
+  return [...patterns.values()]
+    .filter((pattern) => pattern.sessions.size >= 5)
+    .sort((left, right) => right.sessions.size - left.sessions.size)
+    .slice(0, 8);
+}
+
+function findStaleMemories(items: MemoryItem[], maxAgeMs: number, nowMs: number): MemoryItem[] {
+  const cutoffMs = nowMs - maxAgeMs;
+  return items.filter((item) => {
+    if (item.supersededById) return false;
+    if (item.memoryType === "world_fact") return false;
+    if (item.volatility === "volatile") return false;
+    const meta = getItemInternalMetadata(item);
+    const lastAccess = meta.lastRetrievedAt ?? meta.lastReinforcedAt ?? item.updatedAt ?? item.createdAt;
+    const lastAccessMs = new Date(lastAccess).getTime();
+    if (!Number.isFinite(lastAccessMs)) return false;
+    return lastAccessMs < cutoffMs;
+  });
+}
+
+function resolveConsolidationLogPath(): string {
+  if (process.env.EMBER_ROOT?.trim()) {
+    return path.join(getDataRoot(), CONSOLIDATION_LOG_FILENAME);
+  }
+  return path.join(os.homedir(), ".ember", CONSOLIDATION_LOG_FILENAME);
+}
+
+async function persistConsolidationReport(report: ConsolidationReport): Promise<void> {
+  const logPath = resolveConsolidationLogPath();
+  await mkdir(path.dirname(logPath), { recursive: true });
+
+  let existing: ConsolidationReport[] = [];
+  try {
+    const raw = await readFile(logPath, "utf8");
+    const parsed = JSON.parse(raw) as unknown;
+    if (Array.isArray(parsed)) {
+      existing = parsed.filter((value): value is ConsolidationReport =>
+        Boolean(value) &&
+        typeof value === "object" &&
+        typeof (value as ConsolidationReport).timestamp === "string",
+      );
+    }
+  } catch {
+    existing = [];
+  }
+
+  const trimmed = [...existing.slice(-199), report];
+  await writeFile(logPath, JSON.stringify(trimmed, null, 2), { encoding: "utf8", mode: 0o600 });
+}
+
+export async function consolidateMemories(
+  memoryRepo: MemoryRepository,
+  options: { maxAge?: number; dryRun?: boolean } = {},
+): Promise<ConsolidationReport> {
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const nowMs = now.getTime();
+  const maxAge = options.maxAge ?? 30 * DAY_MS;
+  const dryRun = options.dryRun === true;
+  const items = await memoryRepo.listItems({ includeSuperseded: false });
+
+  const duplicateGroups = buildDuplicateGroups(items);
+  let merged = 0;
+  if (!dryRun) {
+    for (const group of duplicateGroups) {
+      const canonical = chooseCanonicalMemory(group);
+      for (const item of group) {
+        if (item.id === canonical.id) continue;
+        await memoryRepo.forgetItem(item.id, {
+          reason: `consolidation: merged into ${canonical.id}`,
+          now: nowIso,
+        });
+        merged += 1;
+      }
+      await memoryRepo.reinforceItem(canonical.id, {
+        now: nowIso,
+        salienceDelta: 0.02,
+        confidenceDelta: 0.01,
+        reinforcementDelta: 1,
+      });
+    }
+  } else {
+    merged = duplicateGroups.reduce((sum, group) => sum + Math.max(0, group.length - 1), 0);
+  }
+
+  const recurringPatterns = findRecurringPatterns(items);
+  let promoted = recurringPatterns.length;
+  if (!dryRun && recurringPatterns.length > 0) {
+    const existingPatternKeys = new Set(
+      items
+        .filter((item) => item.tags.includes("__consolidated_pattern"))
+        .map((item) => String(item.jsonValue?.patternKey ?? "")),
+    );
+    const candidates = recurringPatterns
+      .filter((pattern) => !existingPatternKeys.has(pattern.key))
+      .map((pattern) => ({
+        sessionId: null,
+        memoryType: "project_fact" as const,
+        scope: "workspace" as const,
+        content: `Recurring pattern across ${pattern.sessions.size} sessions: ${pattern.key}.`,
+        jsonValue: {
+          key: "recurring_pattern",
+          patternKey: pattern.key,
+          sessionCount: pattern.sessions.size,
+          examples: pattern.snippets,
+        },
+        tags: ["consolidated", "pattern", "__consolidated_pattern"],
+        sourceType: "system" as const,
+        sourceRef: "memory:consolidation",
+        confidence: 0.78,
+        salience: 0.72,
+        volatility: "slow-changing" as const,
+        observedAt: nowIso,
+      }));
+    promoted = candidates.length;
+    if (candidates.length > 0) {
+      await memoryRepo.upsertItems(candidates);
+    }
+  }
+
+  const stale = findStaleMemories(items, maxAge, nowMs);
+  let decayed = stale.length;
+  if (!dryRun) {
+    decayed = 0;
+    for (const item of stale) {
+      const updated = await memoryRepo.reinforceItem(item.id, {
+        now: nowIso,
+        salienceDelta: -0.05,
+        confidenceDelta: -0.03,
+      });
+      if (updated) {
+        decayed += 1;
+      }
+    }
+  }
+
+  const report: ConsolidationReport = {
+    merged,
+    promoted,
+    decayed,
+    timestamp: nowIso,
+    dryRun,
+  };
+  await persistConsolidationReport(report).catch(() => undefined);
+  return report;
 }
 
 export function buildMemoryRetrievalQuery(content: string, conversation: ChatMessage[]): string {
@@ -1479,7 +1721,7 @@ function buildTaskOutcomeCandidate(
       endReason,
       endedAt,
     },
-    tags: ["session", "outcome", "final", scope, ...cueTags],
+    tags: ["session", "outcome", "final", "__task_outcome", scope, ...cueTags],
     sourceType: "session_summary",
     confidence: 0.8,
     salience: scope === "workspace" ? 0.84 : 0.72,

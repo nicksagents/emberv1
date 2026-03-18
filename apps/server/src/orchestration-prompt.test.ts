@@ -113,6 +113,8 @@ test("buildRolePromptStack combines shared prompt, orchestration brief, and role
   });
 
   assert.match(promptStack.shared, /Current lane:.*dispatch/i);
+  assert.match(promptStack.role, /Dispatch role/i);
+  assert.match(promptStack.role, /do not execute tasks/i);
 });
 
 test("shared prompt tells active roles about workspace and host access", () => {

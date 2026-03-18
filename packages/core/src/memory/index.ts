@@ -9,3 +9,4 @@ export * from "./scoring";
 export * from "./sqlite";
 export * from "./store";
 export * from "./types";
+export * from "./unified-query";

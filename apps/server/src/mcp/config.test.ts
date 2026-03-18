@@ -22,6 +22,28 @@ function tempWorkspace(): string {
   return mkdtempSync(path.join(os.tmpdir(), "ember-mcp-config-"));
 }
 
+function withTemporaryHome<T>(run: () => T): T {
+  const previousHome = process.env.HOME;
+  const previousUserProfile = process.env.USERPROFILE;
+  const temporaryHome = mkdtempSync(path.join(os.tmpdir(), "ember-mcp-home-"));
+  process.env.HOME = temporaryHome;
+  process.env.USERPROFILE = temporaryHome;
+  try {
+    return run();
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    if (previousUserProfile === undefined) {
+      delete process.env.USERPROFILE;
+    } else {
+      process.env.USERPROFILE = previousUserProfile;
+    }
+  }
+}
+
 test("readResolvedMcpConfigState merges default then project config with source tracking", () => {
   const workspaceDir = tempWorkspace();
   const projectConfigPath = path.join(workspaceDir, ".ember", "mcp.json");
@@ -42,7 +64,7 @@ test("readResolvedMcpConfigState merges default then project config with source 
     },
   }, null, 2));
 
-  const state = readResolvedMcpConfigState({
+  const state = withTemporaryHome(() => readResolvedMcpConfigState({
     workspaceDir,
     defaultConfig: {
       mcpServers: {
@@ -58,7 +80,7 @@ test("readResolvedMcpConfigState merges default then project config with source 
         },
       },
     },
-  });
+  }));
 
   assert.equal(state.servers.length, 3);
   assert.equal(state.servers.find((entry) => entry.name === "playwright")?.sourceScope, "project");

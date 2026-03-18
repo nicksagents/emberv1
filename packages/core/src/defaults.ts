@@ -6,6 +6,7 @@ import type {
   RoleAssignment,
   RuntimeState,
   Settings,
+  SettingsSecrets,
 } from "./types";
 import { ROLES } from "./types";
 import type { MemoryConfig } from "./memory/types";
@@ -89,7 +90,34 @@ export const defaultSettings = (workspaceRoot: string): Settings => ({
     webUrl: "http://127.0.0.1:3000",
     apiUrl: "http://127.0.0.1:3005",
   },
+  customTools: {
+    trustMode: "local-only",
+  },
+  agent: {
+    autoSimulate: false,
+  },
   memory: defaultMemoryConfig(),
+  simulation: {
+    defaultPersonaCount: 8,
+    defaultRoundCount: 3,
+    maxConcurrency: 4,
+    personaTimeoutMs: 60_000,
+    autoRetryOnParseFail: true,
+    providerModelPool: [],
+    providerUsePolicy: {
+      strategy: "use-all-selected",
+      enforceAllProvidersPerRun: true,
+      allowReplicaBurst: true,
+      fallbackStrategy: "continue-with-remaining",
+      minDistinctProviders: 1,
+    },
+    compactMode: false,
+  },
+});
+
+export const defaultSettingsSecrets = (): SettingsSecrets => ({
+  sudoPassword: "",
+  braveApiKey: "",
 });
 
 export interface CompressionPromptBudget {
@@ -161,6 +189,7 @@ export function normalizeSettings(
   workspaceRoot: string,
 ): Settings {
   const defaults = defaultSettings(workspaceRoot);
+  const defaultAgent = defaults.agent ?? { autoSimulate: false };
   const compression = {
     ...defaults.compression,
     ...settings.compression,
@@ -219,6 +248,24 @@ export function normalizeSettings(
     runtimeInfo: {
       ...defaults.runtimeInfo,
       ...settings.runtimeInfo,
+    },
+    customTools: {
+      ...defaults.customTools,
+      ...settings.customTools,
+      trustMode:
+        settings.customTools?.trustMode === "disabled" ||
+        settings.customTools?.trustMode === "allow" ||
+        settings.customTools?.trustMode === "local-only"
+          ? settings.customTools.trustMode
+          : defaults.customTools.trustMode,
+    },
+    agent: {
+      ...defaultAgent,
+      ...settings.agent,
+      autoSimulate:
+        settings.agent?.autoSimulate === undefined
+          ? defaultAgent.autoSimulate
+          : settings.agent.autoSimulate === true,
     },
     memory: normalizeMemoryConfig(settings.memory as Partial<MemoryConfig> | undefined),
   };

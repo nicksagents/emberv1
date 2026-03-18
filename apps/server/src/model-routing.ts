@@ -207,6 +207,12 @@ interface ModelTaskProfile {
   simpleTask: boolean;
 }
 
+export interface ModelTaskProfileOverrides {
+  complexityHigh?: boolean;
+  securityHeavy?: boolean;
+  planningHeavy?: boolean;
+}
+
 function buildTaskProfile(content: string): ModelTaskProfile {
   const normalized = content.toLowerCase().trim();
   const taskCount = estimateTaskCount(normalized);
@@ -455,6 +461,7 @@ export function resolveModelRoutePolicy(options: {
   provider: Provider;
   assignedModelId: string | null;
   request: Pick<ChatRequest, "content" | "conversation">;
+  profileOverrides?: ModelTaskProfileOverrides;
 }): PolicyModelRouteEvaluation {
   const modelIds = dedupeModelIds(options.provider, options.assignedModelId);
   if (modelIds.length === 0) {
@@ -470,7 +477,10 @@ export function resolveModelRoutePolicy(options: {
     };
   }
 
-  const profile = buildTaskProfile(options.request.content);
+  const profile = {
+    ...buildTaskProfile(options.request.content),
+    ...(options.profileOverrides ?? {}),
+  };
   const scored = modelIds
     .map((modelId) => ({
       modelId,

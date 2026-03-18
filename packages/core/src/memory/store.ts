@@ -1,6 +1,7 @@
 import path from "node:path";
 
 import { getDataRoot, readJsonFile, writeJson } from "../store";
+import type { TaskOutcome } from "../types";
 import {
   createEmptyMemoryStoreData,
   createMemoryItem,
@@ -9,7 +10,7 @@ import {
 } from "./defaults";
 import { extendMemoryValidity, getItemInternalMetadata, mergeMemoryInternalMetadata } from "./metadata";
 import { buildMemoryPromptContext, scoreMemoryItems } from "./scoring";
-import { SqliteMemoryRepository } from "./sqlite";
+import { isNodeSqliteAvailable, SqliteMemoryRepository } from "./sqlite";
 import type {
   MemoryConfig,
   MemoryEdge,
@@ -21,6 +22,7 @@ import type {
   MemorySearchQuery,
   MemorySearchResult,
   MemorySession,
+  MemoryScope,
   MemoryStoreData,
   MemoryWriteCandidate,
 } from "./types";
@@ -257,9 +259,75 @@ export class FileMemoryRepository implements MemoryRepository {
 
 export function createMemoryRepository(config: MemoryConfig = defaultMemoryConfig()): MemoryRepository {
   if (config.backend === "sqlite") {
-    return new SqliteMemoryRepository(config);
+    if (isNodeSqliteAvailable()) {
+      return new SqliteMemoryRepository(config);
+    }
+    // Fall back to file backend when node:sqlite is not available (Node < 22)
+    return new FileMemoryRepository({ ...config, backend: "file" });
   }
   return new FileMemoryRepository(config);
+}
+
+function summarizeTaskOutcomeText(value: string, limit = 220): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "";
+  }
+  if (normalized.length <= limit) {
+    return normalized;
+  }
+  return `${normalized.slice(0, limit - 3)}...`;
+}
+
+export async function recordTaskOutcomeMemory(
+  repository: MemoryRepository,
+  outcome: TaskOutcome,
+  options: {
+    sessionId?: string | null;
+    scope?: MemoryScope;
+  } = {},
+): Promise<MemoryItem> {
+  const taskSummary = summarizeTaskOutcomeText(outcome.taskDescription, 160);
+  const approachSummary = summarizeTaskOutcomeText(outcome.approach, 120);
+  const failureReason = summarizeTaskOutcomeText(outcome.failureReason ?? "", 160);
+  const content = [
+    `Task outcome (${outcome.result}): ${taskSummary || "Task summary unavailable."}`,
+    approachSummary ? `Approach: ${approachSummary}` : "",
+    failureReason ? `Failure reason: ${failureReason}` : "",
+  ].filter(Boolean).join(" ");
+
+  const [item] = await repository.upsertItems([
+    {
+      sessionId: options.sessionId ?? null,
+      memoryType: "task_outcome",
+      scope: options.scope ?? "workspace",
+      content,
+      jsonValue: {
+        taskDescription: outcome.taskDescription,
+        approach: outcome.approach,
+        result: outcome.result,
+        failureReason: outcome.failureReason ?? null,
+        toolsUsed: outcome.toolsUsed,
+        providerUsed: outcome.providerUsed,
+        modelUsed: outcome.modelUsed,
+        duration: outcome.duration,
+        timestamp: outcome.timestamp,
+      },
+      tags: [
+        "__task_outcome",
+        "task-outcome",
+        outcome.result,
+        ...(outcome.toolsUsed.slice(0, 4).map((tool) => `tool:${tool}`)),
+      ],
+      sourceType: "system",
+      sourceRef: "system:task-outcome",
+      confidence: outcome.result === "failure" ? 0.9 : outcome.result === "partial" ? 0.8 : 0.72,
+      salience: outcome.result === "failure" ? 0.88 : 0.72,
+      volatility: "event",
+      observedAt: outcome.timestamp,
+    },
+  ]);
+  return item;
 }
 
 export async function initializeMemoryInfrastructure(

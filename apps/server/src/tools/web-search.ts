@@ -1,5 +1,6 @@
 import { readSettings } from "@ember/core";
 
+import { CONFIG } from "../config.js";
 import type { EmberTool } from "./types.js";
 
 interface SearchResult {
@@ -61,7 +62,7 @@ async function fetchBraveResults(
       "Accept-Encoding": "gzip",
       "X-Subscription-Token": apiKey,
     },
-    signal: AbortSignal.timeout(10_000),
+    signal: AbortSignal.timeout(CONFIG.tools.webSearchTimeoutMs),
   });
 
   if (!res.ok) {
